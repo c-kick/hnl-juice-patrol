@@ -4,18 +4,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN
+from . import JuicePatrolConfigEntry
 from .coordinator import JuicePatrolCoordinator
 
 
 async def async_get_config_entry_diagnostics(
-    hass: HomeAssistant, entry: ConfigEntry
+    hass: HomeAssistant, entry: JuicePatrolConfigEntry
 ) -> dict[str, Any]:
     """Return diagnostics for a config entry."""
-    coordinator: JuicePatrolCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator: JuicePatrolCoordinator = entry.runtime_data
 
     devices_diag: dict[str, Any] = {}
     for entity_id, info in (coordinator.data or {}).items():

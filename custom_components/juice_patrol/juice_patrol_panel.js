@@ -22,6 +22,8 @@ class JuicePatrolPanel extends HTMLElement {
     this._expandedGroups = new Set(); // track expanded shopping groups by battery_type
     this._filterText = ""; // text search filter
     this._filterCategory = null; // "low" | "stale" | "unavailable" | "pending" | "anomaly" | null
+    this._highlightEntity = null; // entity deep link from ?entity= param
+    this._highlightApplied = false; // true once we've scrolled + highlighted
   }
 
   disconnectedCallback() {
@@ -34,6 +36,11 @@ class JuicePatrolPanel extends HTMLElement {
   set hass(hass) {
     const firstLoad = !this._hass;
     this._hass = hass;
+    if (firstLoad) {
+      const params = new URLSearchParams(window.location.search);
+      const entityParam = params.get("entity");
+      if (entityParam) this._highlightEntity = entityParam;
+    }
     this._updateEntities();
     if (!this._settingsOpen) {
       // Only re-render if entity data actually changed
@@ -44,6 +51,25 @@ class JuicePatrolPanel extends HTMLElement {
       }
     }
     if (firstLoad) this._loadConfig();
+    if (this._highlightEntity && !this._highlightApplied) {
+      this._applyDeepLinkHighlight();
+    }
+  }
+
+  set narrow(val) { this._narrow = val; }
+
+  set panel(val) { this._panel = val; }
+
+  _applyDeepLinkHighlight() {
+    if (!this._highlightEntity || this._highlightApplied) return;
+    const row = this.shadowRoot.querySelector(`.device-row[data-entity="${this._highlightEntity}"]`);
+    if (!row) return;
+    this._highlightApplied = true;
+    requestAnimationFrame(() => {
+      row.scrollIntoView({ behavior: "smooth", block: "center" });
+      row.classList.add("highlighted");
+      setTimeout(() => row.classList.remove("highlighted"), 3000);
+    });
   }
 
   _computeHash() {
@@ -112,16 +138,34 @@ class JuicePatrolPanel extends HTMLElement {
     }
   }
 
+  async _recalculate(entityId) {
+    try {
+      await this._hass.callWS({ type: "juice_patrol/recalculate", entity_id: entityId });
+      this._showToast("Prediction recalculated");
+    } catch (e) {
+      const msg = e?.message?.includes("unknown command")
+        ? "Restart Home Assistant to enable recalculation"
+        : "Recalculation failed";
+      this._showToast(msg);
+    }
+  }
+
   async _refresh() {
     if (this._refreshing) return;
     this._refreshing = true;
-    this._showToast("Refreshing...");
+    const btn = this.shadowRoot.getElementById('refreshBtn');
+    if (btn) btn.classList.add('spinning');
     try {
       await this._hass.callWS({ type: "juice_patrol/refresh" });
+      this._showToast("Predictions refreshed");
     } catch (e) {
       this._showToast("Refresh failed");
     }
-    setTimeout(() => { this._refreshing = false; }, 2000);
+    setTimeout(() => {
+      this._refreshing = false;
+      const btn = this.shadowRoot.getElementById('refreshBtn');
+      if (btn) { btn.classList.remove('spinning'); btn.disabled = false; }
+    }, 2000);
   }
 
   async _loadShoppingList() {
@@ -796,21 +840,51 @@ class JuicePatrolPanel extends HTMLElement {
       style.textContent = `
         :host {
           display: block;
-          padding: 16px;
           font-family: var(--primary-font-family, Roboto, sans-serif);
           color: var(--primary-text-color);
           background: var(--primary-background-color);
           --card-bg: var(--ha-card-background, var(--card-background-color, #fff));
           --border: var(--divider-color, rgba(0,0,0,.12));
+          height: 100%;
+          overflow: hidden;
         }
-        .header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
-        .header h1 { margin: 0; font-size: 24px; font-weight: 400; flex: 1; }
-        .settings-toggle {
-          background: none; border: none; cursor: pointer;
-          color: var(--secondary-text-color); padding: 8px; border-radius: 50%;
-          display: flex; align-items: center;
+        .toolbar {
+          display: flex;
+          align-items: center;
+          font-size: 20px;
+          height: var(--header-height, 56px);
+          font-weight: 400;
+          color: var(--sidebar-text-color, var(--app-header-text-color, var(--primary-text-color)));
+          background-color: var(--sidebar-background-color, var(--app-header-background-color, var(--primary-background-color)));
+          border-bottom: 1px solid var(--divider-color);
+          box-sizing: border-box;
+          padding: 8px 12px;
+          position: sticky;
+          top: 0;
+          z-index: 5;
         }
-        .settings-toggle:hover { background: var(--secondary-background-color); color: var(--primary-text-color); }
+        .toolbar ha-menu-button {
+          pointer-events: auto;
+          color: var(--sidebar-icon-color);
+        }
+        .toolbar .main-title {
+          margin-inline-start: 24px;
+          line-height: 1.5;
+          flex-grow: 1;
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .toolbar ha-icon-button {
+          color: var(--sidebar-icon-color, var(--secondary-text-color));
+        }
+        #jp-content {
+          padding: 16px;
+          height: calc(100% - var(--header-height, 56px));
+          overflow-y: auto;
+          box-sizing: border-box;
+        }
         .summary { display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }
         .summary-card {
           background: var(--card-bg); border-radius: 12px;
@@ -1038,6 +1112,18 @@ class JuicePatrolPanel extends HTMLElement {
         .device-row.attention.just-updated-up { animation: jp-flash-up-attention 2.5s ease-out; }
         .device-row.attention.just-updated-down { animation: jp-flash-down-attention 2.5s ease-out; }
 
+        /* Deep link highlight animation */
+        @keyframes jp-highlight-pulse {
+          0% { background: color-mix(in srgb, var(--primary-color) 30%, transparent); }
+          50% { background: color-mix(in srgb, var(--primary-color) 10%, transparent); }
+          100% { background: transparent; }
+        }
+        .device-row.highlighted { animation: jp-highlight-pulse 3s ease-out; }
+
+        /* Refresh spin animation */
+        @keyframes jp-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        ha-icon-button.spinning ha-icon { animation: jp-spin 1s linear infinite; }
+
         /* Reliability badge */
         .reliability-cell { text-align: center !important; }
         .reliability-badge {
@@ -1114,22 +1200,54 @@ class JuicePatrolPanel extends HTMLElement {
         }
       `;
       this.shadowRoot.appendChild(style);
+
+      // Toolbar — lives outside the content container so it's never destroyed on re-render
+      this._toolbar = document.createElement("div");
+      this._toolbar.className = "toolbar";
+      this._toolbar.innerHTML = `
+        <ha-menu-button></ha-menu-button>
+        <div class="main-title">Juice Patrol</div>
+        <ha-icon-button id="refreshBtn" title="Re-fetch all battery data and recalculate predictions">
+          <ha-icon icon="mdi:refresh"></ha-icon>
+        </ha-icon-button>
+        <ha-icon-button id="toggleSettings" title="Settings">
+          <ha-icon icon="mdi:cog"></ha-icon>
+        </ha-icon-button>
+      `;
+      this.shadowRoot.appendChild(this._toolbar);
+
+      // Set HA properties on menu button
+      const menuBtn = this._toolbar.querySelector("ha-menu-button");
+      if (menuBtn) {
+        menuBtn.hass = this._hass;
+        menuBtn.narrow = this._narrow;
+      }
+
+      // Bind toolbar button events (once, since toolbar is stable)
+      this._toolbar.querySelector("#refreshBtn")?.addEventListener("click", () => this._refresh());
+      this._toolbar.querySelector("#toggleSettings")?.addEventListener("click", () => {
+        this._settingsOpen = !this._settingsOpen;
+        if (this._settingsOpen) {
+          this._settingsDirty = false;
+          this._loadConfig();
+        } else {
+          this._render();
+        }
+      });
+
       this._container = document.createElement("div");
       this._container.id = "jp-content";
       this.shadowRoot.appendChild(this._container);
     }
 
+    // Update menu button hass/narrow on every render
+    const menuBtn = this._toolbar?.querySelector("ha-menu-button");
+    if (menuBtn) {
+      menuBtn.hass = this._hass;
+      menuBtn.narrow = this._narrow;
+    }
+
     this._container.innerHTML = `
-      <div class="header">
-        <ha-icon icon="mdi:battery-heart" style="--mdc-icon-size:28px"></ha-icon>
-        <h1>Juice Patrol</h1>
-        <button class="settings-toggle" id="refreshBtn" title="Refresh (invalidate cache)" ${this._refreshing ? 'disabled' : ''}>
-          <ha-icon icon="mdi:refresh" style="--mdc-icon-size:22px"></ha-icon>
-        </button>
-        <button class="settings-toggle" id="toggleSettings" title="Settings">
-          <ha-icon icon="mdi:cog" style="--mdc-icon-size:22px"></ha-icon>
-        </button>
-      </div>
 
       <div class="summary">
         <div class="summary-card clickable ${this._filterCategory === null ? 'active-filter' : ''}" data-filter="">
@@ -1298,9 +1416,6 @@ class JuicePatrolPanel extends HTMLElement {
   }
 
   _bindEvents() {
-    // Refresh button
-    this.shadowRoot.getElementById('refreshBtn')?.addEventListener('click', () => this._refresh());
-
     // Tab bar
     this.shadowRoot.querySelectorAll('.tab').forEach(tab => {
       tab.addEventListener('click', () => {
@@ -1375,15 +1490,7 @@ class JuicePatrolPanel extends HTMLElement {
       this._render();
     });
 
-    this.shadowRoot.getElementById('toggleSettings')?.addEventListener('click', () => {
-      this._settingsOpen = !this._settingsOpen;
-      if (this._settingsOpen) {
-        this._settingsDirty = false;
-        this._loadConfig();
-      } else {
-        this._render();
-      }
-    });
+    // toggleSettings is bound once in toolbar setup
 
     this.shadowRoot.querySelectorAll('.setting-input input').forEach(input => {
       input.addEventListener('input', () => {
@@ -1460,6 +1567,10 @@ class JuicePatrolPanel extends HTMLElement {
           <ha-icon icon="mdi:battery-sync" style="--mdc-icon-size:18px"></ha-icon>
           Mark as replaced
         </button>
+        <button class="jp-menu-item" data-action="recalculate">
+          <ha-icon icon="mdi:calculator-variant" style="--mdc-icon-size:18px"></ha-icon>
+          Recalculate
+        </button>
         <button class="jp-menu-item" data-action="type">
           <ha-icon icon="mdi:battery-heart-variant" style="--mdc-icon-size:18px"></ha-icon>
           Set battery type${dev?.batteryType ? ` (${this._esc(dev.batteryType)})` : ''}
@@ -1479,6 +1590,8 @@ class JuicePatrolPanel extends HTMLElement {
         const action = item.dataset.action;
         if (action === "replace") {
           this._markReplaced(sourceEntity);
+        } else if (action === "recalculate") {
+          this._recalculate(sourceEntity);
         } else if (action === "type") {
           this._setBatteryType(sourceEntity, dev?.batteryType);
         }

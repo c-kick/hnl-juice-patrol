@@ -9,24 +9,28 @@ from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
 )
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.const import EntityCategory
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from . import JuicePatrolConfigEntry
 from .const import DOMAIN
 from .coordinator import JuicePatrolCoordinator
 from .entity import JUICE_PATROL_DEVICE_INFO, JuicePatrolEntity, slugify_entity
 
 _LOGGER = logging.getLogger(__name__)
 
+PARALLEL_UPDATES = 0
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: JuicePatrolConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Juice Patrol binary sensors."""
-    coordinator: JuicePatrolCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator: JuicePatrolCoordinator = entry.runtime_data
     known: set[str] = set()
 
     def _create_binary_sensors(entity_ids: list[str]) -> None:
@@ -55,6 +59,7 @@ async def async_setup_entry(
 class JuicePatrolBatteryLow(JuicePatrolEntity, BinarySensorEntity):
     """Binary sensor that is on when a device's battery is below threshold."""
 
+    _attr_translation_key = "battery_low"
     _attr_device_class = BinarySensorDeviceClass.BATTERY
 
     def __init__(
@@ -66,7 +71,7 @@ class JuicePatrolBatteryLow(JuicePatrolEntity, BinarySensorEntity):
     ) -> None:
         super().__init__(
             coordinator, source_entity_id, slug, info,
-            id_suffix="battery_low", name_suffix="Battery Low",
+            id_suffix="battery_low",
         )
 
     @property
@@ -87,8 +92,10 @@ class JuicePatrolBatteryLow(JuicePatrolEntity, BinarySensorEntity):
 class JuicePatrolStale(JuicePatrolEntity, BinarySensorEntity):
     """Binary sensor that is on when a device hasn't reported recently."""
 
+    _attr_translation_key = "stale"
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
-    _attr_icon = "mdi:clock-alert"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
 
     def __init__(
         self,
@@ -99,7 +106,7 @@ class JuicePatrolStale(JuicePatrolEntity, BinarySensorEntity):
     ) -> None:
         super().__init__(
             coordinator, source_entity_id, slug, info,
-            id_suffix="stale", name_suffix="Stale",
+            id_suffix="stale",
         )
 
     @property
@@ -115,32 +122,22 @@ class JuicePatrolStale(JuicePatrolEntity, BinarySensorEntity):
         }
 
 
-class JuicePatrolAttentionNeeded(BinarySensorEntity):
+class JuicePatrolAttentionNeeded(
+    CoordinatorEntity[JuicePatrolCoordinator], BinarySensorEntity
+):
     """Summary binary sensor: on when ANY device needs attention."""
 
+    _attr_translation_key = "attention_needed"
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
     _attr_has_entity_name = True
-    _attr_icon = "mdi:battery-alert-variant"
 
     def __init__(self, coordinator: JuicePatrolCoordinator) -> None:
-        self.coordinator = coordinator
+        super().__init__(coordinator)
         self._attr_unique_id = f"{DOMAIN}_attention_needed"
-        self._attr_name = "Attention Needed"
 
     @property
     def device_info(self):
         return JUICE_PATROL_DEVICE_INFO
-
-    @property
-    def should_poll(self) -> bool:
-        return False
-
-    async def async_added_to_hass(self) -> None:
-        self.async_on_remove(
-            self.coordinator.async_add_listener(
-                self._handle_coordinator_update
-            )
-        )
 
     @property
     def is_on(self) -> bool | None:
@@ -166,7 +163,3 @@ class JuicePatrolAttentionNeeded(BinarySensorEntity):
             "stale_count": len(stale),
             "monitored_devices": len(data),
         }
-
-    @callback
-    def _handle_coordinator_update(self) -> None:
-        self.async_write_ha_state()

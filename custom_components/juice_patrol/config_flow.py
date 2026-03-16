@@ -76,6 +76,66 @@ class JuicePatrolConfigFlow(ConfigFlow, domain=DOMAIN):
             ),
         )
 
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Handle reconfiguration."""
+        entry = self.hass.config_entries.async_get_entry(
+            self.context["entry_id"]
+        )
+        assert entry is not None
+        options = entry.options
+
+        if user_input is not None:
+            return self.async_update_reload_and_abort(
+                entry,
+                options={
+                    CONF_LOW_THRESHOLD: int(user_input[CONF_LOW_THRESHOLD]),
+                    CONF_STALE_TIMEOUT: int(user_input[CONF_STALE_TIMEOUT]),
+                    CONF_PREDICTION_HORIZON: int(
+                        user_input[CONF_PREDICTION_HORIZON]
+                    ),
+                },
+            )
+
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_LOW_THRESHOLD,
+                        default=options.get(
+                            CONF_LOW_THRESHOLD, DEFAULT_LOW_THRESHOLD
+                        ),
+                    ): _threshold_selector(),
+                    vol.Required(
+                        CONF_STALE_TIMEOUT,
+                        default=options.get(
+                            CONF_STALE_TIMEOUT, DEFAULT_STALE_TIMEOUT
+                        ),
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=1, max=720, step=1,
+                            unit_of_measurement="hours",
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Required(
+                        CONF_PREDICTION_HORIZON,
+                        default=options.get(
+                            CONF_PREDICTION_HORIZON, DEFAULT_PREDICTION_HORIZON
+                        ),
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=1, max=90, step=1,
+                            unit_of_measurement="days",
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                }
+            ),
+        )
+
     @staticmethod
     @callback
     def async_get_options_flow(

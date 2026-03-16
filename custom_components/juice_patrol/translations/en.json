@@ -7,6 +7,15 @@
         "data": {
           "low_threshold": "Low battery threshold (%)"
         }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Juice Patrol",
+        "description": "Adjust Juice Patrol monitoring settings.",
+        "data": {
+          "low_threshold": "Low battery threshold (%)",
+          "stale_timeout": "Stale device timeout (hours)",
+          "prediction_horizon": "Prediction alert horizon (days)"
+        }
       }
     },
     "abort": {
@@ -23,6 +32,44 @@
           "prediction_horizon": "Prediction alert horizon (days)"
         }
       }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "discharge_rate": {
+        "name": "Discharge rate"
+      },
+      "predicted_empty": {
+        "name": "Predicted empty"
+      },
+      "days_remaining": {
+        "name": "Days remaining"
+      },
+      "lowest_battery": {
+        "name": "Lowest battery"
+      }
+    },
+    "binary_sensor": {
+      "battery_low": {
+        "name": "Battery low"
+      },
+      "stale": {
+        "name": "Stale"
+      },
+      "attention_needed": {
+        "name": "Attention needed"
+      }
+    }
+  },
+  "exceptions": {
+    "not_loaded": {
+      "message": "Juice Patrol is not set up or not loaded."
+    },
+    "entity_not_monitored": {
+      "message": "{entity_id} is not a monitored battery entity."
+    },
+    "entity_not_in_store": {
+      "message": "{entity_id} was not found in the Juice Patrol device store."
     }
   }
 }

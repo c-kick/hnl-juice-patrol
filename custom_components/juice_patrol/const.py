@@ -1,5 +1,7 @@
 """Constants for the Juice Patrol integration."""
 
+from homeassistant.const import Platform
+
 DOMAIN = "juice_patrol"
 VERSION = "0.1.0"
 
@@ -34,4 +36,4 @@ HISTORY_CACHE_TTL = 1800  # 30 min cache for recorder queries
 HISTORY_DEFAULT_DAYS = 365  # how far back to query recorder
 
 # Platforms
-PLATFORMS: list[str] = ["sensor", "binary_sensor"]
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR]

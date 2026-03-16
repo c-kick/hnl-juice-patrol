@@ -7,9 +7,11 @@ import logging
 import voluptuous as vol
 
 from homeassistant.components import websocket_api
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.helpers import config_validation as cv
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers import config_validation as cv, device_registry as dr
+from homeassistant.helpers.typing import ConfigType
 
 from .const import (
     CONF_LOW_THRESHOLD,
@@ -26,7 +28,7 @@ from .panel import async_setup_panel
 
 _LOGGER = logging.getLogger(__name__)
 
-type JuicePatrolConfigEntry = ConfigEntry
+type JuicePatrolConfigEntry = ConfigEntry[JuicePatrolCoordinator]
 
 SERVICE_FORCE_REFRESH = "force_refresh"
 SERVICE_MARK_REPLACED = "mark_replaced"
@@ -36,17 +38,60 @@ SERVICE_UNIGNORE_DEVICE = "unignore_device"
 
 
 def _get_coordinator(hass: HomeAssistant) -> JuicePatrolCoordinator | None:
-    """Get the single coordinator instance, or None if not set up."""
-    coordinators = hass.data.get(DOMAIN, {})
-    if not coordinators:
-        return None
-    return next(iter(coordinators.values()))
+    """Get the single coordinator instance, or None if not loaded."""
+    for entry in hass.config_entries.async_entries(DOMAIN):
+        if entry.state is ConfigEntryState.LOADED:
+            return entry.runtime_data
+    return None
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: JuicePatrolConfigEntry) -> bool:
+def _require_coordinator(hass: HomeAssistant) -> JuicePatrolCoordinator:
+    """Get the coordinator, raising ServiceValidationError if unavailable."""
+    coordinator = _get_coordinator(hass)
+    if coordinator is None:
+        raise ServiceValidationError(
+            translation_domain=DOMAIN,
+            translation_key="not_loaded",
+        )
+    return coordinator
+
+
+def _require_monitored(
+    coordinator: JuicePatrolCoordinator, entity_id: str
+) -> None:
+    """Validate that entity_id is a monitored battery, or raise."""
+    if entity_id not in coordinator.discovered:
+        raise ServiceValidationError(
+            translation_domain=DOMAIN,
+            translation_key="entity_not_monitored",
+            translation_placeholders={"entity_id": entity_id},
+        )
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Set up Juice Patrol — register services, panel, and WS API."""
+    _register_services(hass)
+    await async_setup_panel(hass)
+    for ws_handler in (
+        ws_get_settings,
+        ws_update_settings,
+        ws_set_battery_type,
+        ws_set_rechargeable,
+        ws_confirm_replacement,
+        ws_mark_replaced,
+        ws_detect_battery_type,
+        ws_refresh,
+        ws_recalculate,
+        ws_get_shopping_list,
+    ):
+        websocket_api.async_register_command(hass, ws_handler)
+    return True
+
+
+async def async_setup_entry(
+    hass: HomeAssistant, entry: JuicePatrolConfigEntry
+) -> bool:
     """Set up Juice Patrol from a config entry."""
-    hass.data.setdefault(DOMAIN, {})
-
     coordinator = JuicePatrolCoordinator(hass, entry)
     try:
         await coordinator.async_setup()
@@ -55,28 +100,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: JuicePatrolConfigEntry) 
         await coordinator.async_shutdown()
         raise
 
-    hass.data[DOMAIN][entry.entry_id] = coordinator
+    entry.runtime_data = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # Register services, panel, and WS API (only once)
-    if not hass.services.has_service(DOMAIN, SERVICE_FORCE_REFRESH):
-        _register_services(hass)
-        await async_setup_panel(hass)
-        for ws_handler in (
-            ws_get_settings,
-            ws_update_settings,
-            ws_set_battery_type,
-            ws_set_rechargeable,
-            ws_confirm_replacement,
-            ws_mark_replaced,
-            ws_detect_battery_type,
-            ws_refresh,
-            ws_get_shopping_list,
-        ):
-            websocket_api.async_register_command(hass, ws_handler)
-
-    # Refresh coordinator when options change (e.g. from panel settings)
     entry.async_on_unload(
         entry.add_update_listener(_async_options_updated)
     )
@@ -89,60 +116,51 @@ async def _async_options_updated(
     hass: HomeAssistant, entry: JuicePatrolConfigEntry
 ) -> None:
     """Handle options update."""
-    coordinator: JuicePatrolCoordinator = hass.data[DOMAIN].get(entry.entry_id)
-    if coordinator:
-        await coordinator.async_request_refresh()
+    await entry.runtime_data.async_request_refresh()
 
 
 def _register_services(hass: HomeAssistant) -> None:
     """Register Juice Patrol services."""
 
     async def handle_force_refresh(call: ServiceCall) -> None:
-        coordinator = _get_coordinator(hass)
-        if coordinator:
-            await coordinator.async_request_refresh()
+        coordinator = _require_coordinator(hass)
+        await coordinator.async_request_refresh()
 
     async def handle_mark_replaced(call: ServiceCall) -> None:
-        coordinator = _get_coordinator(hass)
-        if not coordinator:
-            return
+        coordinator = _require_coordinator(hass)
         entity_id = call.data["entity_id"]
-        if entity_id not in coordinator.discovered:
-            _LOGGER.warning("Entity %s is not a monitored battery", entity_id)
-            return
-        if coordinator.store.mark_replaced(entity_id):
-            coordinator._history_cache.invalidate(entity_id)
-            await coordinator.async_request_refresh()
+        _require_monitored(coordinator, entity_id)
+        if not coordinator.store.mark_replaced(entity_id):
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="entity_not_in_store",
+                translation_placeholders={"entity_id": entity_id},
+            )
+        coordinator._history_cache.invalidate(entity_id)
+        await coordinator.async_request_refresh()
 
     async def handle_set_device_threshold(call: ServiceCall) -> None:
-        coordinator = _get_coordinator(hass)
-        if not coordinator:
-            return
+        coordinator = _require_coordinator(hass)
         entity_id = call.data["entity_id"]
         threshold = call.data["threshold"]
-        if entity_id not in coordinator.discovered:
-            _LOGGER.warning("Entity %s is not a monitored battery", entity_id)
-            return
-        if coordinator.store.set_device_threshold(entity_id, threshold):
-            await coordinator.async_request_refresh()
-        else:
-            _LOGGER.warning("Entity %s not found in store", entity_id)
+        _require_monitored(coordinator, entity_id)
+        if not coordinator.store.set_device_threshold(entity_id, threshold):
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="entity_not_in_store",
+                translation_placeholders={"entity_id": entity_id},
+            )
+        await coordinator.async_request_refresh()
 
     async def handle_ignore_device(call: ServiceCall) -> None:
-        coordinator = _get_coordinator(hass)
-        if not coordinator:
-            return
+        coordinator = _require_coordinator(hass)
         entity_id = call.data["entity_id"]
-        if entity_id not in coordinator.discovered:
-            _LOGGER.warning("Entity %s is not a monitored battery", entity_id)
-            return
+        _require_monitored(coordinator, entity_id)
         coordinator.store.set_ignored(entity_id, True)
         await coordinator.async_request_refresh()
 
     async def handle_unignore_device(call: ServiceCall) -> None:
-        coordinator = _get_coordinator(hass)
-        if not coordinator:
-            return
+        coordinator = _require_coordinator(hass)
         entity_id = call.data["entity_id"]
         coordinator.store.set_ignored(entity_id, False)
         await coordinator.async_request_refresh()
@@ -174,6 +192,11 @@ def _register_services(hass: HomeAssistant) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# WebSocket API handlers
+# ---------------------------------------------------------------------------
+
+
 @websocket_api.require_admin
 @websocket_api.websocket_command(
     {vol.Required("type"): "juice_patrol/get_settings"}
@@ -181,14 +204,13 @@ def _register_services(hass: HomeAssistant) -> None:
 @websocket_api.async_response
 async def ws_get_settings(hass, connection, msg):
     """Return current Juice Patrol settings."""
-    coordinators = hass.data.get(DOMAIN, {})
-    if not coordinators:
+    coordinator = _get_coordinator(hass)
+    if not coordinator:
         connection.send_error(msg["id"], "not_found", "Juice Patrol not set up")
         return
-    entry_id = next(iter(coordinators))
-    entry = hass.config_entries.async_get_entry(entry_id)
+    entry = coordinator.config_entry
     connection.send_result(msg["id"], {
-        "entry_id": entry_id,
+        "entry_id": entry.entry_id,
         CONF_LOW_THRESHOLD: entry.options.get(CONF_LOW_THRESHOLD, DEFAULT_LOW_THRESHOLD),
         CONF_STALE_TIMEOUT: entry.options.get(CONF_STALE_TIMEOUT, DEFAULT_STALE_TIMEOUT),
         CONF_PREDICTION_HORIZON: entry.options.get(
@@ -209,12 +231,11 @@ async def ws_get_settings(hass, connection, msg):
 @websocket_api.async_response
 async def ws_update_settings(hass, connection, msg):
     """Update Juice Patrol settings."""
-    coordinators = hass.data.get(DOMAIN, {})
-    if not coordinators:
+    coordinator = _get_coordinator(hass)
+    if not coordinator:
         connection.send_error(msg["id"], "not_found", "Juice Patrol not set up")
         return
-    entry_id = next(iter(coordinators))
-    entry = hass.config_entries.async_get_entry(entry_id)
+    entry = coordinator.config_entry
 
     new_options = dict(entry.options)
     for key in (CONF_LOW_THRESHOLD, CONF_STALE_TIMEOUT, CONF_PREDICTION_HORIZON):
@@ -365,6 +386,32 @@ async def ws_refresh(hass, connection, msg):
 
 @websocket_api.require_admin
 @websocket_api.websocket_command(
+    {
+        vol.Required("type"): "juice_patrol/recalculate",
+        vol.Required("entity_id"): cv.entity_id,
+    }
+)
+@websocket_api.async_response
+async def ws_recalculate(hass, connection, msg):
+    """Recalculate predictions for a single device (invalidates its cache)."""
+    coordinator = _get_coordinator(hass)
+    if not coordinator:
+        connection.send_error(msg["id"], "not_found", "Juice Patrol not set up")
+        return
+    entity_id = msg["entity_id"]
+    battery = coordinator.discovered.get(entity_id)
+    if not battery:
+        connection.send_error(
+            msg["id"], "not_found", f"Entity {entity_id} not discovered"
+        )
+        return
+    coordinator._history_cache.invalidate(entity_id)
+    await coordinator._async_rebuild_entity(entity_id, battery)
+    connection.send_result(msg["id"], {"ok": True})
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
     {vol.Required("type"): "juice_patrol/get_shopping_list"}
 )
 @websocket_api.async_response
@@ -433,28 +480,32 @@ async def ws_get_shopping_list(hass, connection, msg):
     })
 
 
+async def async_remove_config_entry_device(
+    hass: HomeAssistant,
+    config_entry: JuicePatrolConfigEntry,
+    device_entry: dr.DeviceEntry,
+) -> bool:
+    """Allow removal of a device if it is no longer actively tracked."""
+    coordinator: JuicePatrolCoordinator = config_entry.runtime_data
+    for identifier in device_entry.identifiers:
+        if identifier[0] != DOMAIN:
+            continue
+        device_id_or_entity = identifier[1]
+        # The virtual summary device should not be removable
+        if device_id_or_entity == "juice_patrol":
+            return False
+        # Check if any discovered entity still uses this identifier
+        for battery in coordinator.discovered.values():
+            if (battery.device_id or battery.entity_id) == device_id_or_entity:
+                return False
+    return True
+
+
 async def async_unload_entry(
     hass: HomeAssistant, entry: JuicePatrolConfigEntry
 ) -> bool:
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-
     if unload_ok:
-        coordinator: JuicePatrolCoordinator = hass.data[DOMAIN].pop(
-            entry.entry_id, None
-        )
-        if coordinator:
-            await coordinator.async_shutdown()
-
-        # Remove services if no more entries
-        if not hass.data.get(DOMAIN):
-            for service in (
-                SERVICE_FORCE_REFRESH,
-                SERVICE_MARK_REPLACED,
-                SERVICE_SET_DEVICE_THRESHOLD,
-                SERVICE_IGNORE_DEVICE,
-                SERVICE_UNIGNORE_DEVICE,
-            ):
-                hass.services.async_remove(DOMAIN, service)
-
+        await entry.runtime_data.async_shutdown()
     return unload_ok

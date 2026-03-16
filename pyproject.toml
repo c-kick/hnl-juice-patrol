@@ -1,0 +1,7 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["custom_components/juice_patrol"]
+omit = ["custom_components/juice_patrol/juice_patrol_panel.js"]

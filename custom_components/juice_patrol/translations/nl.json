@@ -7,6 +7,15 @@
         "data": {
           "low_threshold": "Lage batterij drempel (%)"
         }
+      },
+      "reconfigure": {
+        "title": "Juice Patrol herconfigureren",
+        "description": "Pas de monitoringinstellingen van Juice Patrol aan.",
+        "data": {
+          "low_threshold": "Lage batterij drempel (%)",
+          "stale_timeout": "Time-out inactief apparaat (uren)",
+          "prediction_horizon": "Voorspellingshorizon voor waarschuwingen (dagen)"
+        }
       }
     },
     "abort": {
@@ -23,6 +32,44 @@
           "prediction_horizon": "Voorspellingshorizon voor waarschuwingen (dagen)"
         }
       }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "discharge_rate": {
+        "name": "Ontlaadsnelheid"
+      },
+      "predicted_empty": {
+        "name": "Voorspeld leeg"
+      },
+      "days_remaining": {
+        "name": "Dagen resterend"
+      },
+      "lowest_battery": {
+        "name": "Laagste batterij"
+      }
+    },
+    "binary_sensor": {
+      "battery_low": {
+        "name": "Batterij laag"
+      },
+      "stale": {
+        "name": "Inactief"
+      },
+      "attention_needed": {
+        "name": "Aandacht nodig"
+      }
+    }
+  },
+  "exceptions": {
+    "not_loaded": {
+      "message": "Juice Patrol is niet ingesteld of niet geladen."
+    },
+    "entity_not_monitored": {
+      "message": "{entity_id} is geen bewaakt batterij-entiteit."
+    },
+    "entity_not_in_store": {
+      "message": "{entity_id} is niet gevonden in de Juice Patrol apparaatopslag."
     }
   }
 }

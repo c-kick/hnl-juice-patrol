@@ -1,4 +1,40 @@
 {
+  "entity": {
+    "sensor": {
+      "discharge_rate": {
+        "default": "mdi:battery-minus"
+      },
+      "predicted_empty": {
+        "default": "mdi:battery-clock"
+      },
+      "days_remaining": {
+        "default": "mdi:calendar-clock"
+      },
+      "lowest_battery": {
+        "default": "mdi:battery-alert"
+      }
+    },
+    "binary_sensor": {
+      "battery_low": {
+        "default": "mdi:battery-check",
+        "state": {
+          "on": "mdi:battery-alert"
+        }
+      },
+      "stale": {
+        "default": "mdi:check-circle",
+        "state": {
+          "on": "mdi:clock-alert"
+        }
+      },
+      "attention_needed": {
+        "default": "mdi:battery-check-outline",
+        "state": {
+          "on": "mdi:battery-alert-variant"
+        }
+      }
+    }
+  },
   "services": {
     "force_refresh": {
       "service": "mdi:refresh"

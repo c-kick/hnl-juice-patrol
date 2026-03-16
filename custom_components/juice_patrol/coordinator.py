@@ -32,7 +32,7 @@ from .const import (
     EVENT_DEVICE_REPLACED,
     EVENT_DEVICE_STALE,
 )
-from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 from .discovery import (
     BATTERY_ATTRIBUTES,
@@ -190,6 +190,30 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if truly_new and self._new_device_callbacks:
             for cb in self._new_device_callbacks:
                 cb(list(truly_new))
+
+        # Clean up devices for entities that have disappeared
+        disappeared = old_entity_ids - new_entity_ids
+        if disappeared:
+            dev_reg = dr.async_get(self.hass)
+            for entity_id in disappeared:
+                dev_data = self.store.get_device(entity_id)
+                identifier = (
+                    dev_data.device_id
+                    if dev_data and dev_data.device_id
+                    else entity_id
+                )
+                device = dev_reg.async_get_device(
+                    identifiers={(DOMAIN, identifier)}
+                )
+                if device:
+                    dev_reg.async_update_device(
+                        device.id,
+                        remove_config_entry_id=self.config_entry.entry_id,
+                    )
+                    _LOGGER.info(
+                        "Removed stale device for disappeared entity %s",
+                        entity_id,
+                    )
 
     def _pre_populate_event_dedup(self, data: dict[str, Any]) -> None:
         """Pre-populate dedup sets from current state to prevent restart storm (#5)."""

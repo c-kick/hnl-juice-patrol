@@ -39,14 +39,12 @@ class JuicePatrolEntity(CoordinatorEntity):
         info: dict[str, Any],
         *,
         id_suffix: str,
-        name_suffix: str,
     ) -> None:
         """Initialize a per-device entity."""
         super().__init__(coordinator)
         self._source_entity_id = source_entity_id
         # Use full entity_id in unique_id to prevent cross-domain collisions
         self._attr_unique_id = f"{DOMAIN}_{source_entity_id}_{id_suffix}"
-        self._attr_name = name_suffix
         # Fallback device info for initial creation
         self._fallback_device_id: str | None = info.get("device_id")
         self._fallback_device_name: str = info.get("device_name") or slug

@@ -11,25 +11,28 @@ from homeassistant.components.sensor import (
     SensorEntity,
     SensorStateClass,
 )
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, UnitOfTime
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.const import EntityCategory, PERCENTAGE, UnitOfTime
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from . import JuicePatrolConfigEntry
 from .const import DOMAIN
 from .coordinator import JuicePatrolCoordinator
 from .entity import JUICE_PATROL_DEVICE_INFO, JuicePatrolEntity, slugify_entity
 
 _LOGGER = logging.getLogger(__name__)
 
+PARALLEL_UPDATES = 0
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: JuicePatrolConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Juice Patrol sensors."""
-    coordinator: JuicePatrolCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator: JuicePatrolCoordinator = entry.runtime_data
     known: set[str] = set()
 
     def _create_sensors(entity_ids: list[str]) -> None:
@@ -66,9 +69,10 @@ async def async_setup_entry(
 class JuicePatrolDischargeRate(JuicePatrolEntity, SensorEntity):
     """Discharge rate sensor (%/day) for a monitored device."""
 
+    _attr_translation_key = "discharge_rate"
     _attr_native_unit_of_measurement = "%/day"
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:battery-minus"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(
         self,
@@ -80,7 +84,7 @@ class JuicePatrolDischargeRate(JuicePatrolEntity, SensorEntity):
         """Initialize the sensor."""
         super().__init__(
             coordinator, source_entity_id, slug, info,
-            id_suffix="discharge_rate", name_suffix="Discharge Rate",
+            id_suffix="discharge_rate",
         )
 
     @property
@@ -115,8 +119,9 @@ class JuicePatrolDischargeRate(JuicePatrolEntity, SensorEntity):
 class JuicePatrolPredictedEmpty(JuicePatrolEntity, SensorEntity):
     """Predicted empty date sensor for a monitored device."""
 
+    _attr_translation_key = "predicted_empty"
     _attr_device_class = SensorDeviceClass.TIMESTAMP
-    _attr_icon = "mdi:battery-clock"
+    _attr_entity_registry_enabled_default = False
 
     def __init__(
         self,
@@ -128,7 +133,7 @@ class JuicePatrolPredictedEmpty(JuicePatrolEntity, SensorEntity):
         """Initialize the sensor."""
         super().__init__(
             coordinator, source_entity_id, slug, info,
-            id_suffix="predicted_empty", name_suffix="Predicted Empty",
+            id_suffix="predicted_empty",
         )
 
     @property
@@ -159,9 +164,9 @@ class JuicePatrolPredictedEmpty(JuicePatrolEntity, SensorEntity):
 class JuicePatrolDaysRemaining(JuicePatrolEntity, SensorEntity):
     """Days remaining sensor for a monitored device."""
 
+    _attr_translation_key = "days_remaining"
     _attr_native_unit_of_measurement = UnitOfTime.DAYS
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:calendar-clock"
 
     def __init__(
         self,
@@ -173,7 +178,7 @@ class JuicePatrolDaysRemaining(JuicePatrolEntity, SensorEntity):
         """Initialize the sensor."""
         super().__init__(
             coordinator, source_entity_id, slug, info,
-            id_suffix="days_remaining", name_suffix="Days Remaining",
+            id_suffix="days_remaining",
         )
 
     @property
@@ -197,34 +202,24 @@ class JuicePatrolDaysRemaining(JuicePatrolEntity, SensorEntity):
         return {"source_entity": self._source_entity_id}
 
 
-class JuicePatrolLowestBattery(SensorEntity):
+class JuicePatrolLowestBattery(
+    CoordinatorEntity[JuicePatrolCoordinator], SensorEntity
+):
     """Summary sensor showing the device with the lowest battery."""
 
+    _attr_translation_key = "lowest_battery"
     _attr_device_class = SensorDeviceClass.BATTERY
     _attr_native_unit_of_measurement = PERCENTAGE
     _attr_has_entity_name = True
-    _attr_icon = "mdi:battery-alert"
 
     def __init__(self, coordinator: JuicePatrolCoordinator) -> None:
         """Initialize the summary sensor."""
-        self.coordinator = coordinator
+        super().__init__(coordinator)
         self._attr_unique_id = f"{DOMAIN}_lowest_battery"
-        self._attr_name = "Lowest Battery"
 
     @property
     def device_info(self):
         return JUICE_PATROL_DEVICE_INFO
-
-    @property
-    def should_poll(self) -> bool:
-        return False
-
-    async def async_added_to_hass(self) -> None:
-        self.async_on_remove(
-            self.coordinator.async_add_listener(
-                self._handle_coordinator_update
-            )
-        )
 
     @property
     def native_value(self) -> float | None:
@@ -260,7 +255,3 @@ class JuicePatrolLowestBattery(SensorEntity):
             "lowest_device": lowest_info.get("device_name"),
             "monitored_devices": len(data),
         }
-
-    @callback
-    def _handle_coordinator_update(self) -> None:
-        self.async_write_ha_state()
