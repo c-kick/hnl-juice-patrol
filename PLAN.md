@@ -364,6 +364,26 @@ Some devices report battery level as text strings ("normal", "low", "critical") 
 - Appropriate confidence/reliability scoring for low-resolution data
 - Clear UI indication that predictions are based on coarse data
 
+### Entity ↔ Juice Patrol Navigation
+When clicking a device row in the panel, it opens the source battery entity's more-info dialog. There's currently no way to navigate the other direction — from a battery entity back to its Juice Patrol data. Ideas:
+- Add a "View in Juice Patrol" link/button to Juice Patrol sensor attributes or the more-info card
+- Or: when the panel opens, accept a `?entity=sensor.xxx` query param that auto-scrolls/highlights that device
+- Consider using HA's `hass-more-info` event with a Juice Patrol entity instead of the source entity, so users see discharge rate, predictions, and analysis directly
+
+### Per-Entity Recalculate
+Add a "Recalculate" option to the per-device action menu (⋮ dot menu) that invalidates the history cache for just that one entity and rebuilds its prediction, without refreshing all 47+ devices. This is useful for:
+- Quick verification after marking a replacement
+- Checking if a device's prediction improves after new data comes in
+- Faster feedback loop than the global refresh button
+Implementation: new WS command `juice_patrol/recalculate` with `entity_id` param → invalidates cache for that entity → rebuilds only that entity's data → returns updated prediction.
+
+### Refresh Button UX
+The refresh button (🔄) next to the cogwheel is unclear about what it does. Improve discoverability:
+- Add a tooltip that explains: "Refresh all predictions — clears the recorder cache and re-fetches battery history for all devices"
+- Consider showing a brief inline explanation on first use, or a subtitle under the button
+- Distinguish from HA's native refresh (which reloads the page) — this only invalidates the Juice Patrol history cache and triggers a coordinator refresh
+- Optionally show a small indicator while refresh is in progress (spinner or disabled state with "Refreshing..." text)
+
 ### Panel Toolbar (HA Native Pattern)
 Replace the custom `.header` div inside `#jp-content` with a proper HA toolbar element. Follow the pattern used by HACS, Browser Mod, and native HA dashboards for consistent UX:
 - Use `<app-toolbar>` or `<ha-top-app-bar-fixed>` as the native HA panels do
