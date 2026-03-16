@@ -41,6 +41,50 @@ def _threshold_selector() -> NumberSelector:
     )
 
 
+def _stale_timeout_selector() -> NumberSelector:
+    """Stale device timeout selector."""
+    return NumberSelector(
+        NumberSelectorConfig(
+            min=1, max=720, step=1,
+            unit_of_measurement="hours",
+            mode=NumberSelectorMode.BOX,
+        )
+    )
+
+
+def _prediction_horizon_selector() -> NumberSelector:
+    """Prediction alert horizon selector."""
+    return NumberSelector(
+        NumberSelectorConfig(
+            min=1, max=90, step=1,
+            unit_of_measurement="days",
+            mode=NumberSelectorMode.BOX,
+        )
+    )
+
+
+def _options_schema(options: dict) -> vol.Schema:
+    """Build the full options schema with current values as defaults."""
+    return vol.Schema(
+        {
+            vol.Required(
+                CONF_LOW_THRESHOLD,
+                default=options.get(CONF_LOW_THRESHOLD, DEFAULT_LOW_THRESHOLD),
+            ): _threshold_selector(),
+            vol.Required(
+                CONF_STALE_TIMEOUT,
+                default=options.get(CONF_STALE_TIMEOUT, DEFAULT_STALE_TIMEOUT),
+            ): _stale_timeout_selector(),
+            vol.Required(
+                CONF_PREDICTION_HORIZON,
+                default=options.get(
+                    CONF_PREDICTION_HORIZON, DEFAULT_PREDICTION_HORIZON
+                ),
+            ): _prediction_horizon_selector(),
+        }
+    )
+
+
 class JuicePatrolConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Juice Patrol."""
 
@@ -100,40 +144,7 @@ class JuicePatrolConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="reconfigure",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        CONF_LOW_THRESHOLD,
-                        default=options.get(
-                            CONF_LOW_THRESHOLD, DEFAULT_LOW_THRESHOLD
-                        ),
-                    ): _threshold_selector(),
-                    vol.Required(
-                        CONF_STALE_TIMEOUT,
-                        default=options.get(
-                            CONF_STALE_TIMEOUT, DEFAULT_STALE_TIMEOUT
-                        ),
-                    ): NumberSelector(
-                        NumberSelectorConfig(
-                            min=1, max=720, step=1,
-                            unit_of_measurement="hours",
-                            mode=NumberSelectorMode.BOX,
-                        )
-                    ),
-                    vol.Required(
-                        CONF_PREDICTION_HORIZON,
-                        default=options.get(
-                            CONF_PREDICTION_HORIZON, DEFAULT_PREDICTION_HORIZON
-                        ),
-                    ): NumberSelector(
-                        NumberSelectorConfig(
-                            min=1, max=90, step=1,
-                            unit_of_measurement="days",
-                            mode=NumberSelectorMode.BOX,
-                        )
-                    ),
-                }
-            ),
+            data_schema=_options_schema(options),
         )
 
     @staticmethod
@@ -163,38 +174,5 @@ class JuicePatrolOptionsFlow(OptionsFlow):
 
         return self.async_show_form(
             step_id="init",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        CONF_LOW_THRESHOLD,
-                        default=options.get(
-                            CONF_LOW_THRESHOLD, DEFAULT_LOW_THRESHOLD
-                        ),
-                    ): _threshold_selector(),
-                    vol.Required(
-                        CONF_STALE_TIMEOUT,
-                        default=options.get(
-                            CONF_STALE_TIMEOUT, DEFAULT_STALE_TIMEOUT
-                        ),
-                    ): NumberSelector(
-                        NumberSelectorConfig(
-                            min=1, max=720, step=1,
-                            unit_of_measurement="hours",
-                            mode=NumberSelectorMode.BOX,
-                        )
-                    ),
-                    vol.Required(
-                        CONF_PREDICTION_HORIZON,
-                        default=options.get(
-                            CONF_PREDICTION_HORIZON, DEFAULT_PREDICTION_HORIZON
-                        ),
-                    ): NumberSelector(
-                        NumberSelectorConfig(
-                            min=1, max=90, step=1,
-                            unit_of_measurement="days",
-                            mode=NumberSelectorMode.BOX,
-                        )
-                    ),
-                }
-            ),
+            data_schema=_options_schema(options),
         )

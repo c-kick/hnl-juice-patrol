@@ -191,10 +191,10 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             for cb in self._new_device_callbacks:
                 cb(list(truly_new))
 
-        # Clean up devices for entities that have disappeared
+        # Clean up devices for entities that have disappeared (deduplicate by identifier)
         disappeared = old_entity_ids - new_entity_ids
         if disappeared:
-            dev_reg = dr.async_get(self.hass)
+            identifiers_to_remove: dict[str, list[str]] = {}
             for entity_id in disappeared:
                 dev_data = self.store.get_device(entity_id)
                 identifier = (
@@ -202,6 +202,10 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if dev_data and dev_data.device_id
                     else entity_id
                 )
+                identifiers_to_remove.setdefault(identifier, []).append(entity_id)
+
+            dev_reg = dr.async_get(self.hass)
+            for identifier, entity_ids in identifiers_to_remove.items():
                 device = dev_reg.async_get_device(
                     identifiers={(DOMAIN, identifier)}
                 )
@@ -211,8 +215,8 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         remove_config_entry_id=self.config_entry.entry_id,
                     )
                     _LOGGER.info(
-                        "Removed stale device for disappeared entity %s",
-                        entity_id,
+                        "Removed stale device for disappeared entities %s",
+                        entity_ids,
                     )
 
     def _pre_populate_event_dedup(self, data: dict[str, Any]) -> None:

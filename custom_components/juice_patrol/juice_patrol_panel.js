@@ -39,7 +39,9 @@ class JuicePatrolPanel extends HTMLElement {
     if (firstLoad) {
       const params = new URLSearchParams(window.location.search);
       const entityParam = params.get("entity");
-      if (entityParam) this._highlightEntity = entityParam;
+      if (entityParam && /^[a-z0-9_]+\.[a-z0-9_]+$/.test(entityParam)) {
+        this._highlightEntity = entityParam;
+      }
     }
     this._updateEntities();
     if (!this._settingsOpen) {
@@ -51,9 +53,7 @@ class JuicePatrolPanel extends HTMLElement {
       }
     }
     if (firstLoad) this._loadConfig();
-    if (this._highlightEntity && !this._highlightApplied) {
-      this._applyDeepLinkHighlight();
-    }
+    this._applyDeepLinkHighlight();
   }
 
   set narrow(val) { this._narrow = val; }
@@ -62,7 +62,12 @@ class JuicePatrolPanel extends HTMLElement {
 
   _applyDeepLinkHighlight() {
     if (!this._highlightEntity || this._highlightApplied) return;
-    const row = this.shadowRoot.querySelector(`.device-row[data-entity="${this._highlightEntity}"]`);
+    // Give up after 10 attempts (entity may not exist in data)
+    this._highlightAttempts = (this._highlightAttempts || 0) + 1;
+    if (this._highlightAttempts > 10) { this._highlightApplied = true; return; }
+    const row = this.shadowRoot.querySelector(
+      `.device-row[data-entity="${CSS.escape(this._highlightEntity)}"]`
+    );
     if (!row) return;
     this._highlightApplied = true;
     requestAnimationFrame(() => {

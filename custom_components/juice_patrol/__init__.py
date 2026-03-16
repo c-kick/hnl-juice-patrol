@@ -68,6 +68,30 @@ def _require_monitored(
         )
 
 
+def _ws_get_coordinator(
+    hass: HomeAssistant, connection, msg_id: int
+) -> JuicePatrolCoordinator | None:
+    """Get coordinator for a WS handler, sending an error if unavailable."""
+    coordinator = _get_coordinator(hass)
+    if coordinator is None:
+        connection.send_error(msg_id, "not_found", "Juice Patrol not set up")
+    return coordinator
+
+
+async def _do_mark_replaced(
+    coordinator: JuicePatrolCoordinator, entity_id: str
+) -> None:
+    """Mark a battery as replaced — shared by service and WS handlers."""
+    if not coordinator.store.mark_replaced(entity_id):
+        raise HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key="entity_not_in_store",
+            translation_placeholders={"entity_id": entity_id},
+        )
+    coordinator._history_cache.invalidate(entity_id)
+    await coordinator.async_request_refresh()
+
+
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up Juice Patrol — register services, panel, and WS API."""
     _register_services(hass)
@@ -130,14 +154,7 @@ def _register_services(hass: HomeAssistant) -> None:
         coordinator = _require_coordinator(hass)
         entity_id = call.data["entity_id"]
         _require_monitored(coordinator, entity_id)
-        if not coordinator.store.mark_replaced(entity_id):
-            raise HomeAssistantError(
-                translation_domain=DOMAIN,
-                translation_key="entity_not_in_store",
-                translation_placeholders={"entity_id": entity_id},
-            )
-        coordinator._history_cache.invalidate(entity_id)
-        await coordinator.async_request_refresh()
+        await _do_mark_replaced(coordinator, entity_id)
 
     async def handle_set_device_threshold(call: ServiceCall) -> None:
         coordinator = _require_coordinator(hass)
@@ -155,7 +172,6 @@ def _register_services(hass: HomeAssistant) -> None:
     async def handle_ignore_device(call: ServiceCall) -> None:
         coordinator = _require_coordinator(hass)
         entity_id = call.data["entity_id"]
-        _require_monitored(coordinator, entity_id)
         coordinator.store.set_ignored(entity_id, True)
         await coordinator.async_request_refresh()
 
@@ -204,9 +220,8 @@ def _register_services(hass: HomeAssistant) -> None:
 @websocket_api.async_response
 async def ws_get_settings(hass, connection, msg):
     """Return current Juice Patrol settings."""
-    coordinator = _get_coordinator(hass)
+    coordinator = _ws_get_coordinator(hass, connection, msg["id"])
     if not coordinator:
-        connection.send_error(msg["id"], "not_found", "Juice Patrol not set up")
         return
     entry = coordinator.config_entry
     connection.send_result(msg["id"], {
@@ -231,9 +246,8 @@ async def ws_get_settings(hass, connection, msg):
 @websocket_api.async_response
 async def ws_update_settings(hass, connection, msg):
     """Update Juice Patrol settings."""
-    coordinator = _get_coordinator(hass)
+    coordinator = _ws_get_coordinator(hass, connection, msg["id"])
     if not coordinator:
-        connection.send_error(msg["id"], "not_found", "Juice Patrol not set up")
         return
     entry = coordinator.config_entry
 
@@ -257,9 +271,8 @@ async def ws_update_settings(hass, connection, msg):
 @websocket_api.async_response
 async def ws_set_battery_type(hass, connection, msg):
     """Set battery type for a device."""
-    coordinator = _get_coordinator(hass)
+    coordinator = _ws_get_coordinator(hass, connection, msg["id"])
     if not coordinator:
-        connection.send_error(msg["id"], "not_found", "Juice Patrol not set up")
         return
     entity_id = msg["entity_id"]
     battery_type = msg.get("battery_type")
@@ -282,9 +295,8 @@ async def ws_set_battery_type(hass, connection, msg):
 @websocket_api.async_response
 async def ws_set_rechargeable(hass, connection, msg):
     """Set rechargeable flag for a device. None = auto-detect."""
-    coordinator = _get_coordinator(hass)
+    coordinator = _ws_get_coordinator(hass, connection, msg["id"])
     if not coordinator:
-        connection.send_error(msg["id"], "not_found", "Juice Patrol not set up")
         return
     entity_id = msg["entity_id"]
     value = msg.get("is_rechargeable")
@@ -305,9 +317,8 @@ async def ws_set_rechargeable(hass, connection, msg):
 @websocket_api.async_response
 async def ws_confirm_replacement(hass, connection, msg):
     """Confirm a detected battery replacement."""
-    coordinator = _get_coordinator(hass)
+    coordinator = _ws_get_coordinator(hass, connection, msg["id"])
     if not coordinator:
-        connection.send_error(msg["id"], "not_found", "Juice Patrol not set up")
         return
     entity_id = msg["entity_id"]
     if coordinator.store.set_replacement_confirmed(entity_id, True):
@@ -327,16 +338,14 @@ async def ws_confirm_replacement(hass, connection, msg):
 @websocket_api.async_response
 async def ws_mark_replaced(hass, connection, msg):
     """Manually mark a battery as replaced."""
-    coordinator = _get_coordinator(hass)
+    coordinator = _ws_get_coordinator(hass, connection, msg["id"])
     if not coordinator:
-        connection.send_error(msg["id"], "not_found", "Juice Patrol not set up")
         return
     entity_id = msg["entity_id"]
-    if coordinator.store.mark_replaced(entity_id):
-        coordinator._history_cache.invalidate(entity_id)
-        await coordinator.async_request_refresh()
+    try:
+        await _do_mark_replaced(coordinator, entity_id)
         connection.send_result(msg["id"], {"ok": True})
-    else:
+    except HomeAssistantError:
         connection.send_error(msg["id"], "not_found", f"Entity {entity_id} not in store")
 
 
@@ -350,9 +359,8 @@ async def ws_mark_replaced(hass, connection, msg):
 @websocket_api.async_response
 async def ws_detect_battery_type(hass, connection, msg):
     """Auto-detect battery type for a device (ignoring manual override)."""
-    coordinator = _get_coordinator(hass)
+    coordinator = _ws_get_coordinator(hass, connection, msg["id"])
     if not coordinator:
-        connection.send_error(msg["id"], "not_found", "Juice Patrol not set up")
         return
     entity_id = msg["entity_id"]
     battery = coordinator.discovered.get(entity_id)
@@ -376,9 +384,8 @@ async def ws_detect_battery_type(hass, connection, msg):
 @websocket_api.async_response
 async def ws_refresh(hass, connection, msg):
     """Force refresh with cache invalidation."""
-    coordinator = _get_coordinator(hass)
+    coordinator = _ws_get_coordinator(hass, connection, msg["id"])
     if not coordinator:
-        connection.send_error(msg["id"], "not_found", "Juice Patrol not set up")
         return
     await coordinator.async_manual_refresh()
     connection.send_result(msg["id"], {"ok": True})
@@ -394,9 +401,8 @@ async def ws_refresh(hass, connection, msg):
 @websocket_api.async_response
 async def ws_recalculate(hass, connection, msg):
     """Recalculate predictions for a single device (invalidates its cache)."""
-    coordinator = _get_coordinator(hass)
+    coordinator = _ws_get_coordinator(hass, connection, msg["id"])
     if not coordinator:
-        connection.send_error(msg["id"], "not_found", "Juice Patrol not set up")
         return
     entity_id = msg["entity_id"]
     battery = coordinator.discovered.get(entity_id)
@@ -419,9 +425,8 @@ async def ws_get_shopping_list(hass, connection, msg):
     """Get battery shopping list grouped by base battery type."""
     import re
 
-    coordinator = _get_coordinator(hass)
+    coordinator = _ws_get_coordinator(hass, connection, msg["id"])
     if not coordinator:
-        connection.send_error(msg["id"], "not_found", "Juice Patrol not set up")
         return
 
     data = coordinator.data or {}
