@@ -588,10 +588,20 @@ class JuicePatrolPanel extends HTMLElement {
     return "var(--success-color, #43a047)";
   }
 
-  _formatDate(isoString) {
+  _formatDate(isoString, includeTime = false) {
     if (!isoString) return "\u2014";
     try {
       const d = new Date(isoString);
+      if (includeTime) {
+        // For fast-discharge: show time, omit year if same year
+        const now = new Date();
+        const sameYear = d.getFullYear() === now.getFullYear();
+        const dateOpts = sameYear
+          ? { month: "short", day: "numeric" }
+          : { month: "short", day: "numeric", year: "numeric" };
+        return d.toLocaleDateString(undefined, dateOpts) + " " +
+               d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+      }
       return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
     } catch { return "\u2014"; }
   }
@@ -1233,7 +1243,7 @@ class JuicePatrolPanel extends HTMLElement {
               Rate${this._sortCol === 'rate' ? `<span class="sort-arrow">${this._sortAsc ? '\u25B2' : '\u25BC'}</span>` : ''}
             </div>
             <div class="sort-header ${this._sortCol === 'days' ? 'active' : ''}" data-sort="days">
-              Days left${this._sortCol === 'days' ? `<span class="sort-arrow">${this._sortAsc ? '\u25B2' : '\u25BC'}</span>` : ''}
+              Left${this._sortCol === 'days' ? `<span class="sort-arrow">${this._sortAsc ? '\u25B2' : '\u25BC'}</span>` : ''}
             </div>
             <div class="sort-header ${this._sortCol === 'reliability' ? 'active' : ''}" data-sort="reliability" title="Prediction reliability score (0-100%)">
               Rel${this._sortCol === 'reliability' ? `<span class="sort-arrow">${this._sortAsc ? '\u25B2' : '\u25BC'}</span>` : ''}
@@ -1263,7 +1273,7 @@ class JuicePatrolPanel extends HTMLElement {
               <div class="data-cell">${this._formatRate(dev)}</div>
               <div class="data-cell">${this._formatTimeRemaining(dev)}</div>
               <div class="data-cell reliability-cell">${this._renderReliabilityBadge(dev)}</div>
-              <div class="data-cell">${this._formatDate(dev.predictedEmpty)}</div>
+              <div class="data-cell">${this._formatDate(dev.predictedEmpty, this._isFastDischarge(dev))}</div>
               <div class="action-cell">
                 ${dev.replacementPending
                   ? `<button class="action-btn confirm" data-action="confirm" data-source="${dev.sourceEntity}" title="Confirm replacement">

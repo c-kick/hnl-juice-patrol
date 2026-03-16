@@ -167,7 +167,7 @@ async def _async_get_from_history(
             None,  # filters
             True,  # include_start_time_state
             True,  # significant_changes_only
-            True,  # minimal_response
+            False,  # minimal_response — we need State objects
             True,  # no_attributes
         )
     except Exception:
