@@ -50,6 +50,43 @@ from .store import JuicePatrolStore
 _LOGGER = logging.getLogger(__name__)
 
 
+def _extract_current_segment(
+    readings: list[dict[str, float]],
+) -> list[dict[str, float]]:
+    """Extract the current discharge segment from cyclic readings.
+
+    For rechargeable devices that charge/discharge daily, the full history
+    contains sawtooth patterns (100→20→100→20...). Linear regression on
+    that produces garbage. Instead, find the last charge peak and return
+    only readings from that peak onward.
+
+    Returns the original readings unchanged if no cycling is detected.
+    """
+    if len(readings) < 5:
+        return readings
+
+    # Find the last significant upward jump (charge event):
+    # a reading that is ≥20% higher than the previous one.
+    last_peak_idx = None
+    for i in range(len(readings) - 1, 0, -1):
+        jump = readings[i]["v"] - readings[i - 1]["v"]
+        if jump >= 20:
+            # This is a charge jump — the peak is at index i
+            last_peak_idx = i
+            break
+
+    if last_peak_idx is None:
+        # No charge cycle detected — use all readings
+        return readings
+
+    segment = readings[last_peak_idx:]
+    # Only use segment if it has enough data points for prediction
+    if len(segment) < 3:
+        return readings
+
+    return segment
+
+
 class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Coordinator that manages battery discovery, tracking, and state."""
 
@@ -276,20 +313,27 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if dev and dev.last_replaced
             else None
         )
-        readings = await async_get_readings(
+        all_readings = await async_get_readings(
             self.hass, entity_id, since=since, cache=self._history_cache
         )
 
         # Update last known level from readings
-        if readings:
-            self._last_known_levels[entity_id] = readings[-1]["v"]
+        if all_readings:
+            self._last_known_levels[entity_id] = all_readings[-1]["v"]
 
-        last_reading_time = readings[-1]["t"] if readings else None
+        last_reading_time = all_readings[-1]["t"] if all_readings else None
 
         threshold = (
             dev.custom_threshold if dev and dev.custom_threshold
             else self.low_threshold
         )
+
+        # For cyclic (rechargeable) devices, extract only the current
+        # discharge segment for prediction. Full history is still used
+        # for reading_count display.
+        readings = _extract_current_segment(all_readings)
+        is_cyclic = len(readings) < len(all_readings)
+
         # Determine minimum timespan based on data density:
         # Fast-discharge devices (phones, tablets) from raw history have
         # sub-hour intervals; slow sensors have hourly stats over months.
@@ -340,7 +384,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 entity_id, battery.device_id
             )
 
-        # Run behavior analysis
+        # Run behavior analysis on the current segment (not full cyclic history)
         battery_state = self._get_battery_state(entity_id, battery.device_id)
         analysis = analyze_battery(
             readings,
@@ -379,7 +423,9 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "device_id": battery.device_id,
             "source_type": battery.source_type,
             "platform": battery.platform,
-            "reading_count": len(readings),
+            "reading_count": len(all_readings),
+            "segment_count": len(readings),
+            "is_cyclic": is_cyclic,
             "last_reading_time": last_reading_time,
             "discharge_rate": (
                 abs(prediction.slope_per_day)
