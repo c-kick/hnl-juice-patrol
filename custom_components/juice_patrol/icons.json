@@ -1,0 +1,19 @@
+{
+  "services": {
+    "force_refresh": {
+      "service": "mdi:refresh"
+    },
+    "mark_replaced": {
+      "service": "mdi:battery-sync"
+    },
+    "set_device_threshold": {
+      "service": "mdi:battery-alert"
+    },
+    "ignore_device": {
+      "service": "mdi:eye-off"
+    },
+    "unignore_device": {
+      "service": "mdi:eye"
+    }
+  }
+}

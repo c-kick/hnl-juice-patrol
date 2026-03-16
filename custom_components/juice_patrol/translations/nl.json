@@ -1,0 +1,28 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Juice Patrol instellen",
+        "description": "Juice Patrol detecteert automatisch alle apparaten met batterij en volgt het ontladingsverloop.",
+        "data": {
+          "low_threshold": "Lage batterij drempel (%)"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Juice Patrol is al geconfigureerd."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Juice Patrol Instellingen",
+        "data": {
+          "low_threshold": "Lage batterij drempel (%)",
+          "stale_timeout": "Time-out inactief apparaat (uren)",
+          "prediction_horizon": "Voorspellingshorizon voor waarschuwingen (dagen)"
+        }
+      }
+    }
+  }
+}

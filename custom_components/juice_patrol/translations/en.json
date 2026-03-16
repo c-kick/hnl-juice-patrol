@@ -1,0 +1,28 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Juice Patrol",
+        "description": "Juice Patrol will auto-discover all battery-powered devices and monitor their discharge over time.",
+        "data": {
+          "low_threshold": "Low battery threshold (%)"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Juice Patrol is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Juice Patrol Settings",
+        "data": {
+          "low_threshold": "Low battery threshold (%)",
+          "stale_timeout": "Stale device timeout (hours)",
+          "prediction_horizon": "Prediction alert horizon (days)"
+        }
+      }
+    }
+  }
+}

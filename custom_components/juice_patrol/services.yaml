@@ -1,0 +1,60 @@
+force_refresh:
+  name: Force Refresh
+  description: Trigger an immediate full discovery and prediction update.
+
+mark_replaced:
+  name: Mark Battery Replaced
+  description: Manually mark a battery as replaced, resetting its discharge curve.
+  fields:
+    entity_id:
+      name: Entity
+      description: The battery entity to mark as replaced.
+      required: true
+      selector:
+        entity:
+          domain: sensor
+
+set_device_threshold:
+  name: Set Device Threshold
+  description: Override the low battery threshold for a specific device.
+  fields:
+    entity_id:
+      name: Entity
+      description: The battery entity to set the threshold for.
+      required: true
+      selector:
+        entity:
+          domain: sensor
+    threshold:
+      name: Threshold
+      description: The low battery threshold percentage.
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 99
+          unit_of_measurement: "%"
+
+ignore_device:
+  name: Ignore Device
+  description: Exclude a device from battery monitoring.
+  fields:
+    entity_id:
+      name: Entity
+      description: The battery entity to ignore.
+      required: true
+      selector:
+        entity:
+          domain: sensor
+
+unignore_device:
+  name: Unignore Device
+  description: Re-include a previously ignored device in battery monitoring.
+  fields:
+    entity_id:
+      name: Entity
+      description: The battery entity to unignore.
+      required: true
+      selector:
+        entity:
+          domain: sensor
