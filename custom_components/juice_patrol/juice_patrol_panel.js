@@ -500,7 +500,15 @@ class JuicePatrolPanel extends HTMLElement {
     const dir = asc ? 1 : -1;
 
     return list.sort((a, b) => {
-      // Only group attention items to top on the default sort
+      const av = this._getSortValue(a, col);
+      const bv = this._getSortValue(b, col);
+
+      // Nulls always sort to bottom, regardless of attention or direction
+      if (av === null && bv !== null) return 1;
+      if (av !== null && bv === null) return -1;
+
+      // Only group attention items to top on the default sort,
+      // but within the same null/non-null tier
       if (!this._userSorted) {
         const aAtt = a.replacementPending || a.isLow || a.isStale ||
           (a.anomaly && a.anomaly !== "normal");
@@ -509,12 +517,7 @@ class JuicePatrolPanel extends HTMLElement {
         if (aAtt !== bAtt) return aAtt ? -1 : 1;
       }
 
-      const av = this._getSortValue(a, col);
-      const bv = this._getSortValue(b, col);
       if (av === bv) return 0;
-      // Nulls always sort to bottom
-      if (av === null) return 1;
-      if (bv === null) return -1;
       return (av < bv ? -1 : 1) * dir;
     });
   }
