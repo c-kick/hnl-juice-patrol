@@ -363,15 +363,21 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # If actual level is already at or below threshold, days = 0
             if current is not None and current <= threshold:
                 prediction.estimated_days_remaining = 0.0
+                prediction.estimated_hours_remaining = 0.0
                 prediction.estimated_empty_timestamp = time.time()
-            # If actual level is very high (≥95%) but model says 0 days,
-            # the model diverges from reality — suppress the prediction
-            elif current is not None and current >= 95 and prediction.estimated_days_remaining == 0.0:
+            # Model says "already past threshold" (days=0) but actual level
+            # is still above threshold — model has diverged from reality
+            # (e.g. discharge rate slowed down). Suppress the prediction.
+            elif prediction.estimated_days_remaining == 0.0 and (
+                current is not None and current > threshold
+            ):
                 prediction.estimated_days_remaining = None
+                prediction.estimated_hours_remaining = None
                 prediction.estimated_empty_timestamp = None
             # Cap unreasonably high predictions at 730 days (2 years)
             elif prediction.estimated_days_remaining > 730:
                 prediction.estimated_days_remaining = None
+                prediction.estimated_hours_remaining = None
                 prediction.estimated_empty_timestamp = None
 
         # Auto-detect battery type if not manually set
