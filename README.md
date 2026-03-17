@@ -5,6 +5,8 @@
 
 **Predictive Battery Monitoring for Home Assistant**
 
+> **Warning:** This project is in early alpha. Expect breaking changes, incomplete features, and rough edges. Use at your own risk.
+
 Juice Patrol auto-discovers all battery-powered devices, tracks their discharge curves over time, predicts when batteries will die, and fires events for notifications — all without manual per-device configuration.
 
 ## Features
