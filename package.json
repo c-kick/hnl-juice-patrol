@@ -1,0 +1,20 @@
+{
+  "name": "hnl-juice-patrol",
+  "version": "0.2.0",
+  "type": "module",
+  "description": "Juice Patrol — predictive battery monitoring for Home Assistant",
+  "license": "MIT",
+  "dependencies": {
+    "lit": "^3.3.0"
+  },
+  "devDependencies": {
+    "@rollup/plugin-commonjs": "^26.0.0",
+    "@rollup/plugin-node-resolve": "^15.2.0",
+    "@rollup/plugin-terser": "^0.4.4",
+    "rollup": "^4.20.0"
+  },
+  "scripts": {
+    "start": "rollup -c --watch",
+    "build": "rollup -c"
+  }
+}

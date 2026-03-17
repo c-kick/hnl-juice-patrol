@@ -9,7 +9,7 @@ from homeassistant.core import HomeAssistant
 from .const import DOMAIN
 
 PANEL_URL = f"/api/{DOMAIN}/panel"
-PANEL_FILENAME = "juice_patrol_panel.js"
+PANEL_FILENAME = "frontend/juice_patrol_panel.js"
 
 
 async def async_setup_panel(hass: HomeAssistant) -> None:
@@ -36,7 +36,7 @@ async def async_setup_panel(hass: HomeAssistant) -> None:
         config={
             "_panel_custom": {
                 "name": "juice-patrol-panel",
-                "js_url": PANEL_URL,
+                "module_url": PANEL_URL,
             }
         },
     )
