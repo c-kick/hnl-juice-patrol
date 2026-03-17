@@ -16,7 +16,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import JuicePatrolConfigEntry
 from .const import DOMAIN
-from .coordinator import JuicePatrolCoordinator
+from .data import JuicePatrolCoordinator
 from .entity import JUICE_PATROL_DEVICE_INFO, JuicePatrolEntity, slugify_entity
 
 _LOGGER = logging.getLogger(__name__)

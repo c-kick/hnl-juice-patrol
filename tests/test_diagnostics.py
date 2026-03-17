@@ -7,7 +7,7 @@ import pytest
 from custom_components.juice_patrol.diagnostics import (
     async_get_config_entry_diagnostics,
 )
-from custom_components.juice_patrol.predictions import (
+from custom_components.juice_patrol.engine.predictions import (
     Confidence,
     PredictionResult,
     PredictionStatus,

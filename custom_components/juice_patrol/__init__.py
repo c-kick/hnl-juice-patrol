@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 import voluptuous as vol
 
@@ -23,7 +24,7 @@ from .const import (
     DOMAIN,
     PLATFORMS,
 )
-from .coordinator import JuicePatrolCoordinator
+from .data import JuicePatrolCoordinator
 from .panel import async_setup_panel
 
 _LOGGER = logging.getLogger(__name__)
@@ -82,14 +83,12 @@ async def _do_mark_replaced(
     coordinator: JuicePatrolCoordinator, entity_id: str
 ) -> None:
     """Mark a battery as replaced — shared by service and WS handlers."""
-    if not coordinator.store.mark_replaced(entity_id):
+    if not await coordinator.async_mark_replaced(entity_id):
         raise HomeAssistantError(
             translation_domain=DOMAIN,
             translation_key="entity_not_in_store",
             translation_placeholders={"entity_id": entity_id},
         )
-    coordinator._history_cache.invalidate(entity_id)
-    await coordinator.async_request_refresh()
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -103,10 +102,14 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ws_set_rechargeable,
         ws_confirm_replacement,
         ws_mark_replaced,
+        ws_undo_replacement,
         ws_detect_battery_type,
         ws_refresh,
         ws_recalculate,
         ws_get_shopping_list,
+        ws_get_entity_chart,
+        ws_set_ignored,
+        ws_get_ignored,
     ):
         websocket_api.async_register_command(hass, ws_handler)
     return True
@@ -352,6 +355,28 @@ async def ws_mark_replaced(hass, connection, msg):
 @websocket_api.require_admin
 @websocket_api.websocket_command(
     {
+        vol.Required("type"): "juice_patrol/undo_replacement",
+        vol.Required("entity_id"): cv.entity_id,
+    }
+)
+@websocket_api.async_response
+async def ws_undo_replacement(hass, connection, msg):
+    """Undo a manual battery replacement."""
+    coordinator = _ws_get_coordinator(hass, connection, msg["id"])
+    if not coordinator:
+        return
+    entity_id = msg["entity_id"]
+    if await coordinator.async_undo_replacement(entity_id):
+        connection.send_result(msg["id"], {"ok": True})
+    else:
+        connection.send_error(
+            msg["id"], "not_found", f"Entity {entity_id} not in store"
+        )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
         vol.Required("type"): "juice_patrol/detect_battery_type",
         vol.Required("entity_id"): cv.entity_id,
     }
@@ -363,14 +388,11 @@ async def ws_detect_battery_type(hass, connection, msg):
     if not coordinator:
         return
     entity_id = msg["entity_id"]
-    battery = coordinator.discovered.get(entity_id)
-    if not battery:
+    try:
+        battery_type, source = coordinator.detect_battery_type(entity_id)
+    except KeyError:
         connection.send_error(msg["id"], "not_found", f"Entity {entity_id} not discovered")
         return
-    # Resolve without cache to get fresh auto-detected result
-    battery_type, source = coordinator.type_resolver._resolve_uncached(
-        entity_id, battery.device_id
-    )
     connection.send_result(msg["id"], {
         "battery_type": battery_type,
         "source": source,
@@ -405,14 +427,11 @@ async def ws_recalculate(hass, connection, msg):
     if not coordinator:
         return
     entity_id = msg["entity_id"]
-    battery = coordinator.discovered.get(entity_id)
-    if not battery:
+    if not await coordinator.async_recalculate_entity(entity_id):
         connection.send_error(
             msg["id"], "not_found", f"Entity {entity_id} not discovered"
         )
         return
-    coordinator._history_cache.invalidate(entity_id)
-    await coordinator._async_rebuild_entity(entity_id, battery)
     connection.send_result(msg["id"], {"ok": True})
 
 
@@ -423,8 +442,6 @@ async def ws_recalculate(hass, connection, msg):
 @websocket_api.async_response
 async def ws_get_shopping_list(hass, connection, msg):
     """Get battery shopping list grouped by base battery type."""
-    import re
-
     coordinator = _ws_get_coordinator(hass, connection, msg["id"])
     if not coordinator:
         return
@@ -439,9 +456,11 @@ async def ws_get_shopping_list(hass, connection, msg):
             return m.group(2).strip(), int(m.group(1))
         return raw.strip(), 1
 
-    # Group by base battery type
+    # Group by base battery type (exclude rechargeable devices — they don't need replacement)
     groups_map: dict[str, list[dict]] = {}
     for entity_id, info in data.items():
+        if info.get("is_rechargeable"):
+            continue
         raw_type = info.get("battery_type") or "Unknown"
         base_type, battery_count = _parse_battery_type(raw_type)
         device_entry = {
@@ -483,6 +502,82 @@ async def ws_get_shopping_list(hass, connection, msg):
         "groups": groups,
         "total_needed": total_needed,
     })
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "juice_patrol/get_entity_chart",
+        vol.Required("entity_id"): cv.entity_id,
+    }
+)
+@websocket_api.async_response
+async def ws_get_entity_chart(hass, connection, msg):
+    """Return chart data (readings + prediction) for a single entity."""
+    coordinator = _ws_get_coordinator(hass, connection, msg["id"])
+    if not coordinator:
+        return
+    entity_id = msg["entity_id"]
+    chart_data = await coordinator.async_get_entity_chart_data(entity_id)
+    if chart_data is None:
+        connection.send_error(
+            msg["id"], "not_found", f"Entity {entity_id} not discovered"
+        )
+        return
+    connection.send_result(msg["id"], chart_data)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "juice_patrol/set_ignored",
+        vol.Required("entity_id"): cv.entity_id,
+        vol.Required("ignored"): bool,
+    }
+)
+@websocket_api.async_response
+async def ws_set_ignored(hass, connection, msg):
+    """Set the ignored flag for a device."""
+    coordinator = _ws_get_coordinator(hass, connection, msg["id"])
+    if not coordinator:
+        return
+    entity_id = msg["entity_id"]
+    coordinator.store.set_ignored(entity_id, msg["ignored"])
+    await coordinator.async_request_refresh()
+    connection.send_result(msg["id"], {"ok": True})
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): "juice_patrol/get_ignored"}
+)
+@websocket_api.async_response
+async def ws_get_ignored(hass, connection, msg):
+    """Return the list of ignored devices with basic info."""
+    coordinator = _ws_get_coordinator(hass, connection, msg["id"])
+    if not coordinator:
+        return
+    ignored_ids = coordinator.store.get_ignored_entities()
+    devices = []
+    for entity_id in sorted(ignored_ids):
+        state = hass.states.get(entity_id)
+        name = (
+            state.attributes.get("friendly_name", entity_id)
+            if state
+            else entity_id
+        )
+        level = None
+        if state and state.state not in ("unavailable", "unknown"):
+            try:
+                level = float(state.state)
+            except (ValueError, TypeError):
+                pass
+        devices.append({
+            "entity_id": entity_id,
+            "name": name,
+            "level": level,
+        })
+    connection.send_result(msg["id"], {"devices": devices})
 
 
 async def async_remove_config_entry_device(

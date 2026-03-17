@@ -7,7 +7,7 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 
 from . import JuicePatrolConfigEntry
-from .coordinator import JuicePatrolCoordinator
+from .data import JuicePatrolCoordinator
 
 
 async def async_get_config_entry_diagnostics(

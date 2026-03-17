@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from homeassistant.core import HomeAssistant
 from homeassistant.util.dt import utcnow
 
-from .const import HISTORY_CACHE_TTL, HISTORY_DEFAULT_DAYS
+from ..const import HISTORY_CACHE_TTL, HISTORY_DEFAULT_DAYS
 
 _LOGGER = logging.getLogger(__name__)
 

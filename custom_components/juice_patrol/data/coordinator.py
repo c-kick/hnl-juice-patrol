@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from collections.abc import Callable
@@ -15,7 +14,7 @@ from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, callback
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import (
+from ..const import (
     CONF_LOW_THRESHOLD,
     CONF_PREDICTION_HORIZON,
     CONF_STALE_TIMEOUT,
@@ -24,9 +23,9 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_STALE_TIMEOUT,
     DOMAIN,
-    HALF_LIFE_DAYS,
     MIN_READINGS_FOR_PREDICTION,
     MIN_TIMESPAN_HOURS,
+    REPLACEMENT_LOW_MULTIPLIER,
     EVENT_BATTERY_LOW,
     EVENT_BATTERY_PREDICTED_LOW,
     EVENT_DEVICE_REPLACED,
@@ -34,17 +33,23 @@ from .const import (
 )
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
-from .discovery import (
+from ..discovery import (
     BATTERY_ATTRIBUTES,
     DiscoveredBattery,
     SourceType,
     async_discover_batteries,
     parse_battery_level,
 )
-from .analysis import AnalysisResult, analyze_battery
+from ..engine import (
+    AnalysisResult,
+    PredictionResult,
+    analyze_battery,
+    extract_charging_segment,
+    predict_charge,
+    predict_discharge,
+)
 from .battery_types import BatteryTypeResolver
 from .history import HistoryCache, async_get_readings
-from .predictions import PredictionResult, predict_discharge
 from .store import JuicePatrolStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -191,8 +196,15 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             for cb in self._new_device_callbacks:
                 cb(list(truly_new))
 
-        # Clean up devices for entities that have disappeared (deduplicate by identifier)
+        # Clean up in-memory tracking for disappeared entities
         disappeared = old_entity_ids - new_entity_ids
+        for entity_id in disappeared:
+            self._last_known_levels.pop(entity_id, None)
+            self._fired_low.discard(entity_id)
+            self._fired_stale.discard(entity_id)
+            self._fired_predicted_low.discard(entity_id)
+
+        # Clean up devices for entities that have disappeared (deduplicate by identifier)
         if disappeared:
             identifiers_to_remove: dict[str, list[str]] = {}
             for entity_id in disappeared:
@@ -284,7 +296,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         old_level = self._last_known_levels.get(entity_id)
         replaced = False
         if old_level is not None and not is_rechargeable:
-            if old_level <= self.low_threshold * 2 and level >= 80:
+            if old_level <= self.low_threshold * REPLACEMENT_LOW_MULTIPLIER and level >= 80:
                 _LOGGER.info(
                     "Battery replacement detected for %s: %s%% → %s%%",
                     entity_id,
@@ -379,8 +391,8 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         prediction = predict_discharge(
             readings,
-            low_threshold=float(threshold),
-            half_life_days=HALF_LIFE_DAYS,
+            target_level=0.0,
+            half_life_days=None,
             min_readings=MIN_READINGS_FOR_PREDICTION,
             min_timespan_hours=min_span,
         )
@@ -388,22 +400,11 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Sanity-check predictions against actual current level
         current = battery.current_level
         if prediction.estimated_days_remaining is not None:
-            # If actual level is already at or below threshold, days = 0
-            if current is not None and current <= threshold:
-                prediction.estimated_days_remaining = 0.0
-                prediction.estimated_hours_remaining = 0.0
-                prediction.estimated_empty_timestamp = time.time()
-            # Model says "already past threshold" (days=0) but actual level
-            # is still above threshold — model has diverged from reality
-            # (e.g. discharge rate slowed down). Suppress the prediction.
-            elif prediction.estimated_days_remaining == 0.0 and (
-                current is not None and current > threshold
+            # Model says "already past target" (days=0) but actual level
+            # is still well above 0% — model has diverged from reality.
+            if prediction.estimated_days_remaining == 0.0 and (
+                current is not None and current > 5
             ):
-                prediction.estimated_days_remaining = None
-                prediction.estimated_hours_remaining = None
-                prediction.estimated_empty_timestamp = None
-            # Cap unreasonably high predictions at 730 days (2 years)
-            elif prediction.estimated_days_remaining > 730:
                 prediction.estimated_days_remaining = None
                 prediction.estimated_hours_remaining = None
                 prediction.estimated_empty_timestamp = None
@@ -457,6 +458,8 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "device_id": battery.device_id,
             "source_type": battery.source_type,
             "platform": battery.platform,
+            "manufacturer": battery.manufacturer,
+            "model": battery.model,
             "reading_count": len(all_readings),
             "segment_count": len(readings),
             "is_cyclic": is_cyclic,
@@ -479,11 +482,13 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "battery_type": battery_type,
             "battery_type_source": battery_type_source,
             "is_rechargeable": analysis.is_rechargeable,
+            "charging_state": battery_state,
             "replacement_pending": (
                 dev is not None and not dev.replacement_confirmed
             ),
             "is_low": is_low,
             "is_stale": is_stale,
+            "last_calculated": time.time(),
         }
 
     def _get_battery_state(self, entity_id: str, device_id: str | None) -> str | None:
@@ -516,21 +521,22 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return None
 
     async def _async_build_full_data(self) -> dict[str, Any]:
-        """Build the full data dict for all entities."""
-        tasks = {
-            entity_id: self._async_build_entity_data(entity_id, battery)
-            for entity_id, battery in self.discovered.items()
-        }
-        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+        """Build the full data dict for all entities.
 
+        Queries are run sequentially to avoid overwhelming the recorder's
+        SQLite database with dozens of concurrent reads.
+        """
         data: dict[str, Any] = {}
-        for entity_id, result in zip(tasks.keys(), results):
-            if isinstance(result, Exception):
+        for entity_id, battery in self.discovered.items():
+            try:
+                data[entity_id] = await self._async_build_entity_data(
+                    entity_id, battery
+                )
+            except Exception:
                 _LOGGER.warning(
-                    "Failed to build data for %s: %s", entity_id, result
+                    "Failed to build data for %s", entity_id, exc_info=True
                 )
                 continue
-            data[entity_id] = result
 
         # On first full build, pre-populate dedup sets (#5)
         if self._first_full_build:
@@ -544,6 +550,53 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Force refresh with cache invalidation."""
         self._history_cache.invalidate_all()
         await self.async_request_refresh()
+
+    async def async_mark_replaced(self, entity_id: str) -> bool:
+        """Mark a battery as replaced: update store, invalidate cache, refresh.
+
+        Returns False if entity_id not found in store.
+        """
+        if not self.store.mark_replaced(entity_id):
+            return False
+        self._history_cache.invalidate(entity_id)
+        await self.async_request_refresh()
+        return True
+
+    async def async_undo_replacement(self, entity_id: str) -> bool:
+        """Undo a manual replacement: restore last_replaced, invalidate cache, refresh.
+
+        Returns False if entity_id not found in store.
+        """
+        if not self.store.undo_replacement(entity_id):
+            return False
+        self._history_cache.invalidate(entity_id)
+        await self.async_request_refresh()
+        return True
+
+    async def async_recalculate_entity(self, entity_id: str) -> bool:
+        """Recalculate predictions for a single entity (invalidates its cache).
+
+        Returns False if entity_id not discovered.
+        """
+        battery = self.discovered.get(entity_id)
+        if not battery:
+            return False
+        self._history_cache.invalidate(entity_id)
+        await self._async_rebuild_entity(entity_id, battery)
+        return True
+
+    def detect_battery_type(
+        self, entity_id: str
+    ) -> tuple[str | None, str | None]:
+        """Auto-detect battery type for a discovered device (bypasses cache).
+
+        Returns (battery_type, source) or (None, None).
+        Raises KeyError if entity_id not discovered.
+        """
+        battery = self.discovered.get(entity_id)
+        if battery is None:
+            raise KeyError(entity_id)
+        return self.type_resolver.resolve_uncached(entity_id, battery.device_id)
 
     @callback
     def _fire_events_for_entity(
@@ -623,6 +676,99 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Fire events for all entities (used on full rebuild)."""
         for entity_id, info in data.items():
             self._fire_events_for_entity(entity_id, info)
+
+    async def async_get_entity_chart_data(
+        self, entity_id: str
+    ) -> dict[str, Any] | None:
+        """Return readings + prediction metadata for a single entity's chart.
+
+        Returns None if the entity is not discovered.
+        """
+        battery = self.discovered.get(entity_id)
+        if battery is None:
+            return None
+
+        dev = self.store.get_device(entity_id)
+        since = (
+            datetime.fromtimestamp(dev.last_replaced, tz=timezone.utc)
+            if dev and dev.last_replaced
+            else None
+        )
+        all_readings = await async_get_readings(
+            self.hass, entity_id, since=since, cache=self._history_cache
+        )
+        readings = _extract_current_segment(all_readings)
+
+        threshold = (
+            dev.custom_threshold if dev and dev.custom_threshold
+            else self.low_threshold
+        )
+
+        # Get prediction from coordinator data (already computed)
+        prediction = None
+        if self.data and entity_id in self.data:
+            prediction = self.data[entity_id].get("prediction")
+
+        # Serialize prediction to plain dict
+        pred_dict: dict[str, Any] = {}
+        if prediction is not None:
+            pred_dict = {
+                "slope_per_day": prediction.slope_per_day,
+                "intercept": prediction.intercept,
+                "r_squared": prediction.r_squared,
+                "confidence": str(prediction.confidence),
+                "estimated_empty_timestamp": prediction.estimated_empty_timestamp,
+                "estimated_days_remaining": prediction.estimated_days_remaining,
+                "status": str(prediction.status),
+                "reliability": prediction.reliability,
+                "data_points_used": prediction.data_points_used,
+            }
+
+        entity_data = self.data.get(entity_id, {}) if self.data else {}
+
+        # Charge prediction (rechargeable batteries only)
+        charge_pred_dict: dict[str, Any] | None = None
+        is_rechargeable = entity_data.get("is_rechargeable", False)
+        if is_rechargeable and all_readings:
+            charging_segment = extract_charging_segment(all_readings)
+            if charging_segment:
+                charge_result = predict_charge(charging_segment)
+                if (
+                    charge_result.slope_per_hour is not None
+                    and charge_result.estimated_full_timestamp is not None
+                ):
+                    charge_pred_dict = {
+                        "slope_per_hour": charge_result.slope_per_hour,
+                        "intercept": charge_result.intercept,
+                        "r_squared": charge_result.r_squared,
+                        "confidence": str(charge_result.confidence),
+                        "estimated_full_timestamp": (
+                            charge_result.estimated_full_timestamp
+                        ),
+                        "estimated_hours_to_full": (
+                            charge_result.estimated_hours_to_full
+                        ),
+                        "status": str(charge_result.status),
+                        "reliability": charge_result.reliability,
+                        "data_points_used": charge_result.data_points_used,
+                        "segment_start_timestamp": charging_segment[0]["t"],
+                        "segment_start_level": charging_segment[0]["v"],
+                    }
+
+        return {
+            "readings": readings,
+            "all_readings": all_readings,
+            "prediction": pred_dict,
+            "charge_prediction": charge_pred_dict,
+            "threshold": threshold,
+            "last_replaced": dev.last_replaced if dev else None,
+            "is_rechargeable": is_rechargeable,
+            "first_reading_timestamp": readings[0]["t"] if readings else None,
+            "device_name": battery.device_name,
+            "level": battery.current_level,
+            "battery_type": entity_data.get("battery_type"),
+            "charging_state": entity_data.get("charging_state"),
+        }
 
     async def async_shutdown(self) -> None:
         """Shut down the coordinator, save store, remove listeners."""

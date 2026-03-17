@@ -12,7 +12,7 @@ from homeassistant.const import PERCENTAGE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
-from .const import DOMAIN
+from ..const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -48,6 +48,8 @@ class DiscoveredBattery:
     current_level: float | None
     source_type: SourceType
     platform: str | None = None  # integration that provides this entity
+    manufacturer: str | None = None
+    model: str | None = None
 
 
 def parse_battery_level(value: Any) -> float | None:
@@ -115,7 +117,7 @@ async def async_discover_batteries(
         if entry.unit_of_measurement and entry.unit_of_measurement != PERCENTAGE:
             continue
 
-        device_name = _get_device_name(dev_reg, entry.device_id)
+        device_name, manufacturer, model = _get_device_info(dev_reg, entry.device_id)
         state = hass.states.get(entry.entity_id)
         level = parse_battery_level(state.state) if state else None
 
@@ -126,6 +128,8 @@ async def async_discover_batteries(
             current_level=level,
             source_type=SourceType.DEVICE_CLASS_SENSOR,
             platform=entry.platform,
+            manufacturer=manufacturer,
+            model=model,
         )
 
     # Pass 2: entities with battery attributes (that weren't already found)
@@ -150,7 +154,7 @@ async def async_discover_batteries(
             # Find device_id from entity registry
             entry = ent_reg.async_get(state.entity_id)
             device_id = entry.device_id if entry else None
-            device_name = _get_device_name(dev_reg, device_id)
+            device_name, manufacturer, model = _get_device_info(dev_reg, device_id)
 
             discovered[state.entity_id] = DiscoveredBattery(
                 entity_id=state.entity_id,
@@ -159,6 +163,8 @@ async def async_discover_batteries(
                 current_level=level,
                 source_type=SourceType.ATTRIBUTE_BATTERY_LEVEL,
                 platform=entry.platform if entry else None,
+                manufacturer=manufacturer,
+                model=model,
             )
             break  # Found a battery attribute, no need to check others
 
@@ -209,13 +215,19 @@ async def async_discover_batteries(
     return result
 
 
-def _get_device_name(
+def _get_device_info(
     dev_reg: dr.DeviceRegistry, device_id: str | None
-) -> str | None:
-    """Get the device name from the device registry."""
+) -> tuple[str | None, str | None, str | None]:
+    """Get device name, manufacturer, and model from the device registry.
+
+    Returns (name, manufacturer, model).
+    """
     if device_id is None:
-        return None
+        return None, None, None
     device = dev_reg.async_get(device_id)
     if device is None:
-        return None
-    return device.name_by_user or device.name
+        return None, None, None
+    name = device.name_by_user or device.name
+    manufacturer = str(device.manufacturer).strip() if device.manufacturer else None
+    model = str(device.model).strip() if device.model else None
+    return name, manufacturer, model

@@ -2,7 +2,7 @@
 
 import time
 
-from custom_components.juice_patrol.history import HistoryCache
+from custom_components.juice_patrol.data.history import HistoryCache
 
 
 class TestHistoryCache:

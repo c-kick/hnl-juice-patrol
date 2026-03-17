@@ -19,7 +19,9 @@ DEFAULT_SCAN_INTERVAL = 3600  # seconds (1 hour)
 # Prediction
 MIN_READINGS_FOR_PREDICTION = 3
 MIN_TIMESPAN_HOURS = 24
-HALF_LIFE_DAYS = 14.0
+
+# Replacement detection — also mirrored in engine/analysis.py:_REPLACEMENT_LOW_MULTIPLIER
+REPLACEMENT_LOW_MULTIPLIER = 2  # "was reasonably low" = threshold × this
 
 # Events
 EVENT_BATTERY_LOW = f"{DOMAIN}_battery_low"

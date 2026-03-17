@@ -22,9 +22,10 @@ class JuicePatrolPanel extends LitElement {
       _shoppingData: { state: true },
       _shoppingLoading: { state: true },
       _refreshing: { state: true },
-      _menuState: { state: true },
       _flashGeneration: { state: true },
       _expandedGroups: { state: true },
+      _ignoredCount: { state: true },
+      _ignoredEntities: { state: true },
     };
   }
 
@@ -57,8 +58,9 @@ class JuicePatrolPanel extends LitElement {
     this._chartData = null;
     this._chartLoading = false;
     this._chartLastLevel = null;
-    this._menuState = null;
     this._flashGeneration = 0;
+    this._ignoredCount = 0;
+    this._ignoredEntities = null;
     this._flashCleanupTimer = null;
     this._refreshTimer = null;
     this._chartDebounce = null;
@@ -83,6 +85,11 @@ class JuicePatrolPanel extends LitElement {
     return this._panel;
   }
 
+  /** Base URL path for this panel (e.g. "/juice-patrol"). */
+  get _basePath() {
+    return `/${this._panel?.url_path || "juice-patrol"}`;
+  }
+
   connectedCallback() {
     super.connectedCallback();
     this.requestUpdate();
@@ -90,10 +97,8 @@ class JuicePatrolPanel extends LitElement {
       if (e.key === "Escape") this._closeOverlays();
     };
     window.addEventListener("keydown", this._escapeHandler);
-    this._popstateHandler = (e) => {
-      if (this._activeView === "detail") {
-        this._closeDetailInternal();
-      }
+    this._popstateHandler = () => {
+      this._syncViewFromUrl();
     };
     window.addEventListener("popstate", this._popstateHandler);
   }
@@ -115,10 +120,40 @@ class JuicePatrolPanel extends LitElement {
   }
 
   firstUpdated() {
+    // Restore view from URL path (handles refresh / direct navigation)
+    this._syncViewFromUrl();
+
+    // Legacy ?entity= param support for highlight-only deep links
     const params = new URLSearchParams(window.location.search);
     const entityParam = params.get("entity");
     if (entityParam && /^[a-z0-9_]+\.[a-z0-9_]+$/.test(entityParam)) {
       this._highlightEntity = entityParam;
+    }
+  }
+
+  /** Sync _activeView and _detailEntity from the current URL path. */
+  _syncViewFromUrl() {
+    const path = window.location.pathname;
+    const prefix = `${this._basePath}/detail/`;
+    if (path.startsWith(prefix)) {
+      const entityId = decodeURIComponent(path.slice(prefix.length));
+      if (/^[a-z0-9_]+\.[a-z0-9_]+$/.test(entityId)) {
+        if (this._detailEntity !== entityId || this._activeView !== "detail") {
+          this._detailEntity = entityId;
+          this._activeView = "detail";
+          this._chartData = null;
+          this._chartLastLevel = null;
+          this._loadChartData(entityId);
+        }
+        return;
+      }
+    }
+    // Any other path → main view
+    if (this._activeView === "detail") {
+      this._detailEntity = null;
+      this._chartData = null;
+      this._chartEl = null;
+      this._activeView = "devices";
     }
   }
 
@@ -154,7 +189,10 @@ class JuicePatrolPanel extends LitElement {
       this._entities = sorted;
     }
 
-    if (isFirstLoad) this._loadConfig();
+    if (isFirstLoad) {
+      this._loadConfig();
+      this._loadIgnored();
+    }
 
     // Auto-refresh chart data when entity level changes in detail view
     if (this._activeView === "detail" && this._detailEntity && !this._chartLoading) {
@@ -215,6 +253,7 @@ class JuicePatrolPanel extends LitElement {
           platform: null,
           dischargeRateHour: null,
           hoursRemaining: null,
+          lastCalculated: null,
         });
       }
       const dev = devices.get(sourceEntity);
@@ -241,6 +280,7 @@ class JuicePatrolPanel extends LitElement {
         dev.isRechargeable = attrs.is_rechargeable || false;
         dev.rechargeableReason = attrs.rechargeable_reason || null;
         dev.replacementPending = attrs.replacement_pending || false;
+        dev.lastReplaced = attrs.last_replaced || null;
         dev.batteryType = attrs.battery_type || null;
         dev.batteryTypeSource = attrs.battery_type_source || null;
         dev.platform = attrs.platform || null;
@@ -250,6 +290,7 @@ class JuicePatrolPanel extends LitElement {
           ? attrs.charging_state.toLowerCase().replace(/\s/g, "_")
           : null;
         dev.dischargeRateHour = attrs.discharge_rate_hour ?? null;
+        dev.lastCalculated = attrs.last_calculated || null;
       } else if (entityId.includes("_days_remaining")) {
         dev.daysRemaining =
           state.state !== "unknown" && state.state !== "unavailable"
@@ -479,6 +520,32 @@ class JuicePatrolPanel extends LitElement {
     return dev.dischargeRateHour !== null && dev.dischargeRateHour >= 1;
   }
 
+  _predictionReason(dev) {
+    const s = dev.predictionStatus;
+    if (!s || s === "normal") return null;
+    const labels = {
+      charging: "Charging",
+      flat: "Flat",
+      noisy: "Noisy data",
+      insufficient_data: "Not enough data",
+      single_level: "Single level",
+      insufficient_range: "Tiny range",
+    };
+    return labels[s] || null;
+  }
+
+  _predictionReasonDetail(status) {
+    const details = {
+      charging: "This battery is currently charging, so no discharge prediction is generated. Once it starts discharging again, a new prediction will be calculated.",
+      flat: "The battery level has been essentially flat \u2014 no significant discharge detected. This is normal for devices with very slow drain. A prediction will appear once enough change is observed.",
+      noisy: "The battery data is too irregular to fit a reliable trend line. This can happen with sensors that report inconsistent values. The prediction will improve as more stable readings accumulate.",
+      insufficient_data: "There are not enough data points or the observation period is too short to calculate a prediction. Juice Patrol needs at least 3 readings spanning 24 hours.",
+      single_level: "All recorded readings have the same battery level. This typically means the sensor reports a fixed value or hasn't changed since discovery.",
+      insufficient_range: "The battery level has barely changed \u2014 the total variation is within one reporting step. More drain needs to occur before a trend can be detected.",
+    };
+    return details[status] || null;
+  }
+
   _formatRate(dev) {
     if (this._isFastDischarge(dev)) {
       return dev.dischargeRateHour !== null ? dev.dischargeRateHour + "%/h" : "\u2014";
@@ -629,27 +696,110 @@ class JuicePatrolPanel extends LitElement {
 
   async _markReplaced(entityId) {
     const dev = this._getDevice(entityId);
-    const label = dev?.isRechargeable ? "recharged" : "replaced";
+    if (dev?.isRechargeable) {
+      this._showReplaceRechargeableDialog(entityId);
+      return;
+    }
+    this._showReplaceDialog(entityId);
+  }
+
+  async _doMarkReplaced(entityId) {
     try {
       await this._hass.callWS({
         type: "juice_patrol/mark_replaced",
         entity_id: entityId,
       });
-      this._showToast(`Battery marked as ${label}`);
+      this._showToast("Battery marked as replaced");
     } catch (e) {
-      this._showToast(`Failed to mark as ${label}`);
+      this._showToast("Failed to mark as replaced");
+    }
+  }
+
+  _showReplaceRechargeableDialog(entityId) {
+    const dialog = document.createElement("ha-dialog");
+    dialog.open = true;
+    dialog.headerTitle = "Replace rechargeable battery?";
+    this.shadowRoot.appendChild(dialog);
+
+    const closeDialog = () => { dialog.open = false; dialog.remove(); };
+
+    const body = document.createElement("div");
+    body.innerHTML = `
+      <p style="margin-top:0">This device is marked as <strong>rechargeable</strong>, which means
+      Juice Patrol expects its battery level to gradually rise and fall as it
+      charges and discharges. Charging is detected automatically \u2014 you don't
+      need to do anything when you plug it in.</p>
+      <p><strong>"Mark as replaced"</strong> is for when you physically swap the
+      battery pack itself (e.g. a worn-out cell that no longer holds charge).</p>
+      <p>If you just recharged the device, you can ignore this \u2014 Juice Patrol
+      already handles that.</p>
+      <p style="border-left:3px solid var(--error-color, #db4437); padding:4px 12px; margin:16px 0">
+        <strong>Warning:</strong> This will discard all Juice Patrol history for this
+        device and start tracking from scratch. Recorder data is not affected.
+        This action can be undone.</p>
+      <div class="jp-dialog-actions">
+        <ha-button variant="neutral" class="jp-dialog-cancel">Cancel</ha-button>
+        <ha-button class="jp-dialog-confirm" variant="danger">Yes, battery was replaced</ha-button>
+      </div>
+    `;
+    dialog.appendChild(body);
+
+    body.querySelector(".jp-dialog-cancel").addEventListener("click", closeDialog);
+    body.querySelector(".jp-dialog-confirm").addEventListener("click", () => {
+      closeDialog();
+      this._doMarkReplaced(entityId);
+    });
+  }
+
+  _showReplaceDialog(entityId) {
+    const dialog = document.createElement("ha-dialog");
+    dialog.open = true;
+    dialog.headerTitle = "Mark battery as replaced?";
+    this.shadowRoot.appendChild(dialog);
+
+    const closeDialog = () => { dialog.open = false; dialog.remove(); };
+
+    const body = document.createElement("div");
+    body.innerHTML = `
+      <p style="margin-top:0">This tells Juice Patrol that you swapped the batteries.
+      The discharge history will be reset and tracking starts fresh.</p>
+      <p style="border-left:3px solid var(--error-color, #db4437); padding:4px 12px; margin:16px 0">
+        <strong>Warning:</strong> This will discard all Juice Patrol history for this
+        device and start tracking from scratch. Recorder data is not affected.
+        This action can be undone.</p>
+      <div class="jp-dialog-actions">
+        <ha-button variant="neutral" class="jp-dialog-cancel">Cancel</ha-button>
+        <ha-button class="jp-dialog-confirm" variant="danger">Yes, battery was replaced</ha-button>
+      </div>
+    `;
+    dialog.appendChild(body);
+
+    body.querySelector(".jp-dialog-cancel").addEventListener("click", closeDialog);
+    body.querySelector(".jp-dialog-confirm").addEventListener("click", () => {
+      closeDialog();
+      this._doMarkReplaced(entityId);
+    });
+  }
+
+  async _undoReplacement(entityId) {
+    try {
+      await this._hass.callWS({
+        type: "juice_patrol/undo_replacement",
+        entity_id: entityId,
+      });
+      this._showToast("Replacement undone — history restored");
+    } catch (e) {
+      this._showToast("Failed to undo replacement");
     }
   }
 
   async _confirmReplacement(entityId) {
-    const dev = this._getDevice(entityId);
-    const label = dev?.isRechargeable ? "Recharge" : "Replacement";
     try {
       await this._hass.callWS({
         type: "juice_patrol/confirm_replacement",
         entity_id: entityId,
       });
-      this._showToast(`${label} confirmed`);
+      this._showToast("Replacement confirmed");
     } catch (e) {
       this._showToast("Failed to confirm");
     }
@@ -680,6 +830,49 @@ class JuicePatrolPanel extends LitElement {
       this._refreshTimer = null;
       this._refreshing = false;
     }, 2000);
+  }
+
+  async _loadIgnored() {
+    if (!this._hass) return;
+    try {
+      const result = await this._hass.callWS({
+        type: "juice_patrol/get_ignored",
+      });
+      this._ignoredCount = result.devices.length;
+      this._ignoredEntities = result.devices;
+    } catch (e) {
+      console.error("Juice Patrol: failed to load ignored devices", e);
+    }
+  }
+
+  async _ignoreDevice(entityId) {
+    if (!this._hass) return;
+    try {
+      await this._hass.callWS({
+        type: "juice_patrol/set_ignored",
+        entity_id: entityId,
+        ignored: true,
+      });
+      this._showToast("Device ignored");
+      this._loadIgnored();
+    } catch (e) {
+      this._showToast("Failed to ignore device");
+    }
+  }
+
+  async _unignoreDevice(entityId) {
+    if (!this._hass) return;
+    try {
+      await this._hass.callWS({
+        type: "juice_patrol/set_ignored",
+        entity_id: entityId,
+        ignored: false,
+      });
+      this._showToast("Device restored");
+      this._loadIgnored();
+    } catch (e) {
+      this._showToast("Failed to unignore device");
+    }
   }
 
   async _loadShoppingList() {
@@ -736,23 +929,16 @@ class JuicePatrolPanel extends LitElement {
     this._activeView = "detail";
     this._chartData = null;
     this._chartLastLevel = null;
-    history.pushState({ jpDetail: entityId }, "");
+    const detailUrl = `${this._basePath}/detail/${encodeURIComponent(entityId)}`;
+    history.pushState({ jpDetail: entityId }, "", detailUrl);
     this._loadChartData(entityId);
   }
 
-  // Called by the Back button — triggers history.back() which fires popstate
+  // Called by the Back button — triggers history.back() which fires popstate → _syncViewFromUrl
   _closeDetail() {
     if (this._activeView === "detail") {
       history.back();
     }
-  }
-
-  // Actually resets detail state — called from popstate handler
-  _closeDetailInternal() {
-    this._detailEntity = null;
-    this._chartData = null;
-    this._chartEl = null;
-    this._activeView = "devices";
   }
 
   _toggleSort(col) {
@@ -770,6 +956,7 @@ class JuicePatrolPanel extends LitElement {
     this._closeOverlays();
     this._filterCategory = this._filterCategory === cat ? null : cat;
     if (this._activeView !== "devices") this._activeView = "devices";
+    if (this._filterCategory === "ignored") this._loadIgnored();
   }
 
   _switchTab(view) {
@@ -812,45 +999,32 @@ class JuicePatrolPanel extends LitElement {
     this._settingsDirty = false;
   }
 
-  _toggleShoppingGroup(type) {
-    const next = { ...this._expandedGroups };
-    if (next[type]) {
-      delete next[type];
-    } else {
-      next[type] = true;
-    }
-    this._expandedGroups = next;
-  }
-
-  _showActionMenu(e, entityId) {
-    e.stopPropagation();
-    this._closeOverlays();
-    const rect = e.currentTarget.getBoundingClientRect();
-    this._menuState = {
-      entityId,
-      top: rect.bottom + 4,
-      right: window.innerWidth - rect.right,
-    };
-  }
-
-  _closeOverlays() {
-    this._menuState = null;
-    // Remove any imperative dialogs
-    this.shadowRoot
-      .querySelectorAll(".jp-dialog-overlay")
-      .forEach((el) => el.remove());
-  }
-
-  _handleMenuAction(action, entityId) {
-    this._menuState = null;
+  _handleMenuSelect(e, entityId) {
+    const action = e.detail?.item?.value;
+    if (!action || !entityId) return;
     const dev = this._getDevice(entityId);
-    if (action === "replace") {
+    if (action === "detail") {
+      this._openDetail(entityId);
+    } else if (action === "confirm") {
+      this._confirmReplacement(entityId);
+    } else if (action === "replace") {
       this._markReplaced(entityId);
     } else if (action === "recalculate") {
       this._recalculate(entityId);
     } else if (action === "type") {
       this._setBatteryType(entityId, dev?.batteryType);
+    } else if (action === "undo-replace") {
+      this._undoReplacement(entityId);
+    } else if (action === "ignore") {
+      this._ignoreDevice(entityId);
     }
+  }
+
+  _closeOverlays() {
+    // Remove any imperative dialogs
+    this.shadowRoot
+      .querySelectorAll("ha-dialog")
+      .forEach((el) => { el.open = false; el.remove(); });
   }
 
   _handleRowClick(entityId) {
@@ -861,8 +1035,6 @@ class JuicePatrolPanel extends LitElement {
     e.stopPropagation();
     if (action === "confirm") {
       this._confirmReplacement(entityId);
-    } else if (action === "menu") {
-      this._showActionMenu(e, entityId);
     }
   }
 
@@ -885,9 +1057,12 @@ class JuicePatrolPanel extends LitElement {
     let rechargeable = dev?.isRechargeable || false;
     let rechargeableChanged = false;
 
-    const dialog = document.createElement("div");
-    dialog.className = "jp-dialog-overlay";
+    const dialog = document.createElement("ha-dialog");
+    dialog.open = true;
+    dialog.headerTitle = "Set battery type";
     this.shadowRoot.appendChild(dialog);
+
+    const closeDialog = () => { dialog.open = false; dialog.remove(); };
 
     const esc = (s) => {
       if (!s) return "";
@@ -895,6 +1070,9 @@ class JuicePatrolPanel extends LitElement {
       d.textContent = s;
       return d.innerHTML;
     };
+
+    const body = document.createElement("div");
+    dialog.appendChild(body);
 
     const renderDialog = () => {
       const badgeHtml =
@@ -907,46 +1085,41 @@ class JuicePatrolPanel extends LitElement {
               .join("")
           : '<span class="jp-badge-placeholder">Click a battery type below, or type a custom value</span>';
 
-      dialog.innerHTML = `
-        <div class="jp-dialog">
-          <div class="jp-dialog-title">Set battery type</div>
-          <div class="jp-dialog-body">
-            <div class="jp-dialog-desc">${esc(dev?.name || entityId)}</div>
-            <div class="jp-badge-field">${badgeHtml}</div>
-            <div class="jp-dialog-presets">
-              ${presets
-                .map((t) => {
-                  const disabled = lockedType !== null && t !== lockedType;
-                  return `<button class="jp-preset${disabled ? " disabled" : ""}${t === lockedType ? " active" : ""}"
-                  data-type="${t}" ${disabled ? "disabled" : ""}>${t}</button>`;
-                })
-                .join("")}
-            </div>
-            <div class="jp-dialog-or">or type a custom value:</div>
-            <input type="text" class="jp-dialog-input" placeholder="e.g. 18650, LR44, custom..."
-                   value="${badges.length === 0 && !presets.includes(parsed.type) ? esc(current) : ""}">
-            <button class="btn btn-secondary jp-autodetect" style="margin-top:8px;width:100%">
-              <ha-icon icon="mdi:auto-fix" style="--mdc-icon-size:16px;vertical-align:middle;margin-right:4px"></ha-icon>
-              Autodetect
-            </button>
-            <label class="jp-rechargeable-toggle">
-              <input type="checkbox" class="jp-rechargeable-cb" ${rechargeable ? "checked" : ""}>
-              <ha-icon icon="mdi:power-plug-battery" style="--mdc-icon-size:16px"></ha-icon>
-              Rechargeable battery
-            </label>
-          </div>
-          <div class="jp-dialog-actions">
-            <button class="btn btn-secondary jp-dialog-clear">Clear</button>
-            <button class="btn btn-secondary jp-dialog-cancel">Cancel</button>
-            <button class="btn btn-primary jp-dialog-save">Save</button>
-          </div>
+      body.innerHTML = `
+        <div class="jp-dialog-desc">${esc(dev?.name || entityId)}</div>
+        <div class="jp-badge-field">${badgeHtml}</div>
+        <div class="jp-dialog-presets">
+          ${presets
+            .map((t) => {
+              const disabled = lockedType !== null && t !== lockedType;
+              return `<button class="jp-preset${disabled ? " disabled" : ""}${t === lockedType ? " active" : ""}"
+              data-type="${t}" ${disabled ? "disabled" : ""}>${t}</button>`;
+            })
+            .join("")}
+        </div>
+        <div class="jp-dialog-or">or type a custom value:</div>
+        <input type="text" class="jp-dialog-input" placeholder="e.g. 18650, LR44, custom..."
+               value="${badges.length === 0 && !presets.includes(parsed.type) ? esc(current) : ""}">
+        <ha-button class="jp-autodetect" style="margin-top:8px;width:100%">
+          <ha-icon slot="start" icon="mdi:auto-fix"></ha-icon>
+          Autodetect
+        </ha-button>
+        <label class="jp-rechargeable-toggle">
+          <input type="checkbox" class="jp-rechargeable-cb" ${rechargeable ? "checked" : ""}>
+          <ha-icon icon="mdi:power-plug-battery" style="--mdc-icon-size:16px"></ha-icon>
+          Rechargeable battery
+        </label>
+        <div class="jp-dialog-actions">
+          <ha-button variant="neutral" class="jp-dialog-clear">Clear</ha-button>
+          <ha-button variant="neutral" class="jp-dialog-cancel">Cancel</ha-button>
+          <ha-button class="jp-dialog-save">Save</ha-button>
         </div>
       `;
       bindDialogEvents();
     };
 
     const bindDialogEvents = () => {
-      dialog.querySelectorAll(".jp-badge-chip").forEach((chip) => {
+      body.querySelectorAll(".jp-badge-chip").forEach((chip) => {
         chip.addEventListener("click", () => {
           badges.splice(parseInt(chip.dataset.idx), 1);
           if (badges.length === 0) lockedType = null;
@@ -954,19 +1127,19 @@ class JuicePatrolPanel extends LitElement {
         });
       });
 
-      dialog.querySelectorAll(".jp-preset:not([disabled])").forEach((btn) => {
+      body.querySelectorAll(".jp-preset:not([disabled])").forEach((btn) => {
         btn.addEventListener("click", () => {
           const t = btn.dataset.type;
           lockedType = t;
           badges.push(t);
-          const input = dialog.querySelector(".jp-dialog-input");
+          const input = body.querySelector(".jp-dialog-input");
           if (input) input.value = "";
           renderDialog();
         });
       });
 
-      dialog.querySelector(".jp-autodetect")?.addEventListener("click", async () => {
-        const btn = dialog.querySelector(".jp-autodetect");
+      body.querySelector(".jp-autodetect")?.addEventListener("click", async () => {
+        const btn = body.querySelector(".jp-autodetect");
         if (btn) {
           btn.disabled = true;
           btn.textContent = "Detecting...";
@@ -986,7 +1159,7 @@ class JuicePatrolPanel extends LitElement {
             }
             renderDialog();
             if (!presets.includes(p.type)) {
-              const input = dialog.querySelector(".jp-dialog-input");
+              const input = body.querySelector(".jp-dialog-input");
               if (input) input.value = result.battery_type;
             }
             this._showToast(`Detected: ${result.battery_type} (${result.source})`);
@@ -1008,30 +1181,28 @@ class JuicePatrolPanel extends LitElement {
         }
       });
 
-      dialog.querySelector(".jp-rechargeable-cb")?.addEventListener("change", (e) => {
+      body.querySelector(".jp-rechargeable-cb")?.addEventListener("change", (e) => {
         rechargeable = e.target.checked;
         rechargeableChanged = true;
       });
 
-      dialog.addEventListener("click", (e) => {
-        if (e.target === dialog) dialog.remove();
-      });
-      dialog
+      dialog.addEventListener("closed", closeDialog);
+      body
         .querySelector(".jp-dialog-cancel")
-        ?.addEventListener("click", () => dialog.remove());
-      dialog.querySelector(".jp-dialog-clear")?.addEventListener("click", () => {
+        ?.addEventListener("click", closeDialog);
+      body.querySelector(".jp-dialog-clear")?.addEventListener("click", () => {
         badges = [];
         lockedType = null;
-        const input = dialog.querySelector(".jp-dialog-input");
+        const input = body.querySelector(".jp-dialog-input");
         if (input) input.value = "";
         renderDialog();
       });
 
-      dialog
+      body
         .querySelector(".jp-dialog-save")
         ?.addEventListener("click", async () => {
           let val;
-          const customInput = dialog.querySelector(".jp-dialog-input");
+          const customInput = body.querySelector(".jp-dialog-input");
           const customVal = customInput?.value?.trim();
           if (badges.length > 0) {
             val = this._formatBatteryType(lockedType, badges.length);
@@ -1040,7 +1211,7 @@ class JuicePatrolPanel extends LitElement {
           } else {
             val = null;
           }
-          dialog.remove();
+          closeDialog();
           const typeChanged = val !== (current || null);
           if (rechargeableChanged) {
             try {
@@ -1058,10 +1229,10 @@ class JuicePatrolPanel extends LitElement {
           }
         });
 
-      const input = dialog.querySelector(".jp-dialog-input");
+      const input = body.querySelector(".jp-dialog-input");
       input?.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") dialog.querySelector(".jp-dialog-save")?.click();
-        if (e.key === "Escape") dialog.remove();
+        if (e.key === "Enter") body.querySelector(".jp-dialog-save")?.click();
+        if (e.key === "Escape") closeDialog();
       });
     };
 
@@ -1101,6 +1272,7 @@ class JuicePatrolPanel extends LitElement {
     const colorLevel = this._resolveColor("--primary-color", "#03a9f4");
     const colorPredicted = this._resolveColor("--warning-color", "#ffa726");
     const colorThreshold = this._resolveColor("--error-color", "#db4437");
+    const colorCharge = this._resolveColor("--success-color", "#4caf50");
     const colorNowLine = this._resolveColor("--secondary-text-color", "#999");
     const colorAxis = this._resolveColor("--secondary-text-color", "#999");
     const colorGrid = this._resolveColor("--divider-color", "rgba(0,0,0,0.12)");
@@ -1118,6 +1290,10 @@ class JuicePatrolPanel extends LitElement {
 
     const observed = readings.map((r) => [r.t * 1000, r.v]);
 
+    const chargePred = chartData.charge_prediction;
+    const isCharging = chartData.charging_state === "Charging";
+    const hasChargePred = chargePred && chargePred.estimated_full_timestamp;
+
     const fitted = [];
     if (pred.slope_per_day != null && pred.intercept != null && t0 != null) {
       const fittedY = (t) => {
@@ -1126,18 +1302,47 @@ class JuicePatrolPanel extends LitElement {
       };
       const startT = readings[0].t;
       const nowT = Date.now() / 1000;
-      const endT = pred.estimated_empty_timestamp
-        ? Math.min(pred.estimated_empty_timestamp, nowT + 365 * 86400)
-        : nowT + 30 * 86400;
-      for (const t of [startT, nowT, endT]) {
+      // When charging, truncate the discharge line at now (no future projection)
+      const endT = isCharging
+        ? nowT
+        : pred.estimated_empty_timestamp
+          ? Math.min(pred.estimated_empty_timestamp, nowT + 365 * 86400)
+          : nowT + 30 * 86400;
+      for (const t of [startT, nowT, ...(isCharging ? [] : [endT])]) {
         fitted.push([t * 1000, Math.max(0, Math.min(100, fittedY(t)))]);
       }
     }
 
     const tMin = observed[0]?.[0] || Date.now();
-    const tMax = fitted.length
-      ? fitted[fitted.length - 1][0]
-      : observed[observed.length - 1]?.[0] || Date.now();
+    const nowMs = Date.now();
+    let tMax;
+    if (isCharging && chargePred && chargePred.segment_start_timestamp != null) {
+      // Estimate charge endpoint for x-axis scoping
+      const segStartV = chargePred.segment_start_level;
+      const currentLevel = chartData.level;
+      const slopeH = hasChargePred
+        ? chargePred.slope_per_hour
+        : (currentLevel > segStartV && (nowMs / 1000 - chargePred.segment_start_timestamp) > 0)
+          ? (currentLevel - segStartV) / ((nowMs / 1000 - chargePred.segment_start_timestamp) / 3600)
+          : 0;
+      if (slopeH > 0) {
+        const fullT = hasChargePred
+          ? chargePred.estimated_full_timestamp * 1000
+          : nowMs + ((100 - currentLevel) / slopeH) * 3600000;
+        const pad = (fullT - tMin) * 0.1;
+        tMax = fullT + pad;
+      } else {
+        // Charging but can't compute rate — show observed + 20% padding
+        tMax = nowMs + (nowMs - tMin) * 0.2;
+      }
+    } else if (isCharging) {
+      // Charging but no charge prediction data at all
+      tMax = nowMs + (nowMs - tMin) * 0.2;
+    } else {
+      tMax = fitted.length
+        ? fitted[fitted.length - 1][0]
+        : observed[observed.length - 1]?.[0] || nowMs;
+    }
 
     const series = [
       {
@@ -1155,7 +1360,7 @@ class JuicePatrolPanel extends LitElement {
 
     if (fitted.length > 0) {
       series.push({
-        name: "Predicted",
+        name: "Discharge prediction",
         type: "line",
         data: fitted,
         smooth: false,
@@ -1163,6 +1368,46 @@ class JuicePatrolPanel extends LitElement {
         lineStyle: { width: 2, type: "dashed", color: colorPredicted },
         itemStyle: { color: colorPredicted },
       });
+    }
+
+    // Charge prediction line (rechargeable devices currently charging)
+    if (isCharging && chargePred && chargePred.segment_start_timestamp != null) {
+      const segStartT = chargePred.segment_start_timestamp;
+      const segStartV = chargePred.segment_start_level;
+      const nowT = Date.now() / 1000;
+      const currentLevel = chartData.level;
+
+      // Use engine prediction if available, otherwise compute from observed rise
+      let slopePerHour = hasChargePred ? chargePred.slope_per_hour : null;
+      if ((slopePerHour == null || slopePerHour <= 0) && currentLevel > segStartV) {
+        const elapsedHours = (nowT - segStartT) / 3600;
+        if (elapsedHours > 0) {
+          slopePerHour = (currentLevel - segStartV) / elapsedHours;
+        }
+      }
+
+      if (slopePerHour > 0) {
+        const hoursToFull = (100 - currentLevel) / slopePerHour;
+        const endT = hasChargePred
+          ? chargePred.estimated_full_timestamp
+          : nowT + hoursToFull * 3600;
+        const fittedChargeY = (t) => {
+          const hours = (t - segStartT) / 3600;
+          return slopePerHour * hours + segStartV;
+        };
+        const chargePoints = [segStartT, nowT, endT].map(
+          (t) => [t * 1000, Math.max(0, Math.min(100, fittedChargeY(t)))]
+        );
+        series.push({
+          name: "Charge prediction",
+          type: "line",
+          data: chargePoints,
+          smooth: false,
+          symbol: "none",
+          lineStyle: { width: 2, type: "dashed", color: colorCharge },
+          itemStyle: { color: colorCharge },
+        });
+      }
     }
 
     series.push({
@@ -1190,10 +1435,12 @@ class JuicePatrolPanel extends LitElement {
       },
     });
 
+    const isNarrow = container.clientWidth < 500;
+
     const option = {
       xAxis: {
         type: "time",
-        axisLabel: { color: colorAxis },
+        axisLabel: { color: colorAxis, fontSize: isNarrow ? 10 : 12 },
         axisLine: { lineStyle: { color: colorGrid } },
         splitLine: { lineStyle: { color: colorGrid } },
       },
@@ -1231,8 +1478,26 @@ class JuicePatrolPanel extends LitElement {
           return h;
         },
       },
-      legend: { show: true, bottom: 0, textStyle: { color: colorLegend } },
-      grid: { left: 50, right: 20, top: 20, bottom: 40 },
+      legend: {
+        show: true,
+        bottom: 0,
+        textStyle: { color: colorLegend, fontSize: isNarrow ? 10 : 11 },
+        itemWidth: isNarrow ? 12 : 16,
+        itemHeight: isNarrow ? 8 : 10,
+        itemGap: isNarrow ? 6 : 8,
+        padding: [4, 0, 0, 0],
+        selected: {
+          "Discharge prediction": !isCharging,
+          "Charge prediction": isCharging,
+        },
+      },
+      grid: {
+        left: isNarrow ? 40 : 50,
+        right: isNarrow ? 10 : 20,
+        top: 20,
+        bottom: isNarrow ? 60 : 50,
+        containLabel: false,
+      },
       series,
     };
 
@@ -1265,7 +1530,6 @@ class JuicePatrolPanel extends LitElement {
           ? this._renderDetailView()
           : this._renderMainView()}
       </div>
-      ${this._menuState ? this._renderActionMenu() : nothing}
     `;
   }
 
@@ -1356,6 +1620,9 @@ class JuicePatrolPanel extends LitElement {
         ${anomaly > 0
           ? card("anomaly", anomaly, "Anomaly", "var(--error-color)")
           : nothing}
+        ${this._ignoredCount > 0
+          ? card("ignored", this._ignoredCount, "Ignored", "var(--secondary-text-color)")
+          : nothing}
       </div>
     `;
   }
@@ -1363,11 +1630,8 @@ class JuicePatrolPanel extends LitElement {
   _renderSettings() {
     const opts = this._settingsValues;
     return html`
-      <div class="settings">
-        <div class="settings-header">
-          <ha-icon icon="mdi:cog"></ha-icon> Settings
-        </div>
-        <div class="settings-body">
+      <ha-card header="Settings" class="settings-card">
+        <div class="card-content">
           ${this._renderSettingRow(
             "Low battery threshold",
             'Devices below this level trigger a juice_patrol_battery_low event.',
@@ -1396,45 +1660,40 @@ class JuicePatrolPanel extends LitElement {
             "days"
           )}
         </div>
-        <div class="settings-actions">
-          <button class="btn btn-secondary" @click=${this._cancelSettings}>Cancel</button>
-          <button
-            class="btn btn-primary"
+        <div class="card-actions">
+          <ha-button variant="neutral" @click=${this._cancelSettings}>Cancel</ha-button>
+          <ha-button
             .disabled=${!this._settingsDirty}
             @click=${this._saveSettings}
           >
             Save
-          </button>
+          </ha-button>
         </div>
-      </div>
+      </ha-card>
     `;
   }
 
   _renderSettingRow(label, desc, key, value, min, max, unit) {
     return html`
-      <div class="setting-row">
-        <div class="setting-info">
-          <div class="setting-label">${label}</div>
-          <div class="setting-desc">${desc}</div>
-        </div>
-        <div class="setting-input">
-          <input
-            type="number"
-            min=${min}
-            max=${max}
-            data-key=${key}
-            .value=${String(value)}
-            aria-label="${label}"
-            @input=${this._handleSettingInput}
-          />
-          <span class="setting-unit">${unit}</span>
-        </div>
-      </div>
+      <ha-settings-row>
+        <span slot="heading">${label}</span>
+        <span slot="description">${desc}</span>
+        <ha-textfield
+          type="number"
+          .min=${String(min)}
+          .max=${String(max)}
+          data-key=${key}
+          .value=${String(value)}
+          .suffix=${unit}
+          style="width: 90px"
+          @input=${this._handleSettingInput}
+        ></ha-textfield>
+      </ha-settings-row>
     `;
   }
 
   _renderFilterBar() {
-    const FILTER_LABELS = { low: "Low battery", stale: "Stale", unavailable: "Unavailable", pending: "Pending", anomaly: "Anomaly" };
+    const FILTER_LABELS = { low: "Low battery", stale: "Stale", unavailable: "Unavailable", pending: "Pending", anomaly: "Anomaly", ignored: "Ignored" };
     const filterLabel = FILTER_LABELS[this._filterCategory] || this._filterCategory;
 
     return html`
@@ -1499,13 +1758,17 @@ class JuicePatrolPanel extends LitElement {
   }
 
   _renderDeviceTable() {
+    if (this._filterCategory === "ignored") {
+      return this._renderIgnoredDevices();
+    }
+
     const filtered = this._getFilteredEntities();
 
     if (filtered.length === 0) {
       if (this._entities.length === 0 && !this._configEntry) {
         return html`<div class="devices">
           <div class="loading-state">
-            <div class="loading-spinner"></div>
+            <ha-spinner size="small"></ha-spinner>
             <div>Discovering battery devices\u2026</div>
           </div>
         </div>`;
@@ -1526,6 +1789,50 @@ class JuicePatrolPanel extends LitElement {
           filtered,
           (dev) => dev.sourceEntity,
           (dev) => this._renderDeviceRow(dev)
+        )}
+      </div>
+    `;
+  }
+
+  _renderIgnoredDevices() {
+    const devices = this._ignoredEntities;
+    if (!devices) {
+      return html`<div class="devices">
+        <div class="empty-state">Loading ignored devices\u2026</div>
+      </div>`;
+    }
+    if (devices.length === 0) {
+      return html`<div class="devices">
+        <div class="empty-state">No ignored devices.</div>
+      </div>`;
+    }
+    return html`
+      <div class="devices">
+        ${repeat(
+          devices,
+          (d) => d.entity_id,
+          (d) => html`
+            <div class="ignored-row">
+              <ha-icon
+                icon="mdi:eye-off"
+                style="--mdc-icon-size:20px; color:var(--secondary-text-color)"
+              ></ha-icon>
+              <div class="ignored-info">
+                <div class="ignored-name">${d.name}</div>
+                <div class="ignored-entity">${d.entity_id}</div>
+              </div>
+              ${d.level !== null
+                ? html`<div class="ignored-level">${Math.round(d.level)}%</div>`
+                : nothing}
+              <ha-button
+                @click=${() => this._unignoreDevice(d.entity_id)}
+                title="Stop ignoring this device"
+              >
+                <ha-icon slot="start" icon="mdi:eye"></ha-icon>
+                Restore
+              </ha-button>
+            </div>
+          `
         )}
       </div>
     `;
@@ -1612,28 +1919,26 @@ class JuicePatrolPanel extends LitElement {
         <div class="data-cell">${this._formatTimeRemaining(dev)}</div>
         <div class="data-cell reliability-cell">${this._renderReliabilityBadge(dev)}</div>
         <div class="data-cell">
-          ${this._formatDate(dev.predictedEmpty, this._isFastDischarge(dev))}
+          ${dev.predictedEmpty
+            ? this._formatDate(dev.predictedEmpty, this._isFastDischarge(dev))
+            : "\u2014"}
         </div>
         <div class="action-cell">
-          ${dev.replacementPending
-            ? html`<button
-                class="action-btn confirm"
-                title="Confirm replacement"
-                @click=${(e) =>
-                  this._handleActionClick(e, "confirm", dev.sourceEntity)}
+          <ha-dropdown
+              @wa-select=${(e) => this._handleMenuSelect(e, dev.sourceEntity)}
+            >
+              <ha-icon-button
+                slot="trigger"
+                @click=${(e) => {
+                  e.stopPropagation();
+                  const dd = e.currentTarget.closest("ha-dropdown");
+                  if (dd) dd.open ? dd.hideMenu() : dd.showMenu();
+                }}
               >
-                <ha-icon icon="mdi:check" style="--mdc-icon-size:16px"></ha-icon>
-              </button>`
-            : html`<button
-                class="action-btn"
-                title="Actions"
-                @click=${(e) => this._handleActionClick(e, "menu", dev.sourceEntity)}
-              >
-                <ha-icon
-                  icon="mdi:dots-vertical"
-                  style="--mdc-icon-size:16px"
-                ></ha-icon>
-              </button>`}
+                <ha-icon icon="mdi:dots-vertical"></ha-icon>
+              </ha-icon-button>
+              ${this._renderDropdownItems(dev)}
+            </ha-dropdown>
         </div>
       </div>
     `;
@@ -1692,12 +1997,14 @@ class JuicePatrolPanel extends LitElement {
         >`
       );
     }
-    if (dev.predictionStatus === "noisy") {
+    const skipReasons = dev.isRechargeable ? new Set(["flat", "charging"]) : new Set();
+    if (!dev.predictedEmpty && this._predictionReason(dev) && !skipReasons.has(dev.predictionStatus)) {
+      const reason = this._predictionReason(dev);
       badges.push(
         html`<span
-          class="badge noisy"
-          title="Battery data is too irregular for a reliable prediction"
-          >NOISY</span
+          class="badge prediction-reason"
+          title=${this._predictionReasonDetail(dev.predictionStatus) || ""}
+          >No prediction: ${reason}</span
         >`
       );
     }
@@ -1784,50 +2091,42 @@ class JuicePatrolPanel extends LitElement {
     >`;
   }
 
-  // ── Action Menu ──
+  // ── Dropdown Menu Items ──
 
-  _renderActionMenu() {
-    const { entityId, top, right } = this._menuState;
-    const dev = this._getDevice(entityId);
-    const isRechargeable = dev?.isRechargeable || false;
-
+  _renderDropdownItems(dev) {
     return html`
-      <div class="jp-menu-overlay" @click=${(e) => {
-        if (e.target.classList.contains("jp-menu-overlay")) this._closeOverlays();
-      }}>
-        <div class="jp-menu" style="top:${top}px; right:${right}px;">
-          <button
-            class="jp-menu-item"
-            @click=${() => this._handleMenuAction("replace", entityId)}
-          >
-            <ha-icon
-              icon=${isRechargeable ? "mdi:battery-charging-low" : "mdi:battery-sync"}
-              style="--mdc-icon-size:18px"
-            ></ha-icon>
-            ${isRechargeable ? "Needs recharge" : "Mark as replaced"}
-          </button>
-          <button
-            class="jp-menu-item"
-            @click=${() => this._handleMenuAction("recalculate", entityId)}
-          >
-            <ha-icon
-              icon="mdi:calculator-variant"
-              style="--mdc-icon-size:18px"
-            ></ha-icon>
-            Recalculate
-          </button>
-          <button
-            class="jp-menu-item"
-            @click=${() => this._handleMenuAction("type", entityId)}
-          >
-            <ha-icon
-              icon="mdi:battery-heart-variant"
-              style="--mdc-icon-size:18px"
-            ></ha-icon>
-            Set battery type${dev?.batteryType ? ` (${dev.batteryType})` : ""}
-          </button>
-        </div>
-      </div>
+      <ha-dropdown-item value="detail">
+        <ha-icon slot="icon" icon="mdi:information-outline"></ha-icon>
+        More info
+      </ha-dropdown-item>
+      <wa-divider></wa-divider>
+      ${dev?.replacementPending ? html`
+      <ha-dropdown-item value="confirm">
+        <ha-icon slot="icon" icon="mdi:check-circle-outline"></ha-icon>
+        Confirm replacement
+      </ha-dropdown-item>` : nothing}
+      <ha-dropdown-item value="replace">
+        <ha-icon slot="icon" icon="mdi:battery-sync"></ha-icon>
+        Mark as replaced
+      </ha-dropdown-item>
+      ${dev?.lastReplaced ? html`
+      <ha-dropdown-item value="undo-replace">
+        <ha-icon slot="icon" icon="mdi:undo"></ha-icon>
+        Undo replacement
+      </ha-dropdown-item>` : nothing}
+      <ha-dropdown-item value="recalculate">
+        <ha-icon slot="icon" icon="mdi:calculator-variant"></ha-icon>
+        Recalculate
+      </ha-dropdown-item>
+      <ha-dropdown-item value="type">
+        <ha-icon slot="icon" icon="mdi:battery-heart-variant"></ha-icon>
+        Set battery type${dev?.batteryType ? ` (${dev.batteryType})` : ""}
+      </ha-dropdown-item>
+      <wa-divider></wa-divider>
+      <ha-dropdown-item value="ignore">
+        <ha-icon slot="icon" icon="mdi:eye-off"></ha-icon>
+        Ignore device
+      </ha-dropdown-item>
     `;
   }
 
@@ -1897,38 +2196,28 @@ class JuicePatrolPanel extends LitElement {
     const isUnknown = group.battery_type === "Unknown";
     const icon = isUnknown ? "mdi:help-circle-outline" : "mdi:battery";
     const isExpanded = !!this._expandedGroups[group.battery_type];
+    const countText = `${group.battery_count} batter${group.battery_count !== 1 ? "ies" : "y"} in ${group.device_count} device${group.device_count !== 1 ? "s" : ""}${group.needs_replacement > 0 ? ` \u2014 ${group.needs_replacement} need${group.needs_replacement !== 1 ? "" : "s"} replacement` : ""}`;
 
     return html`
-      <div class="shopping-group ${isExpanded ? "expanded" : ""}">
-        <div
-          class="shopping-group-header"
-          @click=${() => this._toggleShoppingGroup(group.battery_type)}
-        >
-          <ha-icon
-            icon=${icon}
-            style="--mdc-icon-size:20px;color:var(--secondary-text-color)"
-          ></ha-icon>
-          <span class="shopping-type">${group.battery_type}</span>
+      <ha-expansion-panel
+        outlined
+        .expanded=${isExpanded}
+        @expanded-changed=${(e) => {
+          const next = { ...this._expandedGroups };
+          if (e.detail.expanded) { next[group.battery_type] = true; }
+          else { delete next[group.battery_type]; }
+          this._expandedGroups = next;
+        }}
+      >
+        <ha-icon slot="leading-icon" icon=${icon} style="--mdc-icon-size:20px"></ha-icon>
+        <span slot="header" class="shopping-type">${group.battery_type}</span>
+        <span slot="secondary">
           ${group.needs_replacement > 0
-            ? html`<span class="shopping-need-badge"
-                >${group.needs_replacement}\u00d7</span
-              >`
+            ? html`<span class="shopping-need-badge">${group.needs_replacement}\u00d7</span> `
             : nothing}
-          <span class="shopping-count">
-            ${group.battery_count}
-            batter${group.battery_count !== 1 ? "ies" : "y"} in
-            ${group.device_count}
-            device${group.device_count !== 1 ? "s" : ""}${group.needs_replacement > 0
-              ? ` \u2014 ${group.needs_replacement} need${group.needs_replacement !== 1 ? "" : "s"} replacement`
-              : ""}
-          </span>
-          <ha-icon
-            icon="mdi:chevron-down"
-            class="shopping-expand-icon"
-            style="--mdc-icon-size:20px;color:var(--secondary-text-color)"
-          ></ha-icon>
-        </div>
-        <div class="shopping-devices">
+          ${countText}
+        </span>
+        <div class="shopping-devices-inner">
           ${group.devices.map((d) => {
             const levelColor = this._getLevelColor(d.level, null);
             const needsIt =
@@ -1951,7 +2240,7 @@ class JuicePatrolPanel extends LitElement {
             `;
           })}
         </div>
-      </div>
+      </ha-expansion-panel>
     `;
   }
 
@@ -1969,10 +2258,10 @@ class JuicePatrolPanel extends LitElement {
 
     return html`
       <div class="detail-toolbar">
-        <button class="detail-back" @click=${this._closeDetail}>
-          <ha-icon icon="mdi:arrow-left"></ha-icon>
+        <ha-button variant="neutral" @click=${this._closeDetail}>
+          <ha-icon slot="start" icon="mdi:arrow-left"></ha-icon>
           Back
-        </button>
+        </ha-button>
         <div class="detail-device-name">${deviceName}</div>
       </div>
       ${this._renderDetailMeta(dev)} ${this._renderDetailChart()}
@@ -2031,7 +2320,7 @@ class JuicePatrolPanel extends LitElement {
           </div>
           ${pred.r_squared != null
             ? html`<div class="detail-meta-item">
-                <div class="detail-meta-label">R\u00b2</div>
+                <div class="detail-meta-label" title="How well the trend line fits the data. 1.0 = perfect fit, 0.0 = no pattern. Above 0.7 is a good fit, below 0.3 means the data is too scattered for a reliable prediction.">R\u00b2</div>
                 <div class="detail-meta-value">${pred.r_squared.toFixed(3)}</div>
               </div>`
             : nothing}
@@ -2047,7 +2336,14 @@ class JuicePatrolPanel extends LitElement {
               ${pred.data_points_used ?? (cd?.readings?.length ?? "\u2014")}
             </div>
           </div>
-          ${dev.predictedEmpty
+          ${cd?.charge_prediction?.estimated_full_timestamp
+            ? html`<div class="detail-meta-item">
+                <div class="detail-meta-label">Predicted Full</div>
+                <div class="detail-meta-value">
+                  ${this._formatDate(cd.charge_prediction.estimated_full_timestamp * 1000, true)}
+                </div>
+              </div>`
+            : dev.predictedEmpty
             ? html`<div class="detail-meta-item">
                 <div class="detail-meta-label">Predicted Empty</div>
                 <div class="detail-meta-value">
@@ -2055,7 +2351,24 @@ class JuicePatrolPanel extends LitElement {
                 </div>
               </div>`
             : nothing}
+          ${dev.lastCalculated
+            ? html`<div class="detail-meta-item">
+                <div class="detail-meta-label">Last Calculated</div>
+                <div class="detail-meta-value">
+                  ${this._formatDate(dev.lastCalculated * 1000, true)}
+                </div>
+              </div>`
+            : nothing}
         </div>
+        ${!dev.predictedEmpty && pred.status && pred.status !== "normal"
+          ? html`<div class="detail-reason">
+              <ha-icon icon="mdi:information-outline" style="--mdc-icon-size:18px; color:var(--secondary-text-color); flex-shrink:0"></ha-icon>
+              <div>
+                <strong>Why is there no prediction?</strong>
+                <div class="detail-reason-text">${this._predictionReasonDetail(pred.status) || "Unknown reason."}</div>
+              </div>
+            </div>`
+          : nothing}
       </div>
     `;
   }
@@ -2065,7 +2378,7 @@ class JuicePatrolPanel extends LitElement {
       return html`
         <div class="detail-chart" id="jp-chart">
           <div class="loading-state">
-            <div class="loading-spinner"></div>
+            <ha-spinner size="small"></ha-spinner>
             <div>Loading chart data\u2026</div>
           </div>
         </div>
@@ -2084,43 +2397,60 @@ class JuicePatrolPanel extends LitElement {
   }
 
   _renderDetailActions() {
+    const entityId = this._detailEntity;
+    if (!entityId) return nothing;
+    const dev = this._getDevice(entityId);
+
     return html`
       <div class="detail-actions">
-        <button
-          class="btn btn-secondary"
+        <ha-button
           @click=${() => {
-            if (this._detailEntity) {
-              this.dispatchEvent(
-                new CustomEvent("hass-more-info", {
-                  bubbles: true,
-                  composed: true,
-                  detail: { entityId: this._detailEntity },
-                })
-              );
-            }
+            this.dispatchEvent(
+              new CustomEvent("hass-more-info", {
+                bubbles: true,
+                composed: true,
+                detail: { entityId },
+              })
+            );
           }}
         >
-          <ha-icon
-            icon="mdi:information-outline"
-            style="--mdc-icon-size:16px;vertical-align:middle;margin-right:4px"
-          ></ha-icon>
+          <ha-icon slot="start" icon="mdi:information-outline"></ha-icon>
           More info
-        </button>
-        <button
-          class="btn btn-secondary"
+        </ha-button>
+        <ha-button
+          @click=${() => this._markReplaced(entityId)}
+        >
+          <ha-icon slot="start" icon="mdi:battery-sync"></ha-icon>
+          Mark as replaced
+        </ha-button>
+        ${dev?.lastReplaced ? html`
+        <ha-button variant="danger"
+          @click=${() => this._undoReplacement(entityId)}
+        >
+          <ha-icon slot="start" icon="mdi:undo"></ha-icon>
+          Undo replacement
+        </ha-button>` : nothing}
+        <ha-button
           @click=${async () => {
-            if (this._detailEntity) {
-              await this._recalculate(this._detailEntity);
-              setTimeout(() => this._loadChartData(this._detailEntity), 500);
-            }
+            await this._recalculate(entityId);
+            setTimeout(() => this._loadChartData(entityId), 500);
           }}
         >
-          <ha-icon
-            icon="mdi:calculator-variant"
-            style="--mdc-icon-size:16px;vertical-align:middle;margin-right:4px"
-          ></ha-icon>
+          <ha-icon slot="start" icon="mdi:calculator-variant"></ha-icon>
           Recalculate
-        </button>
+        </ha-button>
+        <ha-button
+          @click=${() => this._setBatteryType(entityId, dev?.batteryType)}
+        >
+          <ha-icon slot="start" icon="mdi:battery-heart-variant"></ha-icon>
+          Set battery type
+        </ha-button>
+        <ha-button
+          @click=${() => this._ignoreDevice(entityId)}
+        >
+          <ha-icon slot="start" icon="mdi:eye-off"></ha-icon>
+          Ignore device
+        </ha-button>
       </div>
     `;
   }
@@ -2278,99 +2608,11 @@ class JuicePatrolPanel extends LitElement {
         color: var(--secondary-text-color);
         margin-top: 2px;
       }
-      .settings {
-        background: var(--card-bg);
-        border-radius: 12px;
-        border: 1px solid var(--border);
+      .settings-card {
         margin-bottom: 20px;
-        overflow: hidden;
       }
-      .settings-header {
-        display: flex;
-        align-items: center;
-        padding: 14px 16px;
-        font-size: 14px;
-        font-weight: 500;
-        border-bottom: 1px solid var(--border);
-      }
-      .settings-header ha-icon {
-        --mdc-icon-size: 20px;
-        margin-right: 8px;
-        color: var(--secondary-text-color);
-      }
-      .settings-body {
-        padding: 8px 0;
-      }
-      .setting-row {
-        display: grid;
-        grid-template-columns: 1fr 120px;
-        align-items: center;
-        padding: 12px 16px;
-        gap: 16px;
-      }
-      .setting-info {
-        display: flex;
-        flex-direction: column;
-      }
-      .setting-label {
-        font-size: 14px;
-      }
-      .setting-desc {
-        font-size: 12px;
-        color: var(--secondary-text-color);
-        margin-top: 2px;
-        line-height: 1.4;
-      }
-      .setting-input {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        justify-content: flex-end;
-      }
-      .setting-input input {
-        width: 64px;
-        padding: 6px 8px;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        background: var(--primary-background-color);
-        color: var(--primary-text-color);
-        font-size: 14px;
-        text-align: right;
-        outline: none;
-      }
-      .setting-input input:focus {
-        border-color: var(--primary-color);
-      }
-      .setting-unit {
-        font-size: 13px;
-        color: var(--secondary-text-color);
-        min-width: 28px;
-      }
-      .settings-actions {
-        display: flex;
-        justify-content: flex-end;
-        padding: 8px 16px 14px;
-        gap: 8px;
-      }
-      .btn {
-        padding: 8px 20px;
-        border-radius: 8px;
-        border: none;
-        cursor: pointer;
-        font-size: 13px;
-        font-weight: 500;
-      }
-      .btn-primary {
-        background: var(--primary-color);
-        color: var(--text-primary-color, #fff);
-      }
-      .btn-primary:disabled {
-        opacity: 0.5;
-        cursor: default;
-      }
-      .btn-secondary {
-        background: var(--secondary-background-color);
-        color: var(--primary-text-color);
+      .settings-card ha-textfield {
+        --text-field-padding: 0 8px;
       }
       .devices {
         background: var(--card-bg);
@@ -2404,6 +2646,39 @@ class JuicePatrolPanel extends LitElement {
       }
       .device-row.pending:hover {
         background: color-mix(in srgb, var(--primary-color) 14%, transparent);
+      }
+      .ignored-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--border);
+      }
+      .ignored-row:last-child {
+        border-bottom: none;
+      }
+      .ignored-info {
+        flex: 1;
+        min-width: 0;
+      }
+      .ignored-name {
+        font-size: 14px;
+        font-weight: 500;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .ignored-entity {
+        font-size: 12px;
+        color: var(--secondary-text-color);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .ignored-level {
+        font-size: 14px;
+        color: var(--secondary-text-color);
+        white-space: nowrap;
       }
       .device-header {
         display: grid;
@@ -2586,72 +2861,11 @@ class JuicePatrolPanel extends LitElement {
         text-align: center;
         color: var(--secondary-text-color);
       }
-      .loading-state .loading-spinner {
-        display: inline-block;
-        width: 24px;
-        height: 24px;
-        border: 3px solid var(--divider-color);
-        border-top-color: var(--primary-color);
-        border-radius: 50%;
-        animation: jp-spin 0.8s linear infinite;
+      .loading-state ha-spinner {
         margin-bottom: 8px;
       }
-      .jp-menu-overlay {
-        position: fixed;
-        inset: 0;
-        z-index: 10;
-      }
-      .jp-menu {
-        position: fixed;
-        z-index: 11;
-        background: var(--primary-background-color, #fff);
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        padding: 6px 0;
-        min-width: 220px;
-        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
-      }
-      .jp-menu-item {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        width: 100%;
-        padding: 10px 16px;
-        border: none;
-        background: none;
-        cursor: pointer;
-        font-size: 14px;
-        color: var(--primary-text-color);
-        text-align: left;
-        font-family: inherit;
-      }
-      .jp-menu-item:hover {
-        background: var(--secondary-background-color);
-      }
-      .jp-menu-item ha-icon {
-        color: var(--secondary-text-color);
-      }
-      .jp-dialog-overlay {
-        position: fixed;
-        inset: 0;
-        z-index: 20;
-        background: rgba(0, 0, 0, 0.4);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
-      .jp-dialog {
-        background: var(--card-bg);
-        border-radius: 16px;
-        padding: 24px;
-        min-width: 340px;
-        max-width: 90vw;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
-      }
-      .jp-dialog-title {
-        font-size: 18px;
-        font-weight: 500;
-        margin-bottom: 16px;
+      ha-dropdown {
+        --ha-dropdown-font-size: 14px;
       }
       .jp-dialog-desc {
         font-size: 13px;
@@ -2943,44 +3157,12 @@ class JuicePatrolPanel extends LitElement {
         flex-direction: column;
         gap: 8px;
       }
-      .shopping-group {
-        background: var(--card-bg);
-        border-radius: 12px;
-        border: 1px solid var(--border);
-        overflow: hidden;
-      }
-      .shopping-group-header {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        padding: 14px 16px;
-        cursor: pointer;
-        user-select: none;
-      }
-      .shopping-group-header:hover {
-        background: var(--secondary-background-color);
-      }
       .shopping-type {
         font-size: 16px;
         font-weight: 500;
       }
-      .shopping-count {
-        flex: 1;
-        font-size: 13px;
-        color: var(--secondary-text-color);
-      }
-      .shopping-expand-icon {
-        transition: transform 0.2s;
-      }
-      .shopping-group.expanded .shopping-expand-icon {
-        transform: rotate(180deg);
-      }
-      .shopping-devices {
-        padding: 0 16px 8px;
-        display: none;
-      }
-      .shopping-group.expanded .shopping-devices {
-        display: block;
+      .shopping-devices-inner {
+        padding: 0 8px;
       }
       .shopping-device {
         display: grid;
@@ -3050,25 +3232,6 @@ class JuicePatrolPanel extends LitElement {
         gap: 8px;
         margin-bottom: 16px;
       }
-      .detail-back {
-        display: flex;
-        align-items: center;
-        gap: 4px;
-        background: none;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        cursor: pointer;
-        padding: 6px 12px;
-        color: var(--primary-text-color);
-        font-size: 14px;
-        font-family: inherit;
-      }
-      .detail-back:hover {
-        background: var(--secondary-background-color);
-      }
-      .detail-back ha-icon {
-        --mdc-icon-size: 18px;
-      }
       .detail-device-name {
         font-size: 18px;
         font-weight: 500;
@@ -3100,6 +3263,33 @@ class JuicePatrolPanel extends LitElement {
         font-size: 15px;
         font-weight: 500;
       }
+      .detail-reason {
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+        margin-top: 12px;
+        padding: 12px 14px;
+        background: color-mix(in srgb, var(--info-color, #039be5) 8%, transparent);
+        border-radius: 8px;
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      .detail-reason strong {
+        display: block;
+        margin-bottom: 2px;
+      }
+      .detail-reason-text {
+        color: var(--secondary-text-color);
+      }
+      .prediction-reason {
+        display: inline-block;
+        font-size: 9px;
+        padding: 1px 5px;
+        border-radius: 4px;
+        font-weight: 500;
+        background: color-mix(in srgb, var(--secondary-text-color) 15%, transparent);
+        color: var(--secondary-text-color);
+      }
       .detail-chart {
         background: var(--card-bg);
         border-radius: 12px;
@@ -3118,6 +3308,7 @@ class JuicePatrolPanel extends LitElement {
       }
       .detail-actions {
         display: flex;
+        flex-wrap: wrap;
         gap: 8px;
       }
       @media (max-width: 900px) {
@@ -3175,19 +3366,22 @@ class JuicePatrolPanel extends LitElement {
           padding: 8px 14px;
           font-size: 13px;
         }
-        .settings .setting-row {
-          grid-template-columns: 1fr;
-          gap: 8px;
-        }
-        .setting-input {
-          justify-content: flex-start;
-        }
         .shopping-summary {
           flex-wrap: wrap;
           gap: 8px;
         }
         .shopping-summary .summary-card {
           min-width: 60px;
+        }
+        .detail-chart {
+          padding: 8px;
+          min-height: 320px;
+        }
+        .detail-chart ha-chart-base {
+          height: 300px;
+        }
+        .detail-actions {
+          flex-wrap: wrap;
         }
       }
     `;

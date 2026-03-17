@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from .utils import detect_step_size as _detect_step_size
+
 
 class Stability(StrEnum):
     """Reading stability classification."""
@@ -28,6 +30,9 @@ class DischargeAnomaly(StrEnum):
     RAPID = "rapid"
     CLIFF = "cliff"  # Massive sudden drop (e.g. 86% → 7%)
 
+
+# Replacement detection — mirrors const.REPLACEMENT_LOW_MULTIPLIER (engine/ cannot import HA deps)
+_REPLACEMENT_LOW_MULTIPLIER = 2
 
 # Battery types known to be rechargeable
 RECHARGEABLE_TYPES = frozenset({
@@ -84,7 +89,7 @@ def analyze_battery(
     )
 
     # --- Stability ---
-    stability, cv, mean_level = _analyze_stability(recent)
+    stability, cv, mean_level = _analyze_stability(recent, is_rechargeable)
 
     # --- Discharge anomaly ---
     anomaly, drop_size = _detect_anomaly(recent)
@@ -121,7 +126,7 @@ def analyze_battery(
 
         if (
             jump >= 40  # Large jump up
-            and prev["v"] <= low_threshold * 2  # Was reasonably low
+            and prev["v"] <= low_threshold * _REPLACEMENT_LOW_MULTIPLIER
             and curr["v"] >= 80  # Now high
             and time_gap_hours < 48  # Within reasonable time
             and not is_rechargeable  # Not a rechargeable device
@@ -148,6 +153,7 @@ def analyze_battery(
 
 def _analyze_stability(
     recent: list[dict[str, float]],
+    is_rechargeable: bool = False,
 ) -> tuple[Stability, float | None, float | None]:
     """Analyze reading stability by detecting sustained level shifts.
 
@@ -155,6 +161,9 @@ def _analyze_stability(
     discharge curve: sustained unexpected drops, unexplained rises (on
     non-rechargeable devices), or non-monotonic level changes that persist
     across multiple readings.
+
+    For rechargeable devices, reversals (charge/discharge cycles) are normal
+    and do NOT count as erratic behavior.
 
     Simple measurement noise (±1-2% between readings) is NOT erratic.
 
@@ -224,8 +233,16 @@ def _analyze_stability(
             if shift * prev_shift < 0 and abs(shift) > min_shift:
                 reversals += 1
 
-    # Classify: cliff shifts in both directions (drop + recovery) is erratic
-    if reversals >= 2 or large_non_monotonic_shifts >= 3 or cliff_shifts >= 2:
+    # Classify: for rechargeable devices, reversals and upward shifts are
+    # normal charge/discharge cycles — only cliff shifts matter.
+    if is_rechargeable:
+        if cliff_shifts >= 2:
+            stability = Stability.ERRATIC
+        elif cliff_shifts >= 1:
+            stability = Stability.MODERATE
+        else:
+            stability = Stability.STABLE
+    elif reversals >= 2 or large_non_monotonic_shifts >= 3 or cliff_shifts >= 2:
         stability = Stability.ERRATIC
     elif reversals >= 1 or large_non_monotonic_shifts >= 2 or cliff_shifts >= 1:
         stability = Stability.MODERATE
@@ -233,27 +250,6 @@ def _analyze_stability(
         stability = Stability.STABLE
 
     return stability, round(cv, 4), round(mean, 1)
-
-
-def _detect_step_size(values: list[float]) -> float:
-    """Detect the reporting granularity of a sensor.
-
-    Returns the most common non-zero step between consecutive readings.
-    E.g. a sensor reporting [100, 95, 90, 85] has step size 5.
-    """
-    if len(values) < 3:
-        return 1.0
-
-    diffs = [abs(values[i] - values[i - 1]) for i in range(1, len(values))]
-    nonzero = [d for d in diffs if d > 0]
-    if not nonzero:
-        return 1.0
-
-    # Find the most common non-zero diff (likely the step size)
-    from collections import Counter
-    counts = Counter(round(d, 1) for d in nonzero)
-    most_common = counts.most_common(1)[0][0]
-    return most_common
 
 
 def _find_segments(
@@ -304,12 +300,25 @@ def _detect_anomaly(
 ) -> tuple[DischargeAnomaly, float | None]:
     """Detect abnormal discharge patterns.
 
+    Checks both single-interval and multi-interval drops.
+
     Returns (anomaly_type, drop_size).
     """
     if len(recent) < 3:
         return DischargeAnomaly.NORMAL, None
 
-    # Check the most recent reading pair for a sudden drop
+    # --- Multi-interval cliff detection ---
+    # Check windows of 2 and 3 readings for cumulative drops
+    for window_size in (2, 3):
+        if len(recent) >= window_size + 1:
+            start = recent[-(window_size + 1)]
+            end = recent[-1]
+            drop = start["v"] - end["v"]
+            hours = (end["t"] - start["t"]) / 3600
+            if drop > 40 and 0 < hours < 72:
+                return DischargeAnomaly.CLIFF, round(drop, 1)
+
+    # --- Single-interval checks ---
     prev = recent[-2]
     curr = recent[-1]
     drop = prev["v"] - curr["v"]
@@ -323,12 +332,11 @@ def _detect_anomaly(
         return DischargeAnomaly.CLIFF, round(drop, 1)
 
     # Rapid: discharge rate > 10x the average
-    # Calculate average drop rate from all recent readings
     if len(recent) >= 4:
         total_drop = recent[0]["v"] - recent[-1]["v"]
         total_hours = (recent[-1]["t"] - recent[0]["t"]) / 3600
         if total_hours > 0 and total_drop > 0:
-            avg_rate = total_drop / total_hours  # %/hour average
+            avg_rate = total_drop / total_hours
             current_rate = drop / time_hours
             if current_rate > avg_rate * 10 and drop > 5:
                 return DischargeAnomaly.RAPID, round(drop, 1)

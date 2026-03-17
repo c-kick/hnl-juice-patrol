@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from custom_components.juice_patrol.store import DeviceData, JuicePatrolStore, StoreData
+from custom_components.juice_patrol.data.store import DeviceData, JuicePatrolStore, StoreData
 
 
 @pytest.fixture
@@ -18,7 +18,7 @@ def mock_hass():
 @pytest.fixture
 def store(mock_hass):
     """Create a JuicePatrolStore with mocked HA."""
-    with patch("custom_components.juice_patrol.store.Store") as mock_store_cls:
+    with patch("custom_components.juice_patrol.data.store.Store") as mock_store_cls:
         mock_store_instance = AsyncMock()
         mock_store_instance.async_load = AsyncMock(return_value=None)
         mock_store_instance.async_save = AsyncMock()
@@ -211,10 +211,22 @@ class TestJuicePatrolStore:
         assert store.mark_replaced("sensor.test") is True
         dev = store.get_device("sensor.test")
         assert dev.last_replaced is not None
-        assert dev.replacement_confirmed is False
+        assert dev.replacement_confirmed is True
 
     def test_mark_replaced_missing(self, store):
         assert store.mark_replaced("sensor.missing") is False
+
+    def test_undo_replacement(self, store):
+        store.ensure_device("sensor.test")
+        store.mark_replaced("sensor.test")
+        assert store.get_device("sensor.test").last_replaced is not None
+        assert store.undo_replacement("sensor.test") is True
+        dev = store.get_device("sensor.test")
+        assert dev.last_replaced is None
+        assert dev.replacement_confirmed is True
+
+    def test_undo_replacement_missing(self, store):
+        assert store.undo_replacement("sensor.missing") is False
 
     def test_set_ignored(self, store):
         store.set_ignored("sensor.test", True)

@@ -44,23 +44,48 @@
 
 ```
 custom_components/juice_patrol/
-├── __init__.py              # Integration setup, platform forwarding
+│
+│   # ── HA-required root files (must stay here) ──
+├── __init__.py              # Integration setup, services, WS API, platform forwarding
 ├── manifest.json            # Integration metadata, dependencies
 ├── config_flow.py           # UI-based configuration (Settings → Integrations)
 ├── const.py                 # Constants, defaults, thresholds
-├── coordinator.py           # DataUpdateCoordinator — central polling & state management
-├── discovery.py             # Battery entity/device auto-discovery engine
-├── store.py                 # JSON persistence for discharge history (.storage/)
-├── predictions.py           # Discharge curve analysis & time-to-empty prediction
+├── entity.py                # Base entity class, slugify helper, device info
 ├── sensor.py                # Per-device sensors: level, predicted_empty, discharge_rate
 ├── binary_sensor.py         # Per-device binary sensors: battery_low, stale_device
+├── panel.py                 # Sidebar panel registration (static JS file)
 ├── diagnostics.py           # Diagnostics dump for debugging
+├── services.yaml            # Service definitions (force_refresh, mark_replaced, etc.)
 ├── strings.json             # UI strings (English)
+├── icons.json               # MDI icon mappings
+├── hacs.json                # HACS metadata (category: integration)
 ├── translations/
 │   ├── en.json              # English translations
 │   └── nl.json              # Dutch translations
-├── services.yaml            # Service definitions (force_refresh, mark_replaced, etc.)
-└── icons.json               # MDI icon mappings
+│
+│   # ── Prediction & analysis engine (pure Python, no HA deps) ──
+├── engine/
+│   ├── __init__.py          # Re-exports public API
+│   ├── predictions.py       # Theil-Sen, WLR, confidence, reliability
+│   ├── analysis.py          # Stability, anomaly, rechargeable detection
+│   └── utils.py             # Shared helpers (detect_step_size, median)
+│
+│   # ── Data layer ──
+├── data/
+│   ├── __init__.py          # Re-exports public API
+│   ├── coordinator.py       # DataUpdateCoordinator (event-driven + periodic)
+│   ├── store.py             # Persistent JSON storage (device metadata only)
+│   ├── history.py           # Recorder bridge (fetches battery stats, in-memory cache)
+│   └── battery_types.py     # Battery type auto-detection (attributes + Battery Notes library)
+│
+│   # ── Device discovery ──
+├── discovery/
+│   ├── __init__.py          # Re-exports public API
+│   └── discovery.py         # Battery entity discovery (2-pass: device_class + attributes)
+│
+│   # ── Frontend assets ──
+└── frontend/
+    └── juice_patrol_panel.js  # Panel UI (vanilla HTMLElement, full dashboard)
 ```
 
 ### Data Flow
@@ -349,6 +374,9 @@ Start with the scaffold and work outward:
 ---
 
 ## Future Work / TODO
+
+### Recharge List
+The shopping list currently excludes rechargeable devices. A complementary "Recharge" tab or section could show rechargeable devices that are low or predicted to need charging soon — useful for devices like portable sensors, phones, tablets. Unlike the shopping list, these don't need to be purchased, just plugged in.
 
 ### Battery Health & Deterioration Detection
 Detect deteriorating batteries — especially rechargeable ones that lose capacity over time. Inspired by Apple's battery health feature which calculates chemical aging (see: https://support.apple.com/en-us/101575). Implementation ideas:

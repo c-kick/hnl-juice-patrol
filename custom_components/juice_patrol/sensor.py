@@ -18,7 +18,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import JuicePatrolConfigEntry
 from .const import DOMAIN
-from .coordinator import JuicePatrolCoordinator
+from .data import JuicePatrolCoordinator
 from .entity import JUICE_PATROL_DEVICE_INFO, JuicePatrolEntity, slugify_entity
 
 _LOGGER = logging.getLogger(__name__)
@@ -98,10 +98,15 @@ class JuicePatrolDischargeRate(JuicePatrolEntity, SensorEntity):
         attrs: dict[str, Any] = {
             "source_entity": self._source_entity_id,
             "platform": info.get("platform"),
+            "manufacturer": info.get("manufacturer"),
+            "model": info.get("model"),
             "battery_type": info.get("battery_type"),
             "battery_type_source": info.get("battery_type_source"),
             "is_rechargeable": info.get("is_rechargeable", False),
+            "charging_state": info.get("charging_state"),
             "replacement_pending": info.get("replacement_pending", False),
+            "last_replaced": info.get("last_replaced"),
+            "last_calculated": info.get("last_calculated"),
             "discharge_rate_hour": info.get("discharge_rate_hour"),
         }
         if analysis:
@@ -138,6 +143,8 @@ class JuicePatrolPredictedEmpty(JuicePatrolEntity, SensorEntity):
 
     @property
     def native_value(self) -> datetime | None:
+        if self._entity_data.get("is_stale"):
+            return None
         prediction = self._entity_data.get("prediction")
         if prediction and prediction.estimated_empty_timestamp:
             return datetime.fromtimestamp(
@@ -183,6 +190,8 @@ class JuicePatrolDaysRemaining(JuicePatrolEntity, SensorEntity):
 
     @property
     def native_value(self) -> float | None:
+        if self._entity_data.get("is_stale"):
+            return None
         prediction = self._entity_data.get("prediction")
         if prediction and prediction.estimated_days_remaining is not None:
             return prediction.estimated_days_remaining

@@ -105,16 +105,16 @@ class BatteryTypeResolver:
         if cached is not None:
             return cached
 
-        result = self._resolve_uncached(entity_id, device_id)
+        result = self.resolve_uncached(entity_id, device_id)
         self._cache[entity_id] = result
         return result
 
-    def _resolve_uncached(
+    def resolve_uncached(
         self,
         entity_id: str,
         device_id: str | None,
     ) -> tuple[str | None, str | None]:
-        """Resolve battery type without cache."""
+        """Resolve battery type without cache (bypasses and does not update cache)."""
         # Layer (c): check entity/device attributes
         result = self._from_attributes(entity_id, device_id)
         if result:

@@ -2,7 +2,7 @@
 
 import time
 
-from custom_components.juice_patrol.analysis import (
+from custom_components.juice_patrol.engine.analysis import (
     AnalysisResult,
     DischargeAnomaly,
     Stability,
@@ -75,6 +75,53 @@ class TestDischargeAnomaly:
         """A moderate drop is not an anomaly."""
         levels = [90, 88, 86, 84, 82, 75]
         result = analyze_battery(_readings(levels))
+        assert result.discharge_anomaly == DischargeAnomaly.NORMAL
+
+    def test_gradual_cliff_multi_reading(self):
+        """80 -> 55 -> 20 over 24h -> CLIFF detected (cumulative > 40)."""
+        now = time.time()
+        readings = [
+            {"t": now - 86400, "v": 90},
+            {"t": now - 43200, "v": 80},
+            {"t": now - 21600, "v": 55},
+            {"t": now, "v": 20},
+        ]
+        result = analyze_battery(readings)
+        assert result.discharge_anomaly == DischargeAnomaly.CLIFF
+
+    def test_normal_drain_not_cliff(self):
+        """80 -> 78 -> 76 over 24h -> NORMAL."""
+        now = time.time()
+        readings = [
+            {"t": now - 86400, "v": 90},
+            {"t": now - 43200, "v": 80},
+            {"t": now - 21600, "v": 78},
+            {"t": now, "v": 76},
+        ]
+        result = analyze_battery(readings)
+        assert result.discharge_anomaly == DischargeAnomaly.NORMAL
+
+    def test_single_interval_cliff_still_works(self):
+        """Single large drop > 30% still detected."""
+        now = time.time()
+        readings = [
+            {"t": now - 86400, "v": 90},
+            {"t": now - 43200, "v": 88},
+            {"t": now, "v": 30},
+        ]
+        result = analyze_battery(readings)
+        assert result.discharge_anomaly == DischargeAnomaly.CLIFF
+
+    def test_slow_multi_drop_not_cliff(self):
+        """80 -> 55 -> 20 over 7 days -> NORMAL (too slow for cliff)."""
+        now = time.time()
+        readings = [
+            {"t": now - 86400 * 14, "v": 90},
+            {"t": now - 86400 * 7, "v": 80},
+            {"t": now - 86400 * 4, "v": 55},
+            {"t": now, "v": 20},
+        ]
+        result = analyze_battery(readings)
         assert result.discharge_anomaly == DischargeAnomaly.NORMAL
 
 

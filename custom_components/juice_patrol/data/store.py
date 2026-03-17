@@ -10,7 +10,7 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
-from .const import STORE_KEY, STORE_VERSION
+from ..const import STORE_KEY, STORE_VERSION
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -178,9 +178,21 @@ class JuicePatrolStore:
             return False
 
         dev.last_replaced = time.time()
-        dev.replacement_confirmed = False
+        dev.replacement_confirmed = True
         self._dirty = True
         _LOGGER.info("Battery manually marked as replaced: %s", entity_id)
+        return True
+
+    def undo_replacement(self, entity_id: str) -> bool:
+        """Undo a manual replacement — clear last_replaced timestamp."""
+        dev = self._data.devices.get(entity_id)
+        if dev is None:
+            return False
+
+        dev.last_replaced = None
+        dev.replacement_confirmed = True
+        self._dirty = True
+        _LOGGER.info("Battery replacement undone: %s", entity_id)
         return True
 
     def set_ignored(self, entity_id: str, ignored: bool) -> None:

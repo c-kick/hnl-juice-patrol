@@ -1,6 +1,6 @@
 """Tests for Juice Patrol battery discovery."""
 
-from custom_components.juice_patrol.discovery import (
+from custom_components.juice_patrol.discovery.discovery import (
     BATTERY_STRING_MAP,
     parse_battery_level,
 )
