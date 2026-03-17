@@ -501,7 +501,7 @@ class JuicePatrolPanel extends LitElement {
   }
 
   _isActivelyCharging(dev) {
-    return dev.isRechargeable && dev.chargingState === "charging";
+    return dev.isRechargeable && (dev.chargingState === "charging" || dev.predictionStatus === "charging");
   }
 
   _isFastDischarge(dev) {
@@ -1267,7 +1267,9 @@ class JuicePatrolPanel extends LitElement {
     const observed = readings.map((r) => [r.t * 1000, r.v]);
 
     const chargePred = chartData.charge_prediction;
-    const isCharging = chartData.charging_state?.toLowerCase() === "charging";
+    const isCharging =
+      chartData.charging_state?.toLowerCase() === "charging" ||
+      chartData.prediction?.status === "charging";
     const hasChargePred = chargePred && chargePred.estimated_full_timestamp;
 
     const fitted = [];
@@ -2337,6 +2339,7 @@ class JuicePatrolPanel extends LitElement {
             : nothing}
         </div>
         ${!dev.predictedEmpty && pred.status && pred.status !== "normal"
+          && !(pred.status === "charging" && cd?.charge_prediction?.estimated_full_timestamp)
           ? html`<div class="detail-reason">
               <ha-icon icon="mdi:information-outline" style="--mdc-icon-size:18px; color:var(--secondary-text-color); flex-shrink:0"></ha-icon>
               <div>
