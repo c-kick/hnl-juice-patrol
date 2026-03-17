@@ -24,7 +24,6 @@ class JuicePatrolPanel extends LitElement {
       _refreshing: { state: true },
       _flashGeneration: { state: true },
       _expandedGroups: { state: true },
-      _ignoredCount: { state: true },
       _ignoredEntities: { state: true },
     };
   }
@@ -59,7 +58,6 @@ class JuicePatrolPanel extends LitElement {
     this._chartLoading = false;
     this._chartLastLevel = null;
     this._flashGeneration = 0;
-    this._ignoredCount = 0;
     this._ignoredEntities = null;
     this._flashCleanupTimer = null;
     this._refreshTimer = null;
@@ -334,26 +332,16 @@ class JuicePatrolPanel extends LitElement {
       }
     }
 
-    // Expire old change markers (skip sweep when map is empty)
-    if (this._recentlyChanged.size > 0) {
-      for (const [key, entry] of this._recentlyChanged) {
-        if (now - entry.ts > 3000) {
-          this._recentlyChanged.delete(key);
-          flashChanged = true;
-        }
-      }
-      // Schedule cleanup after animation completes
-      if (!this._flashCleanupTimer) {
-        this._flashCleanupTimer = setTimeout(() => {
-          this._flashCleanupTimer = null;
-          this._recentlyChanged.clear();
-          this._flashGeneration = (this._flashGeneration || 0) + 1;
-        }, 3000);
-      }
-    }
-
     if (flashChanged) {
       this._flashGeneration = (this._flashGeneration || 0) + 1;
+    }
+    // Schedule cleanup after animation completes (timer handles expiry)
+    if (this._recentlyChanged.size > 0 && !this._flashCleanupTimer) {
+      this._flashCleanupTimer = setTimeout(() => {
+        this._flashCleanupTimer = null;
+        this._recentlyChanged.clear();
+        this._flashGeneration = (this._flashGeneration || 0) + 1;
+      }, 3000);
     }
 
     // Store unsorted list — sort happens in _processHassUpdate only when hash changes
@@ -716,53 +704,42 @@ class JuicePatrolPanel extends LitElement {
   }
 
   _showReplaceRechargeableDialog(entityId) {
-    const dialog = document.createElement("ha-dialog");
-    dialog.open = true;
-    dialog.headerTitle = "Replace rechargeable battery?";
-    this.shadowRoot.appendChild(dialog);
-
-    const closeDialog = () => { dialog.open = false; dialog.remove(); };
-
-    const body = document.createElement("div");
-    body.innerHTML = `
-      <p style="margin-top:0">This device is marked as <strong>rechargeable</strong>, which means
-      Juice Patrol expects its battery level to gradually rise and fall as it
-      charges and discharges. Charging is detected automatically \u2014 you don't
-      need to do anything when you plug it in.</p>
-      <p><strong>"Mark as replaced"</strong> is for when you physically swap the
-      battery pack itself (e.g. a worn-out cell that no longer holds charge).</p>
-      <p>If you just recharged the device, you can ignore this \u2014 Juice Patrol
-      already handles that.</p>
-      <p style="border-left:3px solid var(--error-color, #db4437); padding:4px 12px; margin:16px 0">
-        <strong>Warning:</strong> This will discard all Juice Patrol history for this
-        device and start tracking from scratch. Recorder data is not affected.
-        This action can be undone.</p>
-      <div class="jp-dialog-actions">
-        <ha-button variant="neutral" class="jp-dialog-cancel">Cancel</ha-button>
-        <ha-button class="jp-dialog-confirm" variant="danger">Yes, battery was replaced</ha-button>
-      </div>
-    `;
-    dialog.appendChild(body);
-
-    body.querySelector(".jp-dialog-cancel").addEventListener("click", closeDialog);
-    body.querySelector(".jp-dialog-confirm").addEventListener("click", () => {
-      closeDialog();
-      this._doMarkReplaced(entityId);
+    this._showConfirmDialog({
+      title: "Replace rechargeable battery?",
+      bodyHtml: `
+        <p style="margin-top:0">This device is marked as <strong>rechargeable</strong>, which means
+        Juice Patrol expects its battery level to gradually rise and fall as it
+        charges and discharges. Charging is detected automatically \u2014 you don't
+        need to do anything when you plug it in.</p>
+        <p><strong>"Mark as replaced"</strong> is for when you physically swap the
+        battery pack itself (e.g. a worn-out cell that no longer holds charge).</p>
+        <p>If you just recharged the device, you can ignore this \u2014 Juice Patrol
+        already handles that.</p>`,
+      onConfirm: () => this._doMarkReplaced(entityId),
     });
   }
 
   _showReplaceDialog(entityId) {
+    this._showConfirmDialog({
+      title: "Mark battery as replaced?",
+      bodyHtml: `
+        <p style="margin-top:0">This tells Juice Patrol that you swapped the batteries.
+        The discharge history will be reset and tracking starts fresh.</p>`,
+      onConfirm: () => this._doMarkReplaced(entityId),
+    });
+  }
+
+  _showConfirmDialog({ title, bodyHtml, onConfirm }) {
     const dialog = document.createElement("ha-dialog");
     dialog.open = true;
-    dialog.headerTitle = "Mark battery as replaced?";
+    dialog.headerTitle = title;
     this.shadowRoot.appendChild(dialog);
 
     const closeDialog = () => { dialog.open = false; dialog.remove(); };
 
     const body = document.createElement("div");
     body.innerHTML = `
-      <p style="margin-top:0">This tells Juice Patrol that you swapped the batteries.
-      The discharge history will be reset and tracking starts fresh.</p>
+      ${bodyHtml}
       <p style="border-left:3px solid var(--error-color, #db4437); padding:4px 12px; margin:16px 0">
         <strong>Warning:</strong> This will discard all Juice Patrol history for this
         device and start tracking from scratch. Recorder data is not affected.
@@ -777,7 +754,7 @@ class JuicePatrolPanel extends LitElement {
     body.querySelector(".jp-dialog-cancel").addEventListener("click", closeDialog);
     body.querySelector(".jp-dialog-confirm").addEventListener("click", () => {
       closeDialog();
-      this._doMarkReplaced(entityId);
+      onConfirm();
     });
   }
 
@@ -838,7 +815,6 @@ class JuicePatrolPanel extends LitElement {
       const result = await this._hass.callWS({
         type: "juice_patrol/get_ignored",
       });
-      this._ignoredCount = result.devices.length;
       this._ignoredEntities = result.devices;
     } catch (e) {
       console.error("Juice Patrol: failed to load ignored devices", e);
@@ -1291,7 +1267,7 @@ class JuicePatrolPanel extends LitElement {
     const observed = readings.map((r) => [r.t * 1000, r.v]);
 
     const chargePred = chartData.charge_prediction;
-    const isCharging = chartData.charging_state === "Charging";
+    const isCharging = chartData.charging_state?.toLowerCase() === "charging";
     const hasChargePred = chargePred && chargePred.estimated_full_timestamp;
 
     const fitted = [];
@@ -1620,8 +1596,8 @@ class JuicePatrolPanel extends LitElement {
         ${anomaly > 0
           ? card("anomaly", anomaly, "Anomaly", "var(--error-color)")
           : nothing}
-        ${this._ignoredCount > 0
-          ? card("ignored", this._ignoredCount, "Ignored", "var(--secondary-text-color)")
+        ${this._ignoredEntities?.length > 0
+          ? card("ignored", this._ignoredEntities.length, "Ignored", "var(--secondary-text-color)")
           : nothing}
       </div>
     `;

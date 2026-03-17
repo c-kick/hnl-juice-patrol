@@ -488,7 +488,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ),
             "is_low": is_low,
             "is_stale": is_stale,
-            "last_calculated": time.time(),
+            "last_calculated": now,
         }
 
     def _get_battery_state(self, entity_id: str, device_id: str | None) -> str | None:
@@ -704,12 +704,10 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             else self.low_threshold
         )
 
-        # Get prediction from coordinator data (already computed)
-        prediction = None
-        if self.data and entity_id in self.data:
-            prediction = self.data[entity_id].get("prediction")
+        entity_data = self.data.get(entity_id, {}) if self.data else {}
 
         # Serialize prediction to plain dict
+        prediction = entity_data.get("prediction")
         pred_dict: dict[str, Any] = {}
         if prediction is not None:
             pred_dict = {
@@ -723,8 +721,6 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "reliability": prediction.reliability,
                 "data_points_used": prediction.data_points_used,
             }
-
-        entity_data = self.data.get(entity_id, {}) if self.data else {}
 
         # Charge prediction (rechargeable batteries only)
         charge_pred_dict: dict[str, Any] | None = None

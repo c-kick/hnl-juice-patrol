@@ -154,8 +154,12 @@ class JuicePatrolAttentionNeeded(
         data = self.coordinator.data
         if not data:
             return {}
-        low = [eid for eid, info in data.items() if info.get("is_low")]
-        stale = [eid for eid, info in data.items() if info.get("is_stale")]
+        low, stale = [], []
+        for eid, info in data.items():
+            if info.get("is_low"):
+                low.append(eid)
+            if info.get("is_stale"):
+                stale.append(eid)
         return {
             "low_battery_devices": low,
             "stale_devices": stale,
