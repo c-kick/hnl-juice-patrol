@@ -274,15 +274,12 @@ class JuicePatrolPanel extends LitElement {
     const devices = new Map();
 
     // Collect all juice_patrol sensor/binary_sensor entities
-    for (const entityId of Object.keys(states)) {
-      if (!entityId.startsWith("sensor.") && !entityId.startsWith("binary_sensor.")) continue;
-      const state = states[entityId];
-      if (!state?.attributes?.integration || state.attributes.integration !== "juice_patrol") continue;
-
-      const sourceEntity = state.attributes.source_entity;
+    for (const [entityId, state] of Object.entries(states)) {
+      const attrs = state.attributes || {};
+      const sourceEntity = attrs.source_entity;
       if (!sourceEntity) continue;
+      if (entityId.includes("lowest_battery") || entityId.includes("attention_needed")) continue;
 
-      // Skip derivative entities
       const hasSuffix =
         entityId.includes("_discharge_rate") ||
         entityId.includes("_days_remaining") ||
@@ -294,7 +291,7 @@ class JuicePatrolPanel extends LitElement {
       if (!devices.has(sourceEntity)) {
         devices.set(sourceEntity, {
           sourceEntity,
-          name: state.attributes.source_name || sourceEntity,
+          name: attrs.source_name || sourceEntity,
           level: null,
           dischargeRate: null,
           dischargeRateHour: null,
@@ -329,7 +326,6 @@ class JuicePatrolPanel extends LitElement {
       const dev = devices.get(sourceEntity);
 
       // Extract data from each sensor type
-      const attrs = state.attributes;
       if (entityId.includes("_discharge_rate")) {
         const val = parseFloat(state.state);
         dev.dischargeRate = isNaN(val) ? null : val;
