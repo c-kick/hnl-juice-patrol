@@ -103,6 +103,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ws_confirm_replacement,
         ws_mark_replaced,
         ws_undo_replacement,
+        ws_deny_replacement,
         ws_detect_battery_type,
         ws_refresh,
         ws_recalculate,
@@ -336,17 +337,27 @@ async def ws_confirm_replacement(hass, connection, msg):
     {
         vol.Required("type"): "juice_patrol/mark_replaced",
         vol.Required("entity_id"): cv.entity_id,
+        vol.Optional("timestamp"): vol.Coerce(float),
     }
 )
 @websocket_api.async_response
 async def ws_mark_replaced(hass, connection, msg):
-    """Manually mark a battery as replaced."""
+    """Manually mark a battery as replaced, optionally at a specific timestamp."""
     coordinator = _ws_get_coordinator(hass, connection, msg["id"])
     if not coordinator:
         return
     entity_id = msg["entity_id"]
+    timestamp = msg.get("timestamp")
     try:
-        await _do_mark_replaced(coordinator, entity_id)
+        if timestamp is not None:
+            if not await coordinator.async_mark_replaced_at(entity_id, timestamp):
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="entity_not_in_store",
+                    translation_placeholders={"entity_id": entity_id},
+                )
+        else:
+            await _do_mark_replaced(coordinator, entity_id)
         connection.send_result(msg["id"], {"ok": True})
     except HomeAssistantError:
         connection.send_error(msg["id"], "not_found", f"Entity {entity_id} not in store")
@@ -367,6 +378,29 @@ async def ws_undo_replacement(hass, connection, msg):
         return
     entity_id = msg["entity_id"]
     if await coordinator.async_undo_replacement(entity_id):
+        connection.send_result(msg["id"], {"ok": True})
+    else:
+        connection.send_error(
+            msg["id"], "not_found", f"Entity {entity_id} not in store"
+        )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "juice_patrol/deny_replacement",
+        vol.Required("entity_id"): cv.entity_id,
+        vol.Required("timestamp"): vol.Coerce(float),
+    }
+)
+@websocket_api.async_response
+async def ws_deny_replacement(hass, connection, msg):
+    """Deny a suspected historical replacement (won't be suggested again)."""
+    coordinator = _ws_get_coordinator(hass, connection, msg["id"])
+    if not coordinator:
+        return
+    entity_id = msg["entity_id"]
+    if await coordinator.async_deny_replacement(entity_id, msg["timestamp"]):
         connection.send_result(msg["id"], {"ok": True})
     else:
         connection.send_error(

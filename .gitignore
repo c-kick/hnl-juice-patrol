@@ -15,3 +15,4 @@ venv/
 node_modules/
 CLAUDE.md
 .claude/
+ideas.txt

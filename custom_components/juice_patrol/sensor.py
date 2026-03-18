@@ -126,7 +126,6 @@ class JuicePatrolPredictedEmpty(JuicePatrolEntity, SensorEntity):
 
     _attr_translation_key = "predicted_empty"
     _attr_device_class = SensorDeviceClass.TIMESTAMP
-    _attr_entity_registry_enabled_default = False
 
     def __init__(
         self,

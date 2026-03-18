@@ -45,6 +45,7 @@ from ..engine import (
     PredictionResult,
     PredictionStatus,
     analyze_battery,
+    detect_replacement_jumps,
     extract_charging_segment,
     predict_charge,
     predict_discharge,
@@ -585,25 +586,52 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self.async_request_refresh()
 
     async def async_mark_replaced(self, entity_id: str) -> bool:
-        """Mark a battery as replaced: update store, invalidate cache, refresh.
+        """Mark a battery as replaced: update store, invalidate cache.
 
         Returns False if entity_id not found in store.
+        Schedules a background refresh (not awaited) for sensor updates.
         """
         if not self.store.mark_replaced(entity_id):
             return False
         self._history_cache.invalidate(entity_id)
-        await self.async_request_refresh()
+        self.hass.async_create_task(self.async_request_refresh())
+        return True
+
+    async def async_mark_replaced_at(
+        self, entity_id: str, timestamp: float
+    ) -> bool:
+        """Mark a battery as replaced at a specific timestamp.
+
+        Returns False if entity_id not found in store.
+        Schedules a background refresh (not awaited) for sensor updates.
+        """
+        if not self.store.mark_replaced_at(entity_id, timestamp):
+            return False
+        self._history_cache.invalidate(entity_id)
+        self.hass.async_create_task(self.async_request_refresh())
+        return True
+
+    async def async_deny_replacement(
+        self, entity_id: str, timestamp: float
+    ) -> bool:
+        """Deny a suspected replacement timestamp.
+
+        Returns False if entity_id not found in store.
+        """
+        if not self.store.deny_replacement(entity_id, timestamp):
+            return False
         return True
 
     async def async_undo_replacement(self, entity_id: str) -> bool:
-        """Undo a manual replacement: restore last_replaced, invalidate cache, refresh.
+        """Undo a manual replacement: update store, invalidate cache.
 
         Returns False if entity_id not found in store.
+        Schedules a background refresh (not awaited) for sensor updates.
         """
         if not self.store.undo_replacement(entity_id):
             return False
         self._history_cache.invalidate(entity_id)
-        await self.async_request_refresh()
+        self.hass.async_create_task(self.async_request_refresh())
         return True
 
     async def async_recalculate_entity(self, entity_id: str) -> bool:
@@ -748,6 +776,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "status": str(prediction.status),
                 "reliability": prediction.reliability,
                 "data_points_used": prediction.data_points_used,
+                "t0": prediction.t0,
             }
 
         # Charge prediction (rechargeable batteries only)
@@ -804,6 +833,16 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "segment_start_level": charging_segment[0]["v"],
                     }
 
+        # Detect suspected historical replacements (non-rechargeable only)
+        suspected_replacements: list[dict[str, float]] = []
+        if not is_rechargeable and all_readings:
+            suspected_replacements = detect_replacement_jumps(
+                all_readings,
+                low_threshold=threshold,
+                known_replacements=dev.replacement_history if dev else [],
+                denied_replacements=dev.denied_replacements if dev else [],
+            )
+
         return {
             "readings": readings,
             "all_readings": all_readings,
@@ -812,6 +851,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "threshold": threshold,
             "last_replaced": dev.last_replaced if dev else None,
             "replacement_history": dev.replacement_history if dev else [],
+            "suspected_replacements": suspected_replacements,
             "is_rechargeable": is_rechargeable,
             "first_reading_timestamp": readings[0]["t"] if readings else None,
             "device_name": battery.device_name,

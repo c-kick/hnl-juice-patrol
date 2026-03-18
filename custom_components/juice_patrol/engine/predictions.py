@@ -54,6 +54,7 @@ class PredictionResult:
     status: PredictionStatus
     reliability: int | None = None  # 0-100 score
     session_count: int | None = None  # number of discharge sessions (multi-session only)
+    t0: float | None = None  # reference timestamp for the regression (intercept is at t0)
 
 
 def _no_prediction(
@@ -75,6 +76,7 @@ def _no_prediction(
         status=status,
         reliability=None,
         session_count=session_count,
+        t0=None,
     )
 
 
@@ -193,6 +195,7 @@ def predict_discharge(
                 len(cleaned), timespan_hours, r_squared, conf,
                 days_remaining=None,
             ),
+            t0=t0,
         )
 
     if abs(slope) <= 0.02:
@@ -213,6 +216,7 @@ def predict_discharge(
                 len(cleaned), timespan_hours, r_squared, conf,
                 days_remaining=None,
             ),
+            t0=t0,
         )
 
     # R² gate: if the model explains < 10% of variance, the slope
@@ -234,6 +238,7 @@ def predict_discharge(
                 len(cleaned), timespan_hours, r_squared, conf,
                 days_remaining=None,
             ),
+            t0=t0,
         )
 
     # Predict when level hits target
@@ -264,6 +269,7 @@ def predict_discharge(
             len(cleaned), timespan_hours, r_squared, conf,
             days_remaining=days_remaining,
         ),
+        t0=t0,
     )
 
 
@@ -369,6 +375,7 @@ def predict_discharge_multisession(
                 days_remaining=None,
             ),
             session_count=len(sessions),
+            t0=now,
         )
 
     # Predict time to target
@@ -388,6 +395,7 @@ def predict_discharge_multisession(
             status=PredictionStatus.FLAT,
             reliability=None,
             session_count=len(sessions),
+            t0=now,
         )
 
     # slope is negative (discharging): days = (target - current) / slope
@@ -415,6 +423,7 @@ def predict_discharge_multisession(
             days_remaining=days_remaining,
         ),
         session_count=len(sessions),
+        t0=now,
     )
 
 

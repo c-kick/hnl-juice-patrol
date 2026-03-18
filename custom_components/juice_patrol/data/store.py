@@ -20,6 +20,7 @@ class DeviceData:
     """In-memory representation of a single device's metadata."""
 
     replacement_history: list[float] = field(default_factory=list)
+    denied_replacements: list[float] = field(default_factory=list)
     ignored: bool = False
     custom_threshold: int | None = None
     battery_type: str | None = None  # e.g. "CR2032", "AA", "AAA"
@@ -44,6 +45,7 @@ class DeviceData:
                 replacement_history = [last_replaced]
         return cls(
             replacement_history=replacement_history,
+            denied_replacements=data.get("denied_replacements", []),
             ignored=data.get("ignored", False),
             custom_threshold=data.get("custom_threshold"),
             battery_type=data.get("battery_type"),
@@ -57,6 +59,7 @@ class DeviceData:
         """Serialize to dict for storage."""
         result: dict[str, Any] = {
             "replacement_history": self.replacement_history,
+            "denied_replacements": self.denied_replacements,
             "ignored": self.ignored,
             "replacement_confirmed": self.replacement_confirmed,
             "source_entity": self.source_entity,
@@ -202,6 +205,19 @@ class JuicePatrolStore:
         _LOGGER.info("Battery manually marked as replaced: %s", entity_id)
         return True
 
+    def mark_replaced_at(self, entity_id: str, timestamp: float) -> bool:
+        """Mark a battery as replaced at a specific timestamp (inserts chronologically)."""
+        dev = self._data.devices.get(entity_id)
+        if dev is None:
+            return False
+
+        dev.replacement_history.append(timestamp)
+        dev.replacement_history.sort()
+        dev.replacement_confirmed = True
+        self._dirty = True
+        _LOGGER.info("Battery marked as replaced at %s: %s", timestamp, entity_id)
+        return True
+
     def undo_replacement(self, entity_id: str) -> bool:
         """Undo the most recent replacement (pops from history stack)."""
         dev = self._data.devices.get(entity_id)
@@ -213,6 +229,17 @@ class JuicePatrolStore:
         dev.replacement_confirmed = True
         self._dirty = True
         _LOGGER.info("Battery replacement undone: %s", entity_id)
+        return True
+
+    def deny_replacement(self, entity_id: str, timestamp: float) -> bool:
+        """Deny a suspected replacement (prevents re-suggestion)."""
+        dev = self._data.devices.get(entity_id)
+        if dev is None:
+            return False
+
+        dev.denied_replacements.append(timestamp)
+        self._dirty = True
+        _LOGGER.info("Suspected replacement denied at %s: %s", timestamp, entity_id)
         return True
 
     def set_ignored(self, entity_id: str, ignored: bool) -> None:

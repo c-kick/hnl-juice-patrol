@@ -412,6 +412,16 @@ The refresh button (🔄) next to the cogwheel is unclear about what it does. Im
 - Distinguish from HA's native refresh (which reloads the page) — this only invalidates the Juice Patrol history cache and triggers a coordinator refresh
 - Optionally show a small indicator while refresh is in progress (spinner or disabled state with "Refreshing..." text)
 
+### Tiered Alerting
+When building out the alerting/notification system, offer two complementary alert flavors:
+- **Threshold-based:** "Notify me when a battery drops below X%" — simple, immediate, works for all devices regardless of prediction reliability
+- **Prediction-based:** "Notify me when a battery will be empty within X hours/days" — proactive, catches fast-draining devices before they hit the threshold, and avoids false alarms for slow-draining devices that are low but still have weeks left
+
+Both can coexist: threshold alerts are the safety net, prediction alerts are the smart early warning. Consider exposing both as configurable options in the integration settings or per-device overrides.
+
+The option to exclude rechargeable batteries, or have different alerts for these should be a possibility. One additional alert that I can think of for this would be:
+- **Prediction and/or Threshold-based:** "Notify me when this battery is about to run out, and it's not being charged (yet)"
+
 ### Panel Toolbar (HA Native Pattern)
 Replace the custom `.header` div inside `#jp-content` with a proper HA toolbar element. Follow the pattern used by HACS, Browser Mod, and native HA dashboards for consistent UX:
 - Use `<app-toolbar>` or `<ha-top-app-bar-fixed>` as the native HA panels do

@@ -2,6 +2,8 @@ import { LitElement, html, css, nothing } from "lit";
 import { classMap } from "lit/directives/class-map.js";
 import { repeat } from "lit/directives/repeat.js";
 
+// Tabs are defined dynamically in the getter below (need basePath)
+
 class JuicePatrolPanel extends LitElement {
   static get properties() {
     return {
@@ -106,6 +108,11 @@ class JuicePatrolPanel extends LitElement {
       this._syncViewFromUrl();
     };
     window.addEventListener("popstate", this._popstateHandler);
+    // hass-tabs-subpage uses navigate() which fires location-changed
+    this._locationChangedHandler = () => {
+      this._syncViewFromUrl();
+    };
+    window.addEventListener("location-changed", this._locationChangedHandler);
     // Recover from background/idle: when the tab regains visibility,
     // re-process hass to rebuild entity state and reload chart if needed.
     this._visibilityHandler = () => {
@@ -140,6 +147,10 @@ class JuicePatrolPanel extends LitElement {
     if (this._popstateHandler) {
       window.removeEventListener("popstate", this._popstateHandler);
       this._popstateHandler = null;
+    }
+    if (this._locationChangedHandler) {
+      window.removeEventListener("location-changed", this._locationChangedHandler);
+      this._locationChangedHandler = null;
     }
     if (this._visibilityHandler) {
       document.removeEventListener("visibilitychange", this._visibilityHandler);
@@ -176,13 +187,28 @@ class JuicePatrolPanel extends LitElement {
         return;
       }
     }
-    // Any other path → main view
+    // Shopping list path
+    if (path === `${this._basePath}/shopping` || path === `${this._basePath}/shopping/`) {
+      if (this._activeView === "detail") {
+        this._detailEntity = null;
+        this._chartData = null;
+        this._chartEl = null;
+      }
+      if (this._activeView !== "shopping") {
+        this._activeView = "shopping";
+        this._loadShoppingList();
+      }
+      this._entities = this._sortEntities(this._entityList);
+      return;
+    }
+    // Any other path → devices view
     if (this._activeView === "detail") {
       this._detailEntity = null;
       this._chartData = null;
       this._chartEl = null;
-      this._activeView = "devices";
     }
+    this._activeView = "devices";
+    this._entities = this._sortEntities(this._entityList);
   }
 
   updated(changed) {
@@ -214,7 +240,13 @@ class JuicePatrolPanel extends LitElement {
     if (newHash !== prevHash) {
       const sorted = this._sortEntities(this._entityList);
       this._entityMap = new Map(sorted.map((d) => [d.sourceEntity, d]));
-      this._entities = sorted;
+      // In detail view, update the map silently (for _getDevice()) but don't
+      // assign _entities — it's a reactive property that triggers a full Lit
+      // re-render, which causes visible flashing of the detail/chart view.
+      // The stale _entities list will be refreshed when returning to devices view.
+      if (this._activeView !== "detail") {
+        this._entities = sorted;
+      }
     }
 
     if (isFirstLoad) {
@@ -222,13 +254,15 @@ class JuicePatrolPanel extends LitElement {
       this._loadIgnored();
     }
 
-    // Auto-refresh chart data when entity level changes in detail view
+    // Auto-refresh chart data when entity level changes in detail view.
+    // Use a longer debounce (5s) to avoid cascading reloads from background
+    // coordinator refreshes that update entity sensors.
     if (this._activeView === "detail" && this._detailEntity && !this._chartLoading) {
       const dev = this._getDevice(this._detailEntity);
       if (dev && dev.level !== this._chartLastLevel) {
         this._chartLastLevel = dev.level;
         clearTimeout(this._chartDebounce);
-        this._chartDebounce = setTimeout(() => this._loadChartData(this._detailEntity), 2000);
+        this._chartDebounce = setTimeout(() => this._loadChartData(this._detailEntity), 5000);
       }
     }
   }
@@ -721,14 +755,15 @@ class JuicePatrolPanel extends LitElement {
     this._showReplaceDialog(entityId);
   }
 
-  async _doMarkReplaced(entityId) {
+  async _doMarkReplaced(entityId, timestamp) {
     try {
-      await this._hass.callWS({
+      const wsMsg = {
         type: "juice_patrol/mark_replaced",
         entity_id: entityId,
-      });
+      };
+      if (timestamp != null) wsMsg.timestamp = timestamp;
+      await this._hass.callWS(wsMsg);
       this._showToast("Battery marked as replaced");
-      // Reload chart data to show the new replacement marker
       if (this._detailEntity === entityId) {
         setTimeout(() => this._loadChartData(entityId), 500);
       }
@@ -738,9 +773,9 @@ class JuicePatrolPanel extends LitElement {
   }
 
   _showReplaceRechargeableDialog(entityId) {
-    this._showConfirmDialog({
+    this._showReplaceDialogImpl(entityId, {
       title: "Replace rechargeable battery?",
-      bodyHtml: `
+      preamble: `
         <p style="margin-top:0">This device is marked as <strong>rechargeable</strong>, which means
         Juice Patrol expects its battery level to gradually rise and fall as it
         charges and discharges. Charging is detected automatically \u2014 you don't
@@ -749,22 +784,59 @@ class JuicePatrolPanel extends LitElement {
         battery pack itself (e.g. a worn-out cell that no longer holds charge).</p>
         <p>If you just recharged the device, you can ignore this \u2014 Juice Patrol
         already handles that.</p>`,
-      confirmLabel: "Mark as replaced",
-      onConfirm: () => this._doMarkReplaced(entityId),
     });
   }
 
   _showReplaceDialog(entityId) {
-    this._showConfirmDialog({
+    this._showReplaceDialogImpl(entityId, {
       title: "Mark battery as replaced?",
-      bodyHtml: `
+      preamble: `
         <p style="margin-top:0">This tells Juice Patrol that you swapped the batteries.
         A replacement marker will be added to the timeline. All history is preserved
         for life expectancy tracking.</p>
         <p style="color:var(--secondary-text-color); font-size:0.9em; margin-bottom:0">
         This can be undone later if needed.</p>`,
-      confirmLabel: "Mark as replaced",
-      onConfirm: () => this._doMarkReplaced(entityId),
+    });
+  }
+
+  _showReplaceDialogImpl(entityId, { title, preamble }) {
+    const dialog = document.createElement("ha-dialog");
+    dialog.open = true;
+    dialog.headerTitle = title;
+    this.shadowRoot.appendChild(dialog);
+
+    const closeDialog = () => { dialog.open = false; dialog.remove(); };
+
+    const body = document.createElement("div");
+    body.innerHTML = `
+      ${preamble}
+      <ha-expansion-panel outlined style="margin: 8px 0">
+        <span slot="header">Advanced: set custom date</span>
+        <div style="padding: 8px 0">
+          <p style="margin-top:0; color:var(--secondary-text-color); font-size:0.9em">
+            Register a past battery replacement by selecting the date and time it occurred.</p>
+          <input type="datetime-local" class="jp-datetime-input"
+            style="width:100%; padding:8px; border:1px solid var(--divider-color, #ddd);
+                   border-radius:4px; background:var(--card-background-color, #fff);
+                   color:var(--primary-text-color); font-size:14px; box-sizing:border-box" />
+        </div>
+      </ha-expansion-panel>
+      <div class="jp-dialog-actions">
+        <ha-button variant="neutral" class="jp-dialog-cancel">Cancel</ha-button>
+        <ha-button class="jp-dialog-confirm">Mark as replaced</ha-button>
+      </div>
+    `;
+    dialog.appendChild(body);
+
+    body.querySelector(".jp-dialog-cancel").addEventListener("click", closeDialog);
+    body.querySelector(".jp-dialog-confirm").addEventListener("click", () => {
+      const dtInput = body.querySelector(".jp-datetime-input");
+      let timestamp;
+      if (dtInput && dtInput.value) {
+        timestamp = new Date(dtInput.value).getTime() / 1000;
+      }
+      closeDialog();
+      this._doMarkReplaced(entityId, timestamp);
     });
   }
 
@@ -793,7 +865,21 @@ class JuicePatrolPanel extends LitElement {
     });
   }
 
-  async _undoReplacement(entityId) {
+  _undoReplacement(entityId) {
+    this._showConfirmDialog({
+      title: "Undo battery replacement?",
+      bodyHtml: `
+        <p style="margin-top:0">This will remove the most recent replacement marker
+        from the timeline. Battery history is never deleted.</p>
+        <p style="color:var(--secondary-text-color); font-size:0.9em; margin-bottom:0">
+        You can always re-add it later if needed.</p>`,
+      confirmLabel: "Undo replacement",
+      confirmVariant: "danger",
+      onConfirm: () => this._doUndoReplacement(entityId),
+    });
+  }
+
+  async _doUndoReplacement(entityId) {
     try {
       await this._hass.callWS({
         type: "juice_patrol/undo_replacement",
@@ -818,6 +904,38 @@ class JuicePatrolPanel extends LitElement {
       this._showToast("Replacement confirmed");
     } catch (e) {
       this._showToast("Failed to confirm");
+    }
+  }
+
+  async _confirmSuspectedReplacement(entityId, timestamp) {
+    try {
+      await this._hass.callWS({
+        type: "juice_patrol/mark_replaced",
+        entity_id: entityId,
+        timestamp,
+      });
+      this._showToast("Replacement confirmed");
+      if (this._detailEntity === entityId) {
+        setTimeout(() => this._loadChartData(entityId), 500);
+      }
+    } catch (e) {
+      this._showToast("Failed to confirm replacement");
+    }
+  }
+
+  async _denySuspectedReplacement(entityId, timestamp) {
+    try {
+      await this._hass.callWS({
+        type: "juice_patrol/deny_replacement",
+        entity_id: entityId,
+        timestamp,
+      });
+      this._showToast("Suggestion dismissed");
+      if (this._detailEntity === entityId) {
+        setTimeout(() => this._loadChartData(entityId), 500);
+      }
+    } catch (e) {
+      this._showToast("Failed to dismiss suggestion");
     }
   }
 
@@ -907,7 +1025,7 @@ class JuicePatrolPanel extends LitElement {
   async _loadChartData(entityId) {
     if (!this._hass || this._chartLoading) return;
     this._chartLoading = true;
-    this._chartData = null;
+    // Keep existing _chartData visible while loading — don't flash to empty
     try {
       const data = await this._hass.callWS({
         type: "juice_patrol/get_entity_chart",
@@ -918,7 +1036,6 @@ class JuicePatrolPanel extends LitElement {
     } catch (e) {
       console.error("Juice Patrol: failed to load chart data", e);
       this._showToast(this._wsErrorMessage(e, "chart view"));
-      this._chartData = null;
     }
     this._chartLoading = false;
   }
@@ -971,7 +1088,10 @@ class JuicePatrolPanel extends LitElement {
   _setFilter(cat) {
     this._closeOverlays();
     this._filterCategory = this._filterCategory === cat ? null : cat;
-    if (this._activeView !== "devices") this._activeView = "devices";
+    if (this._activeView !== "devices") {
+      this._activeView = "devices";
+      this._entities = this._sortEntities(this._entityList);
+    }
     if (this._filterCategory === "ignored") this._loadIgnored();
   }
 
@@ -1302,8 +1422,11 @@ class JuicePatrolPanel extends LitElement {
     const readings = chartData.readings;
     const allReadings = chartData.all_readings || readings;
     const pred = chartData.prediction;
-    const t0 = chartData.first_reading_timestamp;
     const threshold = chartData.threshold;
+    // t0 for the regression formula: use the prediction's own reference point,
+    // falling back to first_reading_timestamp for single-session predictions
+    // that predate the t0 field.
+    const t0 = pred.t0 ?? chartData.first_reading_timestamp;
 
     const observed = allReadings.map((r) => [r.t * 1000, r.v]);
 
@@ -1522,9 +1645,15 @@ class JuicePatrolPanel extends LitElement {
 
     // Threshold crossing vertical marker
     if (crossingMs) {
-      const crossingLabel = new Date(crossingMs).toLocaleDateString(undefined, {
-        day: "numeric", month: "short", year: "numeric",
-      });
+      const crossingDate = new Date(crossingMs);
+      const hoursUntilCrossing = (crossingMs - Date.now()) / 3600000;
+      const crossingLabel = hoursUntilCrossing <= 48
+        ? crossingDate.toLocaleString(undefined, {
+            day: "numeric", month: "short", hour: "numeric", minute: "2-digit",
+          })
+        : crossingDate.toLocaleDateString(undefined, {
+            day: "numeric", month: "short", year: "numeric",
+          });
       series.push({
         name: "Low battery",
         type: "line",
@@ -1566,6 +1695,34 @@ class JuicePatrolPanel extends LitElement {
           ],
           lineStyle: { width: 1, type: "dashed", color: colorReplacement },
           itemStyle: { color: colorReplacement },
+          tooltip: { show: false },
+        });
+      }
+    }
+
+    // Suspected replacement markers (amber, dotted)
+    const suspectedReplacements = chartData.suspected_replacements || [];
+    if (suspectedReplacements.length > 0) {
+      const colorSuspected = this._resolveColor("--warning-color", "#ff9800");
+      for (let i = 0; i < suspectedReplacements.length; i++) {
+        const ts = suspectedReplacements[i].timestamp * 1000;
+        const dateLabel = new Date(ts).toLocaleDateString(undefined, {
+          day: "numeric", month: "short",
+        });
+        series.push({
+          name: i === 0 ? "Suspected" : `Suspected ${i + 1}`,
+          type: "line",
+          data: [
+            { value: [ts, 0], symbol: "none", symbolSize: 0 },
+            {
+              value: [ts, 100],
+              symbol: "diamond",
+              symbolSize: 6,
+              label: _markerLabel(`Replaced? ${dateLabel}`, colorSuspected),
+            },
+          ],
+          lineStyle: { width: 1, type: "dotted", color: colorSuspected },
+          itemStyle: { color: colorSuspected },
           tooltip: { show: false },
         });
       }
@@ -1661,11 +1818,16 @@ class JuicePatrolPanel extends LitElement {
       },
     };
 
-    const chart = document.createElement("ha-chart-base");
+    // Reuse existing chart element to preserve user zoom/pan state;
+    // only create a new one on first render.
+    let chart = this._chartEl;
+    if (!chart || !container.contains(chart)) {
+      chart = document.createElement("ha-chart-base");
+      container.innerHTML = "";
+      container.appendChild(chart);
+      this._chartEl = chart;
+    }
     chart.hass = this._hass;
-
-    container.innerHTML = "";
-    container.appendChild(chart);
 
     requestAnimationFrame(() => {
       // ha-chart-base uses separate data (series) and options properties.
@@ -1677,49 +1839,57 @@ class JuicePatrolPanel extends LitElement {
 
   // ── Render ──
 
-  render() {
-    if (!this._hass) return html`<div class="loading">Loading...</div>`;
-    return html`
-      ${this._renderToolbar()}
-      <div id="jp-content">
-        ${this._activeView === "detail"
-          ? this._renderDetailView()
-          : this._renderMainView()}
-      </div>
-    `;
+  get _tabs() {
+    const base = this._basePath;
+    return [
+      { path: `${base}/devices`, name: "Devices", iconPath: "M16.67,4H15V2H9V4H7.33A1.33,1.33 0 0,0 6,5.33V20.67C6,21.4 6.6,22 7.33,22H16.67A1.33,1.33 0 0,0 18,20.67V5.33C18,4.6 17.4,4 16.67,4Z" },
+      { path: `${base}/shopping`, name: "Shopping List", iconPath: "M17,18A2,2 0 0,1 19,20A2,2 0 0,1 17,22C15.89,22 15,21.1 15,20C15,18.89 15.89,18 17,18M1,2H4.27L5.21,4H20A1,1 0 0,1 21,5C21,5.17 20.95,5.34 20.88,5.5L17.3,11.97C16.96,12.58 16.3,13 15.55,13H8.1L7.2,14.63L7.17,14.75A0.25,0.25 0 0,0 7.42,15H19V17H7C5.89,17 5,16.1 5,15C5,14.65 5.09,14.32 5.24,14.04L6.6,11.59L3,4H1V2M7,18A2,2 0 0,1 9,20A2,2 0 0,1 7,22C5.89,22 5,21.1 5,20C5,18.89 5.89,18 7,18M16,11L18.78,6H6.14L8.5,11H16Z" },
+    ];
   }
 
-  _renderToolbar() {
+  get _route() {
+    const view = this._activeView === "detail" ? "devices" : this._activeView;
+    return { path: `/${view}`, prefix: this._basePath };
+  }
+
+  render() {
+    if (!this._hass) return html`<div class="loading">Loading...</div>`;
     const inDetail = this._activeView === "detail";
     return html`
-      <div class="toolbar">
+      <hass-tabs-subpage
+        .hass=${this._hass}
+        .narrow=${this.narrow}
+        .tabs=${this._tabs}
+        .route=${this._route}
+        ?main-page=${!inDetail}
+        .backCallback=${inDetail ? () => this._closeDetail() : undefined}
+      >
         ${inDetail
-          ? html`<ha-icon-button
-              @click=${this._closeDetail}
-              title="Back"
-            >
-              <ha-icon icon="mdi:arrow-left"></ha-icon>
-            </ha-icon-button>`
-          : html`<ha-menu-button .hass=${this._hass} .narrow=${this.narrow}></ha-menu-button>`}
-        <div class="main-title">${inDetail
-          ? (this._getDevice(this._detailEntity)?.name || this._detailEntity)
-          : "Juice Patrol"}</div>
-        ${inDetail
-          ? nothing
-          : html`
-            <ha-icon-button
-              id="refreshBtn"
-              class=${this._refreshing ? "spinning" : ""}
-              title="Re-fetch all battery data and recalculate predictions"
-              .disabled=${this._refreshing}
-              @click=${this._refresh}
-            >
-              <ha-icon icon="mdi:refresh"></ha-icon>
-            </ha-icon-button>
-            <ha-icon-button title="Settings" @click=${this._toggleSettings}>
-              <ha-icon icon="mdi:cog"></ha-icon>
-            </ha-icon-button>`}
-      </div>
+          ? html`<span slot="header">${this._getDevice(this._detailEntity)?.name || this._detailEntity}</span>`
+          : nothing}
+        <div slot="toolbar-icon" style="display:flex">
+          <ha-icon-button
+            id="refreshBtn"
+            class=${this._refreshing ? "spinning" : ""}
+            title="Re-fetch all battery data and recalculate predictions"
+            .disabled=${this._refreshing}
+            @click=${this._refresh}
+          >
+            <ha-icon icon="mdi:refresh"></ha-icon>
+          </ha-icon-button>
+          <ha-icon-button
+            title="Settings"
+            @click=${this._toggleSettings}
+          >
+            <ha-icon icon="mdi:cog"></ha-icon>
+          </ha-icon-button>
+        </div>
+        <div id="jp-content">
+          ${inDetail
+            ? this._renderDetailView()
+            : this._renderMainView()}
+        </div>
+      </hass-tabs-subpage>
     `;
   }
 
@@ -1745,7 +1915,6 @@ class JuicePatrolPanel extends LitElement {
       )}
       ${this._settingsOpen && this._configEntry ? this._renderSettings() : nothing}
       ${this._renderFilterBar()}
-      ${this._renderTabBar()}
       ${this._activeView === "shopping"
         ? this._renderShoppingList()
         : this._renderDeviceTable()}
@@ -1902,29 +2071,7 @@ class JuicePatrolPanel extends LitElement {
     `;
   }
 
-  _renderTabBar() {
-    return html`
-      <div class="tab-bar">
-        <button
-          class="tab ${this._activeView === "devices" ? "active" : ""}"
-          @click=${() => this._switchTab("devices")}
-        >
-          <ha-icon
-            icon="mdi:battery-heart-variant"
-            style="--mdc-icon-size:18px"
-          ></ha-icon>
-          Devices
-        </button>
-        <button
-          class="tab ${this._activeView === "shopping" ? "active" : ""}"
-          @click=${() => this._switchTab("shopping")}
-        >
-          <ha-icon icon="mdi:cart-outline" style="--mdc-icon-size:18px"></ha-icon>
-          Shopping List
-        </button>
-      </div>
-    `;
-  }
+  /* _renderTabBar removed — tabs are now in the toolbar */
 
   _renderDeviceTable() {
     if (this._filterCategory === "ignored") {
@@ -2585,8 +2732,10 @@ class JuicePatrolPanel extends LitElement {
     const cd = this._chartData;
     const replacementHistory = cd?.replacement_history || [];
 
+    const suspectedReplacements = cd?.suspected_replacements || [];
+
     return html`
-      ${replacementHistory.length > 0 ? html`
+      ${replacementHistory.length > 0 || suspectedReplacements.length > 0 ? html`
         <div class="replacement-history">
           <div class="detail-meta-label" style="margin-bottom: 4px">Replacement History</div>
           <div class="replacement-history-list">
@@ -2594,6 +2743,24 @@ class JuicePatrolPanel extends LitElement {
               <div class="replacement-history-item">
                 <ha-icon icon="mdi:battery-sync" style="--mdc-icon-size:16px; color:var(--secondary-text-color)"></ha-icon>
                 <span>${this._formatDate(ts * 1000, true)}</span>
+              </div>
+            `)}
+            ${suspectedReplacements.map((s) => html`
+              <div class="replacement-history-item suspected">
+                <ha-icon icon="mdi:help-circle-outline" style="--mdc-icon-size:16px; color:var(--warning-color, #ff9800)"></ha-icon>
+                <span style="flex:1">${this._formatDate(s.timestamp * 1000, true)}
+                  <span style="color:var(--secondary-text-color); font-size:0.85em"> — suspected (${Math.round(s.old_level)}% → ${Math.round(s.new_level)}%)</span>
+                </span>
+                <ha-icon-button
+                  .path=${"M21,7L9,19L3.5,13.5L4.91,12.09L9,16.17L19.59,5.59L21,7Z"}
+                  style="--mdc-icon-button-size:28px; color:var(--success-color, #4caf50)"
+                  @click=${() => this._confirmSuspectedReplacement(entityId, s.timestamp)}
+                ></ha-icon-button>
+                <ha-icon-button
+                  .path=${"M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z"}
+                  style="--mdc-icon-button-size:28px; color:var(--error-color, #f44336)"
+                  @click=${() => this._denySuspectedReplacement(entityId, s.timestamp)}
+                ></ha-icon-button>
               </div>
             `)}
           </div>
@@ -2666,48 +2833,12 @@ class JuicePatrolPanel extends LitElement {
         height: 100%;
         overflow: hidden;
       }
-      .toolbar {
-        display: flex;
-        align-items: center;
-        font-size: 20px;
-        height: var(--header-height, 56px);
-        font-weight: 400;
-        color: var(
-          --sidebar-text-color,
-          var(--app-header-text-color, var(--primary-text-color))
-        );
-        background-color: var(
-          --sidebar-background-color,
-          var(--app-header-background-color, var(--primary-background-color))
-        );
-        border-bottom: 1px solid var(--divider-color);
-        box-sizing: border-box;
-        padding: 8px 12px;
-        position: sticky;
-        top: 0;
-        z-index: 5;
-      }
-      .toolbar ha-menu-button {
-        pointer-events: auto;
+      /* Toolbar is provided by hass-tabs-subpage */
+      ha-icon-button[slot="toolbar-icon"] {
         color: var(--sidebar-icon-color);
-      }
-      .toolbar .main-title {
-        margin-inline-start: 24px;
-        line-height: 1.5;
-        flex-grow: 1;
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      .toolbar ha-icon-button {
-        color: var(--sidebar-icon-color, var(--secondary-text-color));
       }
       #jp-content {
         padding: 16px;
-        height: calc(100% - var(--header-height, 56px));
-        overflow-y: auto;
-        box-sizing: border-box;
       }
       .summary {
         display: flex;
@@ -3316,34 +3447,7 @@ class JuicePatrolPanel extends LitElement {
         );
         color: var(--disabled-text-color, #999);
       }
-      .tab-bar {
-        display: flex;
-        gap: 0;
-        margin-bottom: 16px;
-        border-bottom: 2px solid var(--border);
-      }
-      .tab {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        padding: 10px 20px;
-        border: none;
-        background: none;
-        cursor: pointer;
-        font-size: 14px;
-        font-weight: 500;
-        color: var(--secondary-text-color);
-        border-bottom: 2px solid transparent;
-        margin-bottom: -2px;
-        font-family: inherit;
-      }
-      .tab:hover {
-        color: var(--primary-text-color);
-      }
-      .tab.active {
-        color: var(--primary-color);
-        border-bottom-color: var(--primary-color);
-      }
+      /* old .tab-bar/.tab removed — tabs are now in the toolbar */
       .shopping-summary {
         display: flex;
         gap: 16px;
@@ -3532,6 +3636,10 @@ class JuicePatrolPanel extends LitElement {
         font-size: 0.9em;
         color: var(--primary-text-color);
       }
+      .replacement-history-item.suspected {
+        padding: 4px 0;
+        border-top: 1px dashed var(--divider-color, #e0e0e0);
+      }
       .detail-actions {
         display: flex;
         flex-wrap: wrap;
@@ -3588,10 +3696,7 @@ class JuicePatrolPanel extends LitElement {
         .search-field {
           padding: 6px 10px;
         }
-        .tab {
-          padding: 8px 14px;
-          font-size: 13px;
-        }
+        /* tabs move to bottom bar on narrow via template logic */
         .shopping-summary {
           flex-wrap: wrap;
           gap: 8px;

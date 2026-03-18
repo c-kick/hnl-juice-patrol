@@ -327,14 +327,14 @@ class TestPredictedEmpty:
         )
         assert sensor.native_value is None
 
-    def test_disabled_by_default(self, mock_coordinator) -> None:
-        """Sensor is disabled by default (user must enable in UI)."""
+    def test_enabled_by_default(self, mock_coordinator) -> None:
+        """Sensor is enabled by default."""
         mock_coordinator.data = {SOURCE_ENTITY: _make_device_info()}
         sensor = JuicePatrolPredictedEmpty(
             mock_coordinator, SOURCE_ENTITY, SLUG,
             mock_coordinator.data[SOURCE_ENTITY],
         )
-        assert sensor.entity_registry_enabled_default is False
+        assert sensor.entity_registry_enabled_default is True
 
     def test_extra_state_attributes_with_prediction(
         self, mock_coordinator

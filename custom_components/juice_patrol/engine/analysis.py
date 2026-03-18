@@ -344,6 +344,97 @@ def _detect_anomaly(
     return DischargeAnomaly.NORMAL, None
 
 
+def detect_replacement_jumps(
+    readings: list[dict[str, float]],
+    low_threshold: float = 20.0,
+    *,
+    known_replacements: list[float] | None = None,
+    denied_replacements: list[float] | None = None,
+) -> list[dict[str, float]]:
+    """Detect suspected battery replacement jumps in historical readings.
+
+    Scans for sharp upward transitions where level was low and jumps to high,
+    characteristic of a physical battery swap on non-rechargeable devices.
+
+    Args:
+        readings: List of {"t": timestamp, "v": level} dicts, sorted by time.
+        low_threshold: Configured low battery threshold (%).
+        known_replacements: Timestamps already in replacement_history (to exclude).
+        denied_replacements: Timestamps the user has dismissed (to exclude).
+
+    Returns:
+        List of {"timestamp": float, "old_level": float, "new_level": float}
+        for each suspected replacement, sorted chronologically.
+    """
+    if len(readings) < 2:
+        return []
+
+    known = set(known_replacements or [])
+    denied = set(denied_replacements or [])
+    # Tolerance for matching timestamps (±2 hours handles recorder aggregation)
+    match_tolerance = 7200
+
+    results: list[dict[str, float]] = []
+    # Max time window for multi-step replacements (device calibrating to 100%)
+    max_ramp_seconds = 6 * 3600  # 6 hours
+    # Minimum jump to be considered suspicious (user can always dismiss)
+    min_jump = 30
+    # Minimum final level to be suspicious
+    min_end_level = 70
+
+    def _is_excluded(ts: float) -> bool:
+        """Check if timestamp is already known or denied."""
+        if any(abs(ts - k) < match_tolerance for k in known):
+            return True
+        return any(abs(ts - d) < match_tolerance for d in denied)
+
+    # Track which readings are already part of a detected replacement
+    # to avoid double-counting
+    used: set[int] = set()
+
+    for i in range(1, len(readings)):
+        if i in used:
+            continue
+
+        prev = readings[i - 1]
+        curr = readings[i]
+        jump = curr["v"] - prev["v"]
+
+        # Single-reading jump check
+        if jump >= min_jump and curr["v"] >= min_end_level:
+            if not _is_excluded(curr["t"]):
+                results.append({
+                    "timestamp": curr["t"],
+                    "old_level": prev["v"],
+                    "new_level": curr["v"],
+                })
+                used.add(i)
+            continue
+
+        # Multi-step ramp check: look ahead up to 3 readings within the
+        # time window for a cumulative rise that looks like a replacement
+        # (e.g., 54→70→100 over 2 hours = device calibrating after swap)
+        if curr["v"] > prev["v"]:
+            for j in range(i + 1, min(i + 4, len(readings))):
+                end = readings[j]
+                if end["t"] - prev["t"] > max_ramp_seconds:
+                    break
+                total_jump = end["v"] - prev["v"]
+                if total_jump >= min_jump and end["v"] >= min_end_level:
+                    if not _is_excluded(end["t"]):
+                        results.append({
+                            "timestamp": end["t"],
+                            "old_level": prev["v"],
+                            "new_level": end["v"],
+                        })
+                        # Mark intermediate readings as used
+                        for k in range(i, j + 1):
+                            used.add(k)
+                    break
+
+    return results
+
+
 def _detect_rechargeable(
     readings: list[dict[str, float]],
     battery_type: str | None,

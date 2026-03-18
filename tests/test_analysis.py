@@ -7,6 +7,7 @@ from custom_components.juice_patrol.engine.analysis import (
     DischargeAnomaly,
     Stability,
     analyze_battery,
+    detect_replacement_jumps,
 )
 
 
@@ -252,3 +253,110 @@ class TestReplacementDetection:
             low_threshold=20.0,
         )
         assert result.replacement_detected is False
+
+
+class TestDetectReplacementJumps:
+    """Test historical replacement jump detection."""
+
+    def test_single_replacement(self):
+        """Detect a clear replacement jump in history."""
+        now = time.time()
+        readings = [
+            {"t": now - 86400 * 10, "v": 100},
+            {"t": now - 86400 * 8, "v": 80},
+            {"t": now - 86400 * 6, "v": 50},
+            {"t": now - 86400 * 4, "v": 20},
+            {"t": now - 86400 * 3, "v": 100},  # Replacement
+            {"t": now - 86400 * 2, "v": 95},
+            {"t": now, "v": 90},
+        ]
+        result = detect_replacement_jumps(readings, low_threshold=20.0)
+        assert len(result) == 1
+        assert result[0]["old_level"] == 20
+        assert result[0]["new_level"] == 100
+
+    def test_multiple_replacements(self):
+        """Detect multiple replacements in longer history."""
+        now = time.time()
+        readings = [
+            {"t": now - 86400 * 20, "v": 100},
+            {"t": now - 86400 * 15, "v": 30},
+            {"t": now - 86400 * 14, "v": 100},  # First replacement
+            {"t": now - 86400 * 10, "v": 35},
+            {"t": now - 86400 * 9, "v": 100},   # Second replacement
+            {"t": now, "v": 90},
+        ]
+        result = detect_replacement_jumps(readings, low_threshold=20.0)
+        assert len(result) == 2
+
+    def test_excludes_known_replacements(self):
+        """Already-confirmed replacements are excluded."""
+        now = time.time()
+        jump_ts = now - 86400 * 3
+        readings = [
+            {"t": now - 86400 * 4, "v": 20},
+            {"t": jump_ts, "v": 100},
+            {"t": now, "v": 90},
+        ]
+        result = detect_replacement_jumps(
+            readings, low_threshold=20.0,
+            known_replacements=[jump_ts],
+        )
+        assert len(result) == 0
+
+    def test_excludes_denied_replacements(self):
+        """User-denied replacements are excluded."""
+        now = time.time()
+        jump_ts = now - 86400 * 3
+        readings = [
+            {"t": now - 86400 * 4, "v": 20},
+            {"t": jump_ts, "v": 100},
+            {"t": now, "v": 90},
+        ]
+        result = detect_replacement_jumps(
+            readings, low_threshold=20.0,
+            denied_replacements=[jump_ts],
+        )
+        assert len(result) == 0
+
+    def test_moderate_to_high_is_suspicious(self):
+        """Jump from moderate level to high is suspicious on non-rechargeable."""
+        now = time.time()
+        readings = [
+            {"t": now - 86400, "v": 60},
+            {"t": now, "v": 100},
+        ]
+        result = detect_replacement_jumps(readings, low_threshold=20.0)
+        assert len(result) == 1  # 60→100 (+40) is suspicious
+
+    def test_no_jump_when_small(self):
+        """Small upward movement is not a replacement."""
+        now = time.time()
+        readings = [
+            {"t": now - 86400, "v": 50},
+            {"t": now, "v": 65},
+        ]
+        result = detect_replacement_jumps(readings, low_threshold=20.0)
+        assert len(result) == 0
+
+    def test_multi_step_ramp(self):
+        """Detect replacement that calibrates over multiple readings (e.g., 54→70→100)."""
+        now = time.time()
+        readings = [
+            {"t": now - 86400 * 5, "v": 100},
+            {"t": now - 86400 * 3, "v": 54},
+            {"t": now - 86400 * 3 + 3600, "v": 70},   # +16, intermediate
+            {"t": now - 86400 * 3 + 7200, "v": 100},   # +46 cumulative
+            {"t": now, "v": 95},
+        ]
+        result = detect_replacement_jumps(readings, low_threshold=20.0)
+        assert len(result) == 1
+        assert result[0]["old_level"] == 54
+        assert result[0]["new_level"] == 100
+
+    def test_empty_readings(self):
+        """Empty or single reading returns nothing."""
+        assert detect_replacement_jumps([], low_threshold=20.0) == []
+        assert detect_replacement_jumps(
+            [{"t": time.time(), "v": 50}], low_threshold=20.0
+        ) == []

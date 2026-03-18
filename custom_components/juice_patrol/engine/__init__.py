@@ -8,6 +8,7 @@ from .analysis import (
     DischargeAnomaly,
     Stability,
     analyze_battery,
+    detect_replacement_jumps,
 )
 from .predictions import (
     ChargePredictionResult,
@@ -33,6 +34,7 @@ __all__ = [
     "Stability",
     "analyze_battery",
     "compute_reliability",
+    "detect_replacement_jumps",
     "detect_step_size",
     "extract_charging_segment",
     "extract_discharge_sessions",

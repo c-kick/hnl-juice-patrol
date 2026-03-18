@@ -195,7 +195,7 @@ class TestAsyncMarkReplaced:
 
     @pytest.mark.asyncio
     async def test_mark_replaced_success(self, make_coordinator):
-        """Successful mark_replaced: store returns True, refresh called."""
+        """Successful mark_replaced: store returns True, refresh scheduled."""
         coord = make_coordinator()
         coord.store.mark_replaced.return_value = True
         coord.async_request_refresh = AsyncMock()
@@ -203,7 +203,8 @@ class TestAsyncMarkReplaced:
         result = await coord.async_mark_replaced("sensor.battery_1")
         assert result is True
         coord.store.mark_replaced.assert_called_once_with("sensor.battery_1")
-        coord.async_request_refresh.assert_awaited_once()
+        # Refresh is fire-and-forget via async_create_task
+        coord.hass.async_create_task.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_mark_replaced_not_in_store(self, make_coordinator):
