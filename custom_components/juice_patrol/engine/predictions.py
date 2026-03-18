@@ -856,6 +856,48 @@ def compute_reliability(
     )))
 
 
+def _prediction_stability_score(
+    history: list[dict[str, float]],
+) -> float:
+    """Compute prediction stability from historical empty estimates.
+
+    Measures how much the predicted EMPTY BY timestamp has been shifting
+    between successive prediction runs. Stable predictions that converge
+    on the same date are far more trustworthy than ones that swing wildly.
+
+    This function scores only — it will be wired into compute_reliability()
+    when the coordinator persistence layer stores prediction_history.
+
+    Args:
+        history: List of {"computed_at": timestamp, "empty_ts": timestamp|None}
+                 dicts, ordered chronologically (oldest first).
+
+    Returns:
+        A score from 0.0 (wildly unstable) to 10.0 (rock solid).
+    """
+    timestamps = [
+        h["empty_ts"] for h in history
+        if h.get("empty_ts") is not None
+    ]
+    if len(timestamps) < 3:
+        return 0.0  # Not enough history to assess stability
+
+    # Convert to days for interpretable scale
+    days = [ts / 86400 for ts in timestamps]
+    diffs = [abs(days[i] - days[i - 1]) for i in range(1, len(days))]
+    avg_shift = sum(diffs) / len(diffs)
+
+    if avg_shift < 1:
+        return 10.0  # Predictions barely move — very stable
+    if avg_shift < 3:
+        return 7.0
+    if avg_shift < 7:
+        return 4.0
+    if avg_shift < 14:
+        return 2.0
+    return 0.0  # Predictions are all over the place
+
+
 # ---------------------------------------------------------------------------
 # Charge prediction (rechargeable batteries)
 # ---------------------------------------------------------------------------

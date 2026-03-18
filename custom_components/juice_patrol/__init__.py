@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import re
-import time
 
 import voluptuous as vol
 
@@ -434,11 +433,6 @@ async def ws_detect_battery_type(hass, connection, msg):
     })
 
 
-# Minimum interval between WS-triggered refreshes (seconds)
-_WS_REFRESH_MIN_INTERVAL = 5.0
-_last_ws_refresh: float = 0.0
-
-
 @websocket_api.require_admin
 @websocket_api.websocket_command(
     {vol.Required("type"): "juice_patrol/refresh"}
@@ -446,15 +440,11 @@ _last_ws_refresh: float = 0.0
 @websocket_api.async_response
 async def ws_refresh(hass, connection, msg):
     """Force refresh with cache invalidation (throttled to prevent abuse)."""
-    global _last_ws_refresh
-    now = time.monotonic()
-    if now - _last_ws_refresh < _WS_REFRESH_MIN_INTERVAL:
-        connection.send_result(msg["id"], {"ok": True, "throttled": True})
-        return
-    _last_ws_refresh = now
-
     coordinator = _ws_get_coordinator(hass, connection, msg["id"])
     if not coordinator:
+        return
+    if not coordinator.try_claim_refresh():
+        connection.send_result(msg["id"], {"ok": True, "throttled": True})
         return
     await coordinator.async_manual_refresh()
     connection.send_result(msg["id"], {"ok": True})

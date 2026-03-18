@@ -9,6 +9,7 @@ from custom_components.juice_patrol.engine.predictions import (
     PredictionStatus,
     _adaptive_half_life,
     _median,
+    _prediction_stability_score,
     _reject_by_residual,
     _subsample_readings,
     _theil_sen,
@@ -652,6 +653,71 @@ class TestSubsampleReadings:
         assert abs(sub_result.slope_per_day - full_result.slope_per_day) / abs(
             full_result.slope_per_day
         ) < 0.05
+
+
+class TestPredictionStabilityScore:
+    """Test _prediction_stability_score function."""
+
+    def test_very_stable(self):
+        """Predictions converging within 1 day -> score 10.0."""
+        base_ts = 1720000000.0
+        history = [
+            {"computed_at": 1710000000 + i * 86400, "empty_ts": base_ts + i * 3600}
+            for i in range(5)
+        ]
+        # avg_shift in days: ~0.04 (3600s / 86400s) -> < 1 -> 10.0
+        assert _prediction_stability_score(history) == 10.0
+
+    def test_moderately_stable(self):
+        """Predictions shifting by 1-3 days on average -> score 7.0."""
+        history = [
+            {"computed_at": 1710000000 + i * 86400,
+             "empty_ts": 1720000000 + i * 86400 * 2}  # ~2 day shifts
+            for i in range(5)
+        ]
+        assert _prediction_stability_score(history) == 7.0
+
+    def test_somewhat_unstable(self):
+        """Predictions shifting by 3-7 days on average -> score 4.0."""
+        history = [
+            {"computed_at": 1710000000 + i * 86400,
+             "empty_ts": 1720000000 + i * 86400 * 5}  # ~5 day shifts
+            for i in range(5)
+        ]
+        assert _prediction_stability_score(history) == 4.0
+
+    def test_very_unstable(self):
+        """Predictions shifting by > 14 days -> score 0.0."""
+        history = [
+            {"computed_at": 1710000000 + i * 86400,
+             "empty_ts": 1720000000 + i * 86400 * 20}  # ~20 day shifts
+            for i in range(5)
+        ]
+        assert _prediction_stability_score(history) == 0.0
+
+    def test_insufficient_history(self):
+        """Less than 3 entries -> 0.0."""
+        history = [
+            {"computed_at": 1710000000, "empty_ts": 1720000000},
+            {"computed_at": 1710086400, "empty_ts": 1720100000},
+        ]
+        assert _prediction_stability_score(history) == 0.0
+
+    def test_empty_history(self):
+        """Empty history -> 0.0."""
+        assert _prediction_stability_score([]) == 0.0
+
+    def test_none_empty_ts_skipped(self):
+        """Entries with None empty_ts are skipped."""
+        history = [
+            {"computed_at": 1710000000, "empty_ts": 1720000000},
+            {"computed_at": 1710086400, "empty_ts": None},
+            {"computed_at": 1710172800, "empty_ts": 1720003600},
+            {"computed_at": 1710259200, "empty_ts": None},
+            {"computed_at": 1710345600, "empty_ts": 1720007200},
+        ]
+        # Only 3 valid entries, small shifts -> stable
+        assert _prediction_stability_score(history) == 10.0
 
 
 # ── Charge prediction tests ──

@@ -58,6 +58,9 @@ from .store import JuicePatrolStore
 
 _LOGGER = logging.getLogger(__name__)
 
+# Minimum interval between WS-triggered refreshes (seconds)
+_WS_REFRESH_MIN_INTERVAL = 5.0
+
 
 def _extract_current_segment(
     readings: list[dict[str, float]],
@@ -128,8 +131,9 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._rebuild_lock = asyncio.Lock()
         # Chart data cache: {entity_id: (expire_ts, chart_data)}
         self._chart_cache: dict[str, tuple[float, dict[str, Any]]] = {}
-        _CHART_CACHE_TTL = 30  # seconds
-        self._chart_cache_ttl = _CHART_CACHE_TTL
+        self._chart_cache_ttl = 30  # seconds
+        # WS refresh throttle (per-coordinator, not module-level)
+        self._last_ws_refresh: float = 0.0
         # Callback for dynamic entity creation
         self._new_device_callbacks: list[
             Callable[[list[str]], None]
@@ -681,6 +685,17 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             else:
                 self._fire_events(data)
             return data
+
+    def try_claim_refresh(self) -> bool:
+        """Atomically check throttle and claim a refresh slot.
+
+        Returns True if the refresh should proceed, False if throttled.
+        """
+        now = time.monotonic()
+        if (now - self._last_ws_refresh) < _WS_REFRESH_MIN_INTERVAL:
+            return False
+        self._last_ws_refresh = now
+        return True
 
     async def async_manual_refresh(self) -> None:
         """Force refresh with cache invalidation."""
