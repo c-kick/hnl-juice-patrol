@@ -43,6 +43,7 @@ from ..discovery import (
 from ..engine import (
     AnalysisResult,
     PredictionResult,
+    PredictionStatus,
     analyze_battery,
     extract_charging_segment,
     predict_charge,
@@ -421,6 +422,20 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Run behavior analysis on the current segment (not full cyclic history)
         battery_state = self._get_battery_state(entity_id, battery.device_id)
+
+        # If the device reports it's actively charging, override prediction status.
+        # The mathematical slope may still be negative (e.g. recent charge didn't
+        # exceed the 20% segment-split threshold), but the device knows best.
+        if (
+            battery_state
+            and battery_state.lower() in ("charging",)
+            and prediction.status == PredictionStatus.NORMAL
+        ):
+            prediction.status = PredictionStatus.CHARGING
+            prediction.estimated_empty_timestamp = None
+            prediction.estimated_days_remaining = None
+            prediction.estimated_hours_remaining = None
+
         analysis = analyze_battery(
             readings,
             battery_type=battery_type,
@@ -725,10 +740,35 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Charge prediction (rechargeable batteries only)
         charge_pred_dict: dict[str, Any] | None = None
         is_rechargeable = entity_data.get("is_rechargeable", False)
+        _LOGGER.debug(
+            "Chart charge prediction for %s: is_rechargeable=%s, "
+            "all_readings=%d, charging_state=%s",
+            entity_id, is_rechargeable, len(all_readings),
+            entity_data.get("charging_state"),
+        )
         if is_rechargeable and all_readings:
             charging_segment = extract_charging_segment(all_readings)
+            _LOGGER.debug(
+                "Chart charge segment for %s: %s readings, "
+                "rise=%.1f%% (%s→%s)",
+                entity_id,
+                len(charging_segment) if charging_segment else 0,
+                (charging_segment[-1]["v"] - charging_segment[0]["v"])
+                if charging_segment else 0,
+                f'{charging_segment[0]["v"]:.0f}' if charging_segment else "-",
+                f'{charging_segment[-1]["v"]:.0f}' if charging_segment else "-",
+            )
             if charging_segment:
                 charge_result = predict_charge(charging_segment)
+                _LOGGER.debug(
+                    "Chart predict_charge for %s: slope=%.4f%%/h, "
+                    "status=%s, full_ts=%s, r2=%.3f",
+                    entity_id,
+                    charge_result.slope_per_hour or 0,
+                    charge_result.status,
+                    charge_result.estimated_full_timestamp,
+                    charge_result.r_squared or 0,
+                )
                 if (
                     charge_result.slope_per_hour is not None
                     and charge_result.estimated_full_timestamp is not None

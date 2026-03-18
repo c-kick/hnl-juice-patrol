@@ -1512,22 +1512,35 @@ class JuicePatrolPanel extends LitElement {
   }
 
   _renderToolbar() {
+    const inDetail = this._activeView === "detail";
     return html`
       <div class="toolbar">
-        <ha-menu-button .hass=${this._hass} .narrow=${this.narrow}></ha-menu-button>
-        <div class="main-title">Juice Patrol</div>
-        <ha-icon-button
-          id="refreshBtn"
-          class=${this._refreshing ? "spinning" : ""}
-          title="Re-fetch all battery data and recalculate predictions"
-          .disabled=${this._refreshing}
-          @click=${this._refresh}
-        >
-          <ha-icon icon="mdi:refresh"></ha-icon>
-        </ha-icon-button>
-        <ha-icon-button title="Settings" @click=${this._toggleSettings}>
-          <ha-icon icon="mdi:cog"></ha-icon>
-        </ha-icon-button>
+        ${inDetail
+          ? html`<ha-icon-button
+              @click=${this._closeDetail}
+              title="Back"
+            >
+              <ha-icon icon="mdi:arrow-left"></ha-icon>
+            </ha-icon-button>`
+          : html`<ha-menu-button .hass=${this._hass} .narrow=${this.narrow}></ha-menu-button>`}
+        <div class="main-title">${inDetail
+          ? (this._getDevice(this._detailEntity)?.name || this._detailEntity)
+          : "Juice Patrol"}</div>
+        ${inDetail
+          ? nothing
+          : html`
+            <ha-icon-button
+              id="refreshBtn"
+              class=${this._refreshing ? "spinning" : ""}
+              title="Re-fetch all battery data and recalculate predictions"
+              .disabled=${this._refreshing}
+              @click=${this._refresh}
+            >
+              <ha-icon icon="mdi:refresh"></ha-icon>
+            </ha-icon-button>
+            <ha-icon-button title="Settings" @click=${this._toggleSettings}>
+              <ha-icon icon="mdi:cog"></ha-icon>
+            </ha-icon-button>`}
       </div>
     `;
   }
@@ -2232,16 +2245,7 @@ class JuicePatrolPanel extends LitElement {
       return html`<div class="empty-state">Device not found</div>`;
     }
 
-    const deviceName = dev.name || entityId;
-
     return html`
-      <div class="detail-toolbar">
-        <ha-button variant="neutral" @click=${this._closeDetail}>
-          <ha-icon slot="start" icon="mdi:arrow-left"></ha-icon>
-          Back
-        </ha-button>
-        <div class="detail-device-name">${deviceName}</div>
-      </div>
       ${this._renderDetailMeta(dev)} ${this._renderDetailChart()}
       ${this._renderDetailActions()}
     `;
@@ -3204,20 +3208,6 @@ class JuicePatrolPanel extends LitElement {
         border-radius: 8px;
         font-size: 13px;
         color: var(--secondary-text-color);
-      }
-      .detail-toolbar {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        margin-bottom: 16px;
-      }
-      .detail-device-name {
-        font-size: 18px;
-        font-weight: 500;
-        flex: 1;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
       }
       .detail-meta {
         background: var(--card-bg);
