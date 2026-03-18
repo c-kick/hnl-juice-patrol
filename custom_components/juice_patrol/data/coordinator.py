@@ -960,6 +960,16 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "segment_start_timestamp": charging_segment[0]["t"],
                         "segment_start_level": charging_segment[0]["v"],
                     }
+                else:
+                    # No full prediction yet (too few readings or too short
+                    # timespan), but pass the segment start so the chart can
+                    # draw a visual charge line from observed data.
+                    charge_pred_dict = {
+                        "slope_per_hour": None,
+                        "estimated_full_timestamp": None,
+                        "segment_start_timestamp": charging_segment[0]["t"],
+                        "segment_start_level": charging_segment[0]["v"],
+                    }
 
         # Detect suspected historical replacements (non-rechargeable only)
         suspected_replacements: list[dict[str, float]] = []
