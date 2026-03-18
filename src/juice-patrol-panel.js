@@ -1,6 +1,10 @@
 import { LitElement, html, css, nothing } from "lit";
-import { classMap } from "lit/directives/class-map.js";
-import { repeat } from "lit/directives/repeat.js";
+
+// Inline style constants for column templates that render inside ha-data-table's
+// shadow DOM (where LitElement static styles cannot reach).
+const STYLE_SECONDARY = "font-size:13px;color:var(--secondary-text-color)";
+const STYLE_SUB_TEXT = "font-size:11px;color:var(--secondary-text-color);opacity:0.7;margin-top:1px";
+const STYLE_BADGE_ROW = "display:flex;flex-wrap:wrap;gap:4px;margin-top:4px";
 
 // Tabs are defined dynamically in the getter below (need basePath)
 
@@ -10,14 +14,10 @@ class JuicePatrolPanel extends LitElement {
       narrow: { type: Boolean },
       _entities: { state: true },
       _activeView: { state: true },
-      _filterText: { state: true },
-      _filterCategory: { state: true },
       _settingsOpen: { state: true },
       _settingsDirty: { state: true },
       _settingsValues: { state: true },
       _configEntry: { state: true },
-      _sortCol: { state: true },
-      _sortAsc: { state: true },
       _detailEntity: { state: true },
       _chartData: { state: true },
       _chartLoading: { state: true },
@@ -28,6 +28,7 @@ class JuicePatrolPanel extends LitElement {
       _expandedGroups: { state: true },
       _ignoredEntities: { state: true },
       _chartRange: { state: true },
+      _filters: { state: true },
     };
   }
 
@@ -41,9 +42,6 @@ class JuicePatrolPanel extends LitElement {
     this._settingsOpen = false;
     this._settingsDirty = false;
     this._settingsValues = {};
-    this._sortCol = "level";
-    this._sortAsc = true;
-    this._userSorted = false;
     this._prevLevels = new Map();
     this._recentlyChanged = new Map();
     this._activeView = "devices";
@@ -51,8 +49,6 @@ class JuicePatrolPanel extends LitElement {
     this._shoppingLoading = false;
     this._refreshing = false;
     this._expandedGroups = {};
-    this._filterText = "";
-    this._filterCategory = null;
     this._highlightEntity = null;
     this._highlightApplied = false;
     this._highlightAttempts = 0;
@@ -63,6 +59,7 @@ class JuicePatrolPanel extends LitElement {
     this._flashGeneration = 0;
     this._ignoredEntities = null;
     this._chartRange = "auto";
+    this._filters = { status: { value: ["active", "low"] } };
     this._flashCleanupTimer = null;
     this._refreshTimer = null;
     this._chartDebounce = null;
@@ -198,7 +195,7 @@ class JuicePatrolPanel extends LitElement {
         this._activeView = "shopping";
         this._loadShoppingList();
       }
-      this._entities = this._sortEntities(this._entityList);
+      this._entities = this._entityList;
       return;
     }
     // Any other path → devices view
@@ -208,7 +205,7 @@ class JuicePatrolPanel extends LitElement {
       this._chartEl = null;
     }
     this._activeView = "devices";
-    this._entities = this._sortEntities(this._entityList);
+    this._entities = this._entityList;
   }
 
   updated(changed) {
@@ -236,16 +233,15 @@ class JuicePatrolPanel extends LitElement {
     this._updateEntities();
     const newHash = this._entityHash;
 
-    // Only sort + assign _entities (trigger re-render) when data actually changed
+    // Only assign _entities (trigger re-render) when data actually changed
     if (newHash !== prevHash) {
-      const sorted = this._sortEntities(this._entityList);
-      this._entityMap = new Map(sorted.map((d) => [d.sourceEntity, d]));
+      this._entityMap = new Map(this._entityList.map((d) => [d.sourceEntity, d]));
       // In detail view, update the map silently (for _getDevice()) but don't
       // assign _entities — it's a reactive property that triggers a full Lit
       // re-render, which causes visible flashing of the detail/chart view.
       // The stale _entities list will be refreshed when returning to devices view.
       if (this._activeView !== "detail") {
-        this._entities = sorted;
+        this._entities = this._entityList;
       }
     }
 
@@ -408,7 +404,20 @@ class JuicePatrolPanel extends LitElement {
       }, 3000);
     }
 
-    // Store unsorted list — sort happens in _processHassUpdate only when hash changes
+    // Build computed fields for ha-data-table
+    for (const dev of devices.values()) {
+      dev._searchText = [
+        dev.name, dev.sourceEntity, dev.batteryType,
+        dev.manufacturer, dev.model, dev.platform,
+      ].filter(Boolean).join(" ").toLowerCase();
+      // Status for filtering
+      dev._status = dev.level === null ? "unavailable"
+        : dev.isStale ? "stale"
+        : dev.isLow ? "low"
+        : "active";
+    }
+
+    // Store unsorted list
     this._entityList = [...devices.values()];
 
     // Build hash for change detection
@@ -426,86 +435,11 @@ class JuicePatrolPanel extends LitElement {
       changed;
   }
 
-  _sortEntities(list) {
-    const col = this._sortCol;
-    const asc = this._sortAsc;
-    const dir = asc ? 1 : -1;
-
-    return list.sort((a, b) => {
-      const av = this._getSortValue(a, col);
-      const bv = this._getSortValue(b, col);
-
-      if (av === null && bv !== null) return 1;
-      if (av !== null && bv === null) return -1;
-
-      if (!this._userSorted) {
-        const aAtt =
-          a.replacementPending ||
-          a.isLow ||
-          a.isStale ||
-          (a.anomaly && a.anomaly !== "normal");
-        const bAtt =
-          b.replacementPending ||
-          b.isLow ||
-          b.isStale ||
-          (b.anomaly && b.anomaly !== "normal");
-        if (aAtt !== bAtt) return aAtt ? -1 : 1;
-      }
-
-      if (av === bv) return 0;
-      return (av < bv ? -1 : 1) * dir;
-    });
-  }
-
-  _getSortValue(dev, col) {
-    switch (col) {
-      case "name":
-        return (dev.name || dev.sourceEntity).toLowerCase();
-      case "level":
-        return dev.level;
-      case "type":
-        return (dev.batteryType || "").toLowerCase() || null;
-      case "rate":
-        return dev.dischargeRate;
-      case "days":
-        return dev.daysRemaining;
-      case "reliability":
-        return dev.reliability;
-      case "empty":
-        return dev.predictedEmpty;
-      default:
-        return dev.level;
-    }
-  }
-
   _getFilteredEntities() {
     let list = this._entities;
-    const cat = this._filterCategory;
-    if (cat === "low") list = list.filter((d) => d.isLow);
-    else if (cat === "stale") list = list.filter((d) => d.isStale);
-    else if (cat === "unavailable") list = list.filter((d) => d.level === null);
-    else if (cat === "pending") list = list.filter((d) => d.replacementPending);
-    else if (cat === "anomaly")
-      list = list.filter((d) => d.anomaly && d.anomaly !== "normal");
-
-    const q = this._filterText.toLowerCase().trim();
-    if (q) {
-      list = list.filter((d) => {
-        const name = (d.name || d.sourceEntity).toLowerCase();
-        const type = (d.batteryType || "").toLowerCase();
-        const plat = (d.platform || "").toLowerCase();
-        const entity = d.sourceEntity.toLowerCase();
-        const mfr = (d.manufacturer || "").toLowerCase();
-        const mdl = (d.model || "").toLowerCase();
-        return (
-          name.includes(q) ||
-          type.includes(q) ||
-          plat.includes(q) ||
-          entity.includes(q) ||
-          mfr.includes(q) ||
-          mdl.includes(q)
-        );
-      });
+    const statusFilter = this._filters.status?.value;
+    if (statusFilter?.length) {
+      list = list.filter((d) => statusFilter.includes(d._status));
     }
     return list;
   }
@@ -688,22 +622,10 @@ class JuicePatrolPanel extends LitElement {
   }
 
   _applyDeepLinkHighlight() {
+    // Deep-link highlight: open the device detail directly
     if (!this._highlightEntity || this._highlightApplied) return;
-    this._highlightAttempts = (this._highlightAttempts || 0) + 1;
-    if (this._highlightAttempts > 10) {
-      this._highlightApplied = true;
-      return;
-    }
-    const row = this.shadowRoot.querySelector(
-      `.device-row[data-entity="${CSS.escape(this._highlightEntity)}"]`
-    );
-    if (!row) return;
     this._highlightApplied = true;
-    requestAnimationFrame(() => {
-      row.scrollIntoView({ behavior: "smooth", block: "center" });
-      row.classList.add("highlighted");
-      setTimeout(() => row.classList.remove("highlighted"), 3000);
-    });
+    this._openDetail(this._highlightEntity);
   }
 
   // ── WS calls ──
@@ -718,6 +640,7 @@ class JuicePatrolPanel extends LitElement {
         stale_timeout: settings.stale_timeout,
         prediction_horizon: settings.prediction_horizon,
       };
+      this._invalidateColumns();
     } catch (e) {
       console.error("Juice Patrol: failed to load config", e);
     }
@@ -1074,48 +997,6 @@ class JuicePatrolPanel extends LitElement {
     }
   }
 
-  _toggleSort(col) {
-    if (this._sortCol === col) {
-      this._sortAsc = !this._sortAsc;
-    } else {
-      this._sortCol = col;
-      this._sortAsc = true;
-    }
-    this._userSorted = true;
-    this._entities = this._sortEntities([...this._entities]);
-  }
-
-  _setFilter(cat) {
-    this._closeOverlays();
-    this._filterCategory = this._filterCategory === cat ? null : cat;
-    if (this._activeView !== "devices") {
-      this._activeView = "devices";
-      this._entities = this._sortEntities(this._entityList);
-    }
-    if (this._filterCategory === "ignored") this._loadIgnored();
-  }
-
-  _switchTab(view) {
-    if (view === this._activeView) return;
-    this._closeOverlays();
-    this._activeView = view;
-    if (view === "shopping") this._loadShoppingList();
-  }
-
-  _handleSearchInput(e) {
-    const val = e.target.value;
-    this._filterText = val;
-    // Debounce not needed — Lit batches updates. The input retains focus naturally.
-  }
-
-  _clearSearch() {
-    this._filterText = "";
-  }
-
-  _clearFilter() {
-    this._filterCategory = null;
-  }
-
   _toggleSettings() {
     this._settingsOpen = !this._settingsOpen;
     if (this._settingsOpen) {
@@ -1163,15 +1044,9 @@ class JuicePatrolPanel extends LitElement {
       .forEach((el) => { el.open = false; el.remove(); });
   }
 
-  _handleRowClick(entityId) {
-    this._openDetail(entityId);
-  }
-
-  _handleActionClick(e, action, entityId) {
-    e.stopPropagation();
-    if (action === "confirm") {
-      this._confirmReplacement(entityId);
-    }
+  _handleRowClick(e) {
+    const entityId = e.detail?.id;
+    if (entityId) this._openDetail(entityId);
   }
 
   // ── Battery type dialog (stays imperative) ──
@@ -1852,8 +1727,45 @@ class JuicePatrolPanel extends LitElement {
     return { path: `/${view}`, prefix: this._basePath };
   }
 
+  /** Toolbar icons shared between both layout variants. */
+  _renderToolbarIcons() {
+    return html`
+      <div slot="toolbar-icon" style="display:flex">
+        <ha-icon-button
+          id="refreshBtn"
+          class=${this._refreshing ? "spinning" : ""}
+          title="Re-fetch all battery data and recalculate predictions"
+          .disabled=${this._refreshing}
+          @click=${this._refresh}
+        >
+          <ha-icon icon="mdi:refresh"></ha-icon>
+        </ha-icon-button>
+        <ha-icon-button
+          title="Settings"
+          @click=${this._toggleSettings}
+        >
+          <ha-icon icon="mdi:cog"></ha-icon>
+        </ha-icon-button>
+      </div>
+    `;
+  }
+
+  /** Count of active filters for badge display. */
+  get _activeFilterCount() {
+    return Object.values(this._filters).filter((f) =>
+      Array.isArray(f.value) ? f.value.length : f.value
+    ).length;
+  }
+
   render() {
     if (!this._hass) return html`<div class="loading">Loading...</div>`;
+
+    // Devices view uses hass-tabs-subpage-data-table for native filter pane
+    if (this._activeView === "devices") {
+      return this._renderDevicesView();
+    }
+
+    // Detail + Shopping views use hass-tabs-subpage
     const inDetail = this._activeView === "detail";
     return html`
       <hass-tabs-subpage
@@ -1864,105 +1776,79 @@ class JuicePatrolPanel extends LitElement {
         ?main-page=${!inDetail}
         .backCallback=${inDetail ? () => this._closeDetail() : undefined}
       >
+        ${this._renderToolbarIcons()}
         ${inDetail
-          ? html`<span slot="header">${this._getDevice(this._detailEntity)?.name || this._detailEntity}</span>`
-          : nothing}
-        <div slot="toolbar-icon" style="display:flex">
-          <ha-icon-button
-            id="refreshBtn"
-            class=${this._refreshing ? "spinning" : ""}
-            title="Re-fetch all battery data and recalculate predictions"
-            .disabled=${this._refreshing}
-            @click=${this._refresh}
-          >
-            <ha-icon icon="mdi:refresh"></ha-icon>
-          </ha-icon-button>
-          <ha-icon-button
-            title="Settings"
-            @click=${this._toggleSettings}
-          >
-            <ha-icon icon="mdi:cog"></ha-icon>
-          </ha-icon-button>
-        </div>
-        <div id="jp-content">
-          ${inDetail
-            ? this._renderDetailView()
-            : this._renderMainView()}
-        </div>
+          ? html`<div id="jp-content">${this._renderDetailView()}</div>`
+          : html`<div class="jp-padded">${this._renderShoppingList()}</div>`}
       </hass-tabs-subpage>
     `;
   }
 
-  _renderMainView() {
-    const totalDevices = this._entities.length;
-    let lowCount = 0, staleCount = 0, unavailableCount = 0, pendingCount = 0, anomalyCount = 0;
-    for (const d of this._entities) {
-      if (d.isLow) lowCount++;
-      if (d.isStale) staleCount++;
-      if (d.level === null) unavailableCount++;
-      if (d.replacementPending) pendingCount++;
-      if (d.anomaly && d.anomaly !== "normal") anomalyCount++;
-    }
+  _renderDevicesView() {
+    const filtered = this._getFilteredEntities();
 
     return html`
-      ${this._renderSummaryCards(
-        totalDevices,
-        lowCount,
-        staleCount,
-        unavailableCount,
-        pendingCount,
-        anomalyCount
-      )}
-      ${this._settingsOpen && this._configEntry ? this._renderSettings() : nothing}
-      ${this._renderFilterBar()}
-      ${this._activeView === "shopping"
-        ? this._renderShoppingList()
-        : this._renderDeviceTable()}
+      <hass-tabs-subpage-data-table
+        .hass=${this._hass}
+        .narrow=${this.narrow}
+        .tabs=${this._tabs}
+        .route=${this._route}
+        main-page
+        .columns=${this._columns}
+        .data=${filtered}
+        .id=${"sourceEntity"}
+        .searchLabel=${"Search " + filtered.length + " devices"}
+        .noDataText=${"No devices match the current filter."}
+        clickable
+        .initialSorting=${{ column: "level", direction: "asc" }}
+        has-filters
+        .filters=${this._activeFilterCount}
+        @row-click=${this._handleRowClick}
+        @clear-filter=${this._clearFilters}
+      >
+        ${this._renderToolbarIcons()}
+        ${this._renderFilterPane()}
+      </hass-tabs-subpage-data-table>
     `;
   }
 
-  _renderSummaryCards(total, low, stale, unavailable, pending, anomaly) {
-    const card = (filter, value, label, color = "inherit") => {
-      const classes = {
-        "summary-card": true,
-        clickable: true,
-        "active-filter": this._filterCategory === filter,
-      };
-      return html`
-        <div class=${classMap(classes)} @click=${() => this._setFilter(filter)}>
-          <div class="value" style="color:${value > 0 ? color : "inherit"}">${value}</div>
-          <div class="label">${label}</div>
-        </div>
-      `;
-    };
-
+  _renderFilterPane() {
+    const statusValues = this._filters.status?.value || [];
+    const statuses = [
+      { value: "active", label: "Active", icon: "mdi:check-circle" },
+      { value: "low", label: "Low battery", icon: "mdi:battery-alert" },
+      { value: "stale", label: "Stale", icon: "mdi:clock-alert-outline" },
+      { value: "unavailable", label: "Unavailable", icon: "mdi:help-circle-outline" },
+    ];
     return html`
-      <div class="summary">
-        <div
-          class="summary-card clickable ${this._filterCategory === null
-            ? "active-filter"
-            : ""}"
-          @click=${() => this._setFilter(null)}
-        >
-          <div class="value">${total}</div>
-          <div class="label">Monitored</div>
+      <ha-expansion-panel slot="filter-pane" outlined expanded header="Status">
+        <ha-icon slot="leading-icon" icon="mdi:list-status" style="--mdc-icon-size:20px"></ha-icon>
+        <div class="jp-filter-list">
+          ${statuses.map((s) => html`
+            <label class="jp-filter-item">
+              <ha-checkbox
+                .checked=${statusValues.includes(s.value)}
+                @change=${(e) => this._toggleStatusFilter(s.value, e.target.checked)}
+              ></ha-checkbox>
+              <ha-icon icon=${s.icon} style="--mdc-icon-size:18px"></ha-icon>
+              <span>${s.label}</span>
+            </label>
+          `)}
         </div>
-        ${card("low", low, "Low battery", "var(--error-color)")}
-        ${card("stale", stale, "Stale", "var(--warning-color)")}
-        ${unavailable > 0
-          ? card("unavailable", unavailable, "Unavailable", "var(--disabled-text-color)")
-          : nothing}
-        ${pending > 0
-          ? card("pending", pending, "Pending", "var(--primary-color)")
-          : nothing}
-        ${anomaly > 0
-          ? card("anomaly", anomaly, "Anomaly", "var(--error-color)")
-          : nothing}
-        ${this._ignoredEntities?.length > 0
-          ? card("ignored", this._ignoredEntities.length, "Ignored", "var(--secondary-text-color)")
-          : nothing}
-      </div>
+      </ha-expansion-panel>
     `;
+  }
+
+  _toggleStatusFilter(status, checked) {
+    const current = this._filters.status?.value || [];
+    const next = checked
+      ? [...current, status]
+      : current.filter((s) => s !== status);
+    this._filters = { ...this._filters, status: { value: next } };
+  }
+
+  _clearFilters() {
+    this._filters = {};
   }
 
   _renderSettings() {
@@ -2030,323 +1916,214 @@ class JuicePatrolPanel extends LitElement {
     `;
   }
 
-  _renderFilterBar() {
-    const FILTER_LABELS = { low: "Low battery", stale: "Stale", unavailable: "Unavailable", pending: "Pending", anomaly: "Anomaly", ignored: "Ignored" };
-    const filterLabel = FILTER_LABELS[this._filterCategory] || this._filterCategory;
-
-    return html`
-      <div class="filter-bar">
-        <div class="search-field">
-          <ha-icon
-            icon="mdi:magnify"
-            style="--mdc-icon-size:20px;color:var(--secondary-text-color)"
-          ></ha-icon>
-          <input
-            type="text"
-            placeholder="Filter devices..."
-            .value=${this._filterText}
-            @input=${this._handleSearchInput}
-          />
-          ${this._filterText
-            ? html`<button
-                class="search-clear"
-                title="Clear search"
-                @click=${this._clearSearch}
-              >
-                <ha-icon icon="mdi:close" style="--mdc-icon-size:16px"></ha-icon>
-              </button>`
-            : nothing}
-        </div>
-        ${this._filterCategory
-          ? html`<button class="filter-chip" @click=${this._clearFilter}>
-              <ha-icon
-                icon="mdi:filter-remove"
-                style="--mdc-icon-size:14px"
-              ></ha-icon>
-              ${filterLabel}
-              <ha-icon icon="mdi:close" style="--mdc-icon-size:14px"></ha-icon>
-            </button>`
-          : nothing}
-      </div>
-    `;
-  }
-
-  /* _renderTabBar removed — tabs are now in the toolbar */
-
-  _renderDeviceTable() {
-    if (this._filterCategory === "ignored") {
-      return this._renderIgnoredDevices();
-    }
-
-    const filtered = this._getFilteredEntities();
-
-    if (filtered.length === 0) {
-      if (this._entities.length === 0 && !this._configEntry) {
-        return html`<div class="devices">
-          <div class="loading-state">
-            <ha-spinner size="small"></ha-spinner>
-            <div>Discovering battery devices\u2026</div>
-          </div>
-        </div>`;
-      }
-      return html`<div class="devices">
-        <div class="empty-state">
-          ${this._entities.length === 0
-            ? "No battery devices discovered yet."
-            : "No devices match the current filter."}
-        </div>
-      </div>`;
-    }
-
-    return html`
-      <div class="devices">
-        ${this._renderDeviceHeader()}
-        ${repeat(
-          filtered,
-          (dev) => dev.sourceEntity,
-          (dev) => this._renderDeviceRow(dev)
-        )}
-      </div>
-    `;
-  }
-
-  _renderIgnoredDevices() {
-    const devices = this._ignoredEntities;
-    if (!devices) {
-      return html`<div class="devices">
-        <div class="empty-state">Loading ignored devices\u2026</div>
-      </div>`;
-    }
-    if (devices.length === 0) {
-      return html`<div class="devices">
-        <div class="empty-state">No ignored devices.</div>
-      </div>`;
-    }
-    return html`
-      <div class="devices">
-        ${repeat(
-          devices,
-          (d) => d.entity_id,
-          (d) => html`
-            <div class="ignored-row">
-              <ha-icon
-                icon="mdi:eye-off"
-                style="--mdc-icon-size:20px; color:var(--secondary-text-color)"
-              ></ha-icon>
-              <div class="ignored-info">
-                <div class="ignored-name">${d.name}</div>
-                <div class="ignored-entity">${d.entity_id}</div>
-              </div>
-              ${d.level !== null
-                ? html`<div class="ignored-level">${Math.round(d.level)}%</div>`
-                : nothing}
-              <ha-button
-                @click=${() => this._unignoreDevice(d.entity_id)}
-                title="Stop ignoring this device"
-              >
-                <ha-icon slot="start" icon="mdi:eye"></ha-icon>
-                Restore
-              </ha-button>
-            </div>
-          `
-        )}
-      </div>
-    `;
-  }
-
-  _renderSortHeader(col, label, opts = {}) {
-    const active = this._sortCol === col;
-    const arrow = active ? (this._sortAsc ? "\u25B2" : "\u25BC") : "";
-    return html`
-      <div
-        class="sort-header ${active ? "active" : ""}"
-        style=${opts.style || ""}
-        title=${opts.title || ""}
-        @click=${(e) => {
-          e.stopPropagation();
-          this._toggleSort(col);
-        }}
-      >
-        ${label}${arrow ? html`<span class="sort-arrow">${arrow}</span>` : nothing}
-      </div>
-    `;
-  }
-
-  _renderDeviceHeader() {
-    return html`
-      <div class="device-header">
-        <div></div>
-        ${this._renderSortHeader("name", "Device", {
-          style: "justify-content:flex-start",
-        })}
-        ${this._renderSortHeader("level", "Level", {
-          style: "justify-content:flex-start",
-        })}
-        ${this._renderSortHeader("type", "Type", {
-          style: "justify-content:flex-start",
-        })}
-        ${this._renderSortHeader("rate", "Rate")}
-        ${this._renderSortHeader("days", "Left")}
-        ${this._renderSortHeader("reliability", "Rel", {
-          title: "Prediction reliability score (0-100%)",
-        })}
-        ${this._renderSortHeader("empty", "Empty by")}
-        <div></div>
-      </div>
-    `;
-  }
-
-  _renderDeviceRow(dev) {
-    const changeEntry = this._recentlyChanged.get(dev.sourceEntity);
-    const classes = {
-      "device-row": true,
-      attention:
-        !dev.replacementPending &&
-        (dev.isLow || dev.isStale || (dev.anomaly && dev.anomaly !== "normal")),
-      pending: dev.replacementPending,
-      "just-updated-up": changeEntry?.dir === "up",
-      "just-updated-down": changeEntry?.dir === "down",
-    };
-
-    return html`
-      <div
-        class=${classMap(classes)}
-        data-entity=${dev.sourceEntity}
-        @click=${() => this._handleRowClick(dev.sourceEntity)}
-      >
-        <div class="icon-cell">
+  /** Column definitions for ha-data-table. */
+  get _columns() {
+    if (this._cachedColumns) return this._cachedColumns;
+    this._cachedColumns = {
+      icon: {
+        title: "",
+        type: "icon",
+        moveable: false,
+        showNarrow: true,
+        template: (dev) => html`
           <ha-icon
             icon=${this._getBatteryIcon(dev)}
             style="color:${this._getLevelColor(dev.level, dev.threshold)}"
           ></ha-icon>
-        </div>
-        <div class="name-cell">
-          <div>${dev.name || dev.sourceEntity}${this._renderBadges(dev)}</div>
-          ${this._renderDeviceSub(dev)}
-        </div>
-        ${this._renderLevelCell(dev)}
-        <div
-          class="type-cell"
+        `,
+      },
+      name: {
+        title: "Device",
+        main: true,
+        sortable: true,
+        filterable: true,
+        filterKey: "_searchText",
+        direction: "asc",
+        flex: 3,
+        showNarrow: true,
+        template: (dev) => {
+          const labels = this._getBadgeLabels(dev);
+          const subText = this._getDeviceSubText(dev);
+          return html`
+            <div style="overflow:hidden">
+              <span>${dev.name || dev.sourceEntity}</span>
+              ${subText
+                ? html`<div style=${STYLE_SUB_TEXT}>${subText}</div>`
+                : nothing}
+              ${labels.length
+                ? html`<div style=${STYLE_BADGE_ROW}>${labels.map(
+                    (l) => this._renderBadgeLabel(l)
+                  )}</div>`
+                : nothing}
+            </div>
+          `;
+        },
+      },
+      level: {
+        title: "Level",
+        sortable: true,
+        type: "numeric",
+        minWidth: "70px",
+        maxWidth: "90px",
+        showNarrow: true,
+        template: (dev) => {
+          const color = this._getLevelColor(dev.level, dev.threshold);
+          return html`<span style="color:${color};font-weight:500">${this._formatLevel(dev.level)}</span>`;
+        },
+      },
+      batteryType: {
+        title: "Type",
+        sortable: true,
+        minWidth: "60px",
+        maxWidth: "90px",
+        template: (dev) => html`<span
+          style="font-size:12px;color:var(--secondary-text-color)"
           title=${dev.batteryTypeSource ? `Source: ${dev.batteryTypeSource}` : ""}
-        >
-          ${dev.batteryType || "\u2014"}
-        </div>
-        <div class="data-cell">${this._formatRate(dev)}</div>
-        <div class="data-cell">${this._formatTimeRemaining(dev)}</div>
-        <div class="data-cell reliability-cell">${this._renderReliabilityBadge(dev)}</div>
-        <div class="data-cell">
-          ${dev.predictedEmpty
-            ? this._formatDate(dev.predictedEmpty, this._isFastDischarge(dev))
-            : "\u2014"}
-        </div>
-        <div class="action-cell">
+        >${dev.batteryType || "\u2014"}</span>`,
+      },
+      dischargeRate: {
+        title: "Rate",
+        sortable: true,
+        type: "numeric",
+        minWidth: "70px",
+        maxWidth: "100px",
+        template: (dev) => html`<span style=${STYLE_SECONDARY}>${this._formatRate(dev)}</span>`,
+      },
+      daysRemaining: {
+        title: "Left",
+        sortable: true,
+        type: "numeric",
+        minWidth: "55px",
+        maxWidth: "80px",
+        template: (dev) => html`<span style=${STYLE_SECONDARY}>${this._formatTimeRemaining(dev)}</span>`,
+      },
+      reliability: {
+        title: "Rel",
+        sortable: true,
+        type: "numeric",
+        minWidth: "45px",
+        maxWidth: "60px",
+        template: (dev) => this._renderReliabilityBadge(dev),
+      },
+      predictedEmpty: {
+        title: "Empty by",
+        sortable: true,
+        minWidth: "80px",
+        maxWidth: "110px",
+        template: (dev) => html`<span style=${STYLE_SECONDARY}>${dev.predictedEmpty
+          ? this._formatDate(dev.predictedEmpty, this._isFastDischarge(dev))
+          : "\u2014"}</span>`,
+      },
+      actions: {
+        title: "",
+        type: "overflow-menu",
+        showNarrow: true,
+        template: (dev) => html`
           <ha-dropdown
-              @wa-select=${(e) => this._handleMenuSelect(e, dev.sourceEntity)}
+            @wa-select=${(e) => this._handleMenuSelect(e, dev.sourceEntity)}
+          >
+            <ha-icon-button
+              slot="trigger"
+              @click=${(e) => {
+                e.stopPropagation();
+                const dd = e.currentTarget.closest("ha-dropdown");
+                if (dd) dd.open ? dd.hideMenu() : dd.showMenu();
+              }}
             >
-              <ha-icon-button
-                slot="trigger"
-                @click=${(e) => {
-                  e.stopPropagation();
-                  const dd = e.currentTarget.closest("ha-dropdown");
-                  if (dd) dd.open ? dd.hideMenu() : dd.showMenu();
-                }}
-              >
-                <ha-icon icon="mdi:dots-vertical"></ha-icon>
-              </ha-icon-button>
-              ${this._renderDropdownItems(dev)}
-            </ha-dropdown>
-        </div>
-      </div>
-    `;
+              <ha-icon icon="mdi:dots-vertical"></ha-icon>
+            </ha-icon-button>
+            ${this._renderDropdownItems(dev)}
+          </ha-dropdown>
+        `,
+      },
+    };
+    return this._cachedColumns;
   }
 
-  _renderBadges(dev) {
-    const badges = [];
+  /** Invalidate cached columns (call when settings change). */
+  _invalidateColumns() {
+    this._cachedColumns = null;
+  }
+
+  /** Build label entries for ha-data-table-labels (native HA badge chips). */
+  _getBadgeLabels(dev) {
+    const labels = [];
     if (dev.replacementPending) {
-      const label = dev.isRechargeable ? "RECHARGED?" : "REPLACED?";
-      const title = dev.isRechargeable
-        ? "Battery level jumped significantly \u2014 normal recharge cycle?"
-        : "Battery level jumped significantly \u2014 was the battery replaced?";
-      badges.push(html`<span class="badge replaced" title=${title}>${label}</span>`);
+      labels.push({
+        label_id: "replaced",
+        name: dev.isRechargeable ? "RECHARGED?" : "REPLACED?",
+        color: "#FF9800",
+        description: dev.isRechargeable
+          ? "Battery level jumped significantly \u2014 normal recharge cycle?"
+          : "Battery level jumped significantly \u2014 was the battery replaced?",
+      });
     }
     if (dev.isLow) {
       const t = dev.threshold ?? this._settingsValues.low_threshold ?? 20;
-      badges.push(
-        html`<span
-          class="badge low"
-          title="Battery is at ${this._displayLevel(dev.level)}%, below the ${t}% threshold"
-          >LOW</span
-        >`
-      );
+      labels.push({
+        label_id: "low",
+        name: "LOW",
+        color: "#F44336",
+        description: `Battery is at ${this._displayLevel(dev.level)}%, below the ${t}% threshold`,
+      });
     }
     if (dev.isStale) {
-      badges.push(
-        html`<span
-          class="badge stale"
-          title="No battery reading received within the stale timeout period"
-          >STALE</span
-        >`
-      );
+      labels.push({
+        label_id: "stale",
+        name: "STALE",
+        color: "#FF9800",
+        description: "No battery reading received within the stale timeout period",
+      });
     }
     if (dev.anomaly === "cliff") {
-      badges.push(
-        html`<span
-          class="badge cliff"
-          title="Sudden drop of ${dev.dropSize ?? "?"}% in a single reading interval"
-          >CLIFF DROP</span
-        >`
-      );
+      labels.push({
+        label_id: "cliff",
+        name: "CLIFF DROP",
+        color: "#F44336",
+        description: `Sudden drop of ${dev.dropSize ?? "?"}% in a single reading interval`,
+      });
     } else if (dev.anomaly === "rapid") {
-      badges.push(
-        html`<span
-          class="badge rapid"
-          title="Discharge rate significantly higher than average \u2014 ${dev.dropSize ??
-          "?"}% drop"
-          >RAPID</span
-        >`
-      );
+      labels.push({
+        label_id: "rapid",
+        name: "RAPID",
+        color: "#F44336",
+        description: `Discharge rate significantly higher than average \u2014 ${dev.dropSize ?? "?"}% drop`,
+      });
     }
     if (dev.stability === "erratic") {
-      badges.push(
-        html`<span class="badge erratic" title=${this._erraticTooltip(dev)}
-          >ERRATIC</span
-        >`
-      );
+      labels.push({
+        label_id: "erratic",
+        name: "ERRATIC",
+        color: "#9C27B0",
+        description: this._erraticTooltip(dev),
+      });
     }
     const skipReasons = dev.isRechargeable ? new Set(["flat", "charging"]) : new Set();
     if (!dev.predictedEmpty && this._predictionReason(dev) && !skipReasons.has(dev.predictionStatus)) {
-      const reason = this._predictionReason(dev);
-      badges.push(
-        html`<span
-          class="badge prediction-reason"
-          title=${this._predictionReasonDetail(dev.predictionStatus) || ""}
-          >No prediction: ${reason}</span
-        >`
-      );
+      labels.push({
+        label_id: "no-pred",
+        name: `No prediction: ${this._predictionReason(dev)}`,
+        color: "#9E9E9E",
+        description: this._predictionReasonDetail(dev.predictionStatus) || "",
+      });
     }
     if (dev.isRechargeable) {
       if (this._isActivelyCharging(dev)) {
-        badges.push(
-          html`<span class="badge charging" title="Currently charging">
-            <ha-icon
-              icon="mdi:battery-charging"
-              style="--mdc-icon-size:14px"
-            ></ha-icon>
-            Charging
-          </span>`
-        );
+        labels.push({
+          label_id: "charging",
+          name: "Charging",
+          icon: "mdi:battery-charging",
+          color: "#4CAF50",
+          description: "Currently charging",
+        });
       } else {
-        badges.push(
-          html`<span
-            class="badge rechargeable"
-            title="Rechargeable: ${dev.rechargeableReason || "detected"}"
-          >
-            <ha-icon
-              icon="mdi:power-plug-battery"
-              style="--mdc-icon-size:14px"
-            ></ha-icon>
-          </span>`
-        );
+        labels.push({
+          label_id: "rechargeable",
+          name: "Rechargeable",
+          icon: "mdi:power-plug-battery",
+          color: "#4CAF50",
+          description: `Rechargeable: ${dev.rechargeableReason || "detected"}`,
+        });
       }
     }
     if (
@@ -2358,20 +2135,19 @@ class JuicePatrolPanel extends LitElement {
       const displayMean = this._displayLevel(dev.meanLevel);
       const displayLevel = this._displayLevel(dev.level);
       if (displayMean !== null && Math.abs(displayMean - (displayLevel ?? 0)) > 2) {
-        badges.push(
-          html`<span
-            class="badge avg"
-            title="7-day average is ${displayMean}% while current reading is ${displayLevel ??
-            "?"}%"
-            >avg ${displayMean}%</span
-          >`
-        );
+        labels.push({
+          label_id: "avg",
+          name: `avg ${displayMean}%`,
+          color: "#2196F3",
+          description: `7-day average is ${displayMean}% while current reading is ${displayLevel ?? "?"}%`,
+        });
       }
     }
-    return badges;
+    return labels;
   }
 
-  _renderDeviceSub(dev) {
+  /** Returns subtitle string (manufacturer, model, platform) or null. */
+  _getDeviceSubText(dev) {
     const parts = [];
     const nameLC = (dev.name || "").toLowerCase();
     if (dev.manufacturer && !nameLC.includes(dev.manufacturer.toLowerCase())) {
@@ -2386,22 +2162,26 @@ class JuicePatrolPanel extends LitElement {
     } else if (!sub && dev.platform) {
       sub = dev.platform;
     }
-    if (!sub) return nothing;
-    return html`<div class="name-sub">${sub}</div>`;
+    return sub || null;
   }
 
-  _renderLevelCell(dev) {
-    const color = this._getLevelColor(dev.level, dev.threshold);
-    return html`<div class="level-cell" style="color:${color}">${this._formatLevel(dev.level)}</div>`;
+  /** Renders a single badge label chip (inline styles for ha-data-table shadow DOM). */
+  _renderBadgeLabel(l) {
+    return html`
+      <span title=${l.description || ""} style="display:inline-flex;align-items:center;gap:2px;font-size:11px;font-weight:500;padding:1px 8px;border-radius:10px;white-space:nowrap;background:color-mix(in srgb, ${l.color} 20%, transparent);color:${l.color}">
+        ${l.icon ? html`<ha-icon icon=${l.icon} style="--mdc-icon-size:14px"></ha-icon>` : nothing}
+        ${l.name}
+      </span>
+    `;
   }
 
   _renderReliabilityBadge(dev) {
     const r = dev.reliability;
     const hasTimePrediction = dev.daysRemaining !== null || dev.hoursRemaining !== null;
     if (r === null || r === undefined || !hasTimePrediction) return "\u2014";
-    const cls = r >= 70 ? "high" : r >= 40 ? "medium" : "low";
+    const color = r >= 70 ? "var(--success-color, #43a047)" : r >= 40 ? "var(--warning-color, #ffa726)" : "var(--disabled-text-color, #999)";
     return html`<span
-      class="reliability-badge ${cls}"
+      style="display:inline-block;font-size:11px;font-weight:500;padding:1px 6px;border-radius:8px;background:color-mix(in srgb, ${color} 15%, transparent);color:${color}"
       title="Prediction reliability: ${r}%"
       >${r}%</span
     >`;
@@ -2570,7 +2350,18 @@ class JuicePatrolPanel extends LitElement {
       return html`<div class="empty-state">Device not found</div>`;
     }
 
+    const subText = this._getDeviceSubText(dev);
     return html`
+      <div class="detail-header">
+        <ha-icon
+          icon=${this._getBatteryIcon(dev)}
+          style="color:${this._getLevelColor(dev.level, dev.threshold)};--mdc-icon-size:40px"
+        ></ha-icon>
+        <div>
+          <h1>${dev.name || dev.sourceEntity}</h1>
+          ${subText ? html`<div class="detail-header-sub">${subText}</div>` : nothing}
+        </div>
+      </div>
       ${this._renderDetailMeta(dev)} ${this._renderDetailChart()}
       ${this._renderDetailActions()}
     `;
@@ -2837,14 +2628,26 @@ class JuicePatrolPanel extends LitElement {
       ha-icon-button[slot="toolbar-icon"] {
         color: var(--sidebar-icon-color);
       }
-      #jp-content {
+      #jp-content,
+      .jp-padded {
         padding: 16px;
       }
-      .summary {
+      .detail-header {
         display: flex;
+        align-items: center;
         gap: 16px;
         margin-bottom: 16px;
-        flex-wrap: wrap;
+      }
+      .detail-header h1 {
+        margin: 0;
+        font-size: 24px;
+        font-weight: 700;
+        line-height: 1.2;
+      }
+      .detail-header-sub {
+        font-size: 14px;
+        color: var(--secondary-text-color);
+        margin-top: 2px;
       }
       .summary-card {
         background: var(--card-bg);
@@ -2852,80 +2655,6 @@ class JuicePatrolPanel extends LitElement {
         padding: 16px 20px;
         min-width: 120px;
         border: 1px solid var(--border);
-      }
-      .summary-card.clickable {
-        cursor: pointer;
-        transition: border-color 0.15s, box-shadow 0.15s;
-      }
-      .summary-card.clickable:hover {
-        border-color: var(--primary-color);
-      }
-      .summary-card.active-filter {
-        border-color: var(--primary-color);
-        box-shadow: 0 0 0 1px var(--primary-color);
-      }
-      .filter-bar {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        margin-bottom: 16px;
-      }
-      .search-field {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        flex: 1;
-        padding: 8px 12px;
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        background: var(--card-bg);
-      }
-      .search-field:focus-within {
-        border-color: var(--primary-color);
-      }
-      .search-field input {
-        flex: 1;
-        border: none;
-        background: none;
-        outline: none;
-        font-size: 14px;
-        color: var(--primary-text-color);
-        font-family: inherit;
-      }
-      .search-field input::placeholder {
-        color: var(--secondary-text-color);
-      }
-      .search-clear {
-        background: none;
-        border: none;
-        cursor: pointer;
-        padding: 2px;
-        color: var(--secondary-text-color);
-        display: flex;
-        align-items: center;
-        border-radius: 50%;
-      }
-      .search-clear:hover {
-        color: var(--primary-text-color);
-        background: var(--secondary-background-color);
-      }
-      .filter-chip {
-        display: inline-flex;
-        align-items: center;
-        gap: 4px;
-        padding: 6px 10px;
-        border: 1px solid var(--primary-color);
-        border-radius: 16px;
-        background: color-mix(in srgb, var(--primary-color) 10%, transparent);
-        color: var(--primary-color);
-        font-size: 12px;
-        font-weight: 500;
-        cursor: pointer;
-        white-space: nowrap;
-        font-family: inherit;
-      }
-      .filter-chip:hover {
-        background: color-mix(in srgb, var(--primary-color) 20%, transparent);
       }
       .summary-card .value {
         font-size: 28px;
@@ -2942,197 +2671,31 @@ class JuicePatrolPanel extends LitElement {
       .settings-card ha-textfield {
         --text-field-padding: 0 8px;
       }
+      hass-tabs-subpage-data-table {
+        --data-table-row-height: 60px;
+        --ha-dropdown-font-size: 14px;
+      }
+      .jp-filter-list {
+        display: flex;
+        flex-direction: column;
+        padding: 4px 0;
+      }
+      .jp-filter-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 16px;
+        cursor: pointer;
+        font-size: 14px;
+      }
+      .jp-filter-item:hover {
+        background: var(--secondary-background-color);
+      }
       .devices {
         background: var(--card-bg);
         border-radius: 12px;
         border: 1px solid var(--border);
         overflow: hidden;
-      }
-      .device-row {
-        display: grid;
-        grid-template-columns: 44px 1fr 90px 70px 80px 90px 50px 100px 56px;
-        align-items: center;
-        padding: 10px 16px;
-        gap: 6px;
-        border-bottom: 1px solid var(--border);
-        cursor: pointer;
-      }
-      .device-row:last-child {
-        border-bottom: none;
-      }
-      .device-row:hover {
-        background: var(--secondary-background-color);
-      }
-      .device-row.attention {
-        background: color-mix(in srgb, var(--error-color, #db4437) 8%, transparent);
-      }
-      .device-row.attention:hover {
-        background: color-mix(in srgb, var(--error-color, #db4437) 14%, transparent);
-      }
-      .device-row.pending {
-        background: color-mix(in srgb, var(--primary-color) 8%, transparent);
-      }
-      .device-row.pending:hover {
-        background: color-mix(in srgb, var(--primary-color) 14%, transparent);
-      }
-      .ignored-row {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        padding: 12px 16px;
-        border-bottom: 1px solid var(--border);
-      }
-      .ignored-row:last-child {
-        border-bottom: none;
-      }
-      .ignored-info {
-        flex: 1;
-        min-width: 0;
-      }
-      .ignored-name {
-        font-size: 14px;
-        font-weight: 500;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      .ignored-entity {
-        font-size: 12px;
-        color: var(--secondary-text-color);
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      .ignored-level {
-        font-size: 14px;
-        color: var(--secondary-text-color);
-        white-space: nowrap;
-      }
-      .device-header {
-        display: grid;
-        grid-template-columns: 44px 1fr 90px 70px 80px 90px 50px 100px 56px;
-        padding: 10px 16px;
-        gap: 6px;
-        font-size: 12px;
-        font-weight: 500;
-        color: var(--secondary-text-color);
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-        border-bottom: 2px solid var(--border);
-      }
-      .icon-cell {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
-      .icon-cell ha-icon {
-        --mdc-icon-size: 24px;
-      }
-      .name-cell {
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        font-size: 14px;
-      }
-      .name-sub {
-        font-size: 11px;
-        color: var(--secondary-text-color);
-        opacity: 0.7;
-        margin-top: 1px;
-      }
-      .badge {
-        display: inline-block;
-        font-size: 9px;
-        padding: 1px 5px;
-        border-radius: 4px;
-        margin-left: 4px;
-        font-weight: 500;
-        vertical-align: middle;
-      }
-      .badge.low {
-        background: color-mix(in srgb, var(--error-color) 20%, transparent);
-        color: var(--error-color);
-      }
-      .badge.stale {
-        background: color-mix(in srgb, var(--warning-color) 20%, transparent);
-        color: var(--warning-color);
-      }
-      .badge.replaced {
-        background: color-mix(in srgb, var(--primary-color) 20%, transparent);
-        color: var(--primary-color);
-      }
-      .badge.cliff,
-      .badge.rapid {
-        background: color-mix(in srgb, var(--error-color) 15%, transparent);
-        color: var(--error-color);
-      }
-      .badge.erratic {
-        background: color-mix(in srgb, var(--warning-color) 15%, transparent);
-        color: var(--warning-color);
-      }
-      .badge.noisy {
-        background: color-mix(in srgb, var(--warning-color) 15%, transparent);
-        color: var(--warning-color);
-      }
-      .badge.rechargeable {
-        background: color-mix(
-          in srgb,
-          var(--success-color, #43a047) 15%,
-          transparent
-        );
-        color: var(--success-color, #43a047);
-        padding: 2px 5px;
-        display: inline-flex;
-        align-items: center;
-      }
-      .badge.charging {
-        background: color-mix(
-          in srgb,
-          var(--success-color, #43a047) 20%,
-          transparent
-        );
-        color: var(--success-color, #43a047);
-        padding: 2px 5px;
-        display: inline-flex;
-        align-items: center;
-        gap: 2px;
-      }
-      .badge.avg {
-        background: color-mix(in srgb, var(--info-color, #039be5) 15%, transparent);
-        color: var(--info-color, #039be5);
-      }
-      .level-cell {
-        font-size: 14px;
-        font-weight: 500;
-        text-align: left;
-      }
-      .data-cell {
-        font-size: 13px;
-        color: var(--secondary-text-color);
-        text-align: right;
-      }
-      .action-cell {
-        display: flex;
-        justify-content: center;
-      }
-      .action-btn {
-        background: none;
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        cursor: pointer;
-        padding: 4px 6px;
-        color: var(--secondary-text-color);
-        display: flex;
-        align-items: center;
-        font-family: inherit;
-      }
-      .action-btn:hover {
-        background: var(--secondary-background-color);
-        color: var(--primary-text-color);
-      }
-      .action-btn.confirm {
-        border-color: var(--primary-color);
-        color: var(--primary-color);
       }
       .confidence-dot {
         display: inline-block;
@@ -3142,43 +2705,9 @@ class JuicePatrolPanel extends LitElement {
         margin-right: 4px;
         vertical-align: middle;
       }
-      .confidence-dot.high {
-        background: var(--success-color);
-      }
-      .confidence-dot.medium {
-        background: var(--warning-color);
-      }
-      .confidence-dot.low {
-        background: var(--error-color);
-      }
-      .sort-header {
-        cursor: pointer;
-        user-select: none;
-        display: flex;
-        align-items: center;
-        gap: 2px;
-        justify-content: flex-end;
-      }
-      .sort-header:first-of-type {
-        justify-content: flex-start;
-      }
-      .sort-header:hover {
-        color: var(--primary-text-color);
-      }
-      .sort-header.active {
-        color: var(--primary-color);
-      }
-      .sort-arrow {
-        font-size: 10px;
-      }
-      .type-cell {
-        font-size: 12px;
-        color: var(--secondary-text-color);
-        text-align: left;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
+      .confidence-dot.high { background: var(--success-color); }
+      .confidence-dot.medium { background: var(--warning-color); }
+      .confidence-dot.low { background: var(--error-color); }
       .empty-state {
         padding: 40px;
         text-align: center;
@@ -3191,9 +2720,6 @@ class JuicePatrolPanel extends LitElement {
       }
       .loading-state ha-spinner {
         margin-bottom: 8px;
-      }
-      ha-dropdown {
-        --ha-dropdown-font-size: 14px;
       }
       .jp-dialog-desc {
         font-size: 13px;
@@ -3320,88 +2846,6 @@ class JuicePatrolPanel extends LitElement {
         gap: 8px;
         margin-top: 20px;
       }
-      @keyframes jp-flash-up {
-        0% {
-          background: color-mix(
-            in srgb,
-            var(--success-color, #43a047) 25%,
-            transparent
-          );
-        }
-        100% {
-          background: transparent;
-        }
-      }
-      @keyframes jp-flash-down {
-        0% {
-          background: color-mix(
-            in srgb,
-            var(--warning-color, #ffa726) 25%,
-            transparent
-          );
-        }
-        100% {
-          background: transparent;
-        }
-      }
-      @keyframes jp-flash-up-attention {
-        0% {
-          background: color-mix(
-            in srgb,
-            var(--success-color, #43a047) 25%,
-            transparent
-          );
-        }
-        100% {
-          background: color-mix(
-            in srgb,
-            var(--error-color, #db4437) 8%,
-            transparent
-          );
-        }
-      }
-      @keyframes jp-flash-down-attention {
-        0% {
-          background: color-mix(
-            in srgb,
-            var(--warning-color, #ffa726) 25%,
-            transparent
-          );
-        }
-        100% {
-          background: color-mix(
-            in srgb,
-            var(--error-color, #db4437) 8%,
-            transparent
-          );
-        }
-      }
-      .device-row.just-updated-up {
-        animation: jp-flash-up 2.5s ease-out;
-      }
-      .device-row.just-updated-down {
-        animation: jp-flash-down 2.5s ease-out;
-      }
-      .device-row.attention.just-updated-up {
-        animation: jp-flash-up-attention 2.5s ease-out;
-      }
-      .device-row.attention.just-updated-down {
-        animation: jp-flash-down-attention 2.5s ease-out;
-      }
-      @keyframes jp-highlight-pulse {
-        0% {
-          background: color-mix(in srgb, var(--primary-color) 30%, transparent);
-        }
-        50% {
-          background: color-mix(in srgb, var(--primary-color) 10%, transparent);
-        }
-        100% {
-          background: transparent;
-        }
-      }
-      .device-row.highlighted {
-        animation: jp-highlight-pulse 3s ease-out;
-      }
       @keyframes jp-spin {
         from {
           transform: rotate(0deg);
@@ -3413,41 +2857,6 @@ class JuicePatrolPanel extends LitElement {
       ha-icon-button.spinning ha-icon {
         animation: jp-spin 1s linear infinite;
       }
-      .reliability-cell {
-        text-align: center !important;
-      }
-      .reliability-badge {
-        display: inline-block;
-        font-size: 11px;
-        font-weight: 500;
-        padding: 1px 6px;
-        border-radius: 8px;
-      }
-      .reliability-badge.high {
-        background: color-mix(
-          in srgb,
-          var(--success-color, #43a047) 15%,
-          transparent
-        );
-        color: var(--success-color, #43a047);
-      }
-      .reliability-badge.medium {
-        background: color-mix(
-          in srgb,
-          var(--warning-color, #ffa726) 15%,
-          transparent
-        );
-        color: var(--warning-color, #ffa726);
-      }
-      .reliability-badge.low {
-        background: color-mix(
-          in srgb,
-          var(--disabled-text-color, #999) 15%,
-          transparent
-        );
-        color: var(--disabled-text-color, #999);
-      }
-      /* old .tab-bar/.tab removed — tabs are now in the toolbar */
       .shopping-summary {
         display: flex;
         gap: 16px;
@@ -3568,15 +2977,6 @@ class JuicePatrolPanel extends LitElement {
       .detail-reason-text {
         color: var(--secondary-text-color);
       }
-      .prediction-reason {
-        display: inline-block;
-        font-size: 9px;
-        padding: 1px 5px;
-        border-radius: 4px;
-        font-weight: 500;
-        background: color-mix(in srgb, var(--secondary-text-color) 15%, transparent);
-        color: var(--secondary-text-color);
-      }
       .chart-range-bar {
         display: flex;
         gap: 4px;
@@ -3645,24 +3045,10 @@ class JuicePatrolPanel extends LitElement {
         flex-wrap: wrap;
         gap: 8px;
       }
-      @media (max-width: 900px) {
-        .device-row,
-        .device-header {
-          grid-template-columns: 36px 1fr 60px 56px;
-        }
-        .type-cell,
-        .reliability-cell,
-        .device-row > :nth-child(n + 5):not(.action-cell),
-        .device-header > :nth-child(n + 5):not(:last-child) {
-          display: none;
-        }
-      }
       @media (max-width: 500px) {
-        #jp-content {
+        #jp-content,
+        .jp-padded {
           padding: 10px;
-        }
-        .summary {
-          gap: 8px;
         }
         .summary-card {
           padding: 10px 14px;
@@ -3674,29 +3060,6 @@ class JuicePatrolPanel extends LitElement {
         .summary-card .label {
           font-size: 11px;
         }
-        .device-row,
-        .device-header {
-          grid-template-columns: 30px 1fr 48px 40px;
-          padding: 8px 10px;
-          gap: 4px;
-        }
-        .icon-cell ha-icon {
-          --mdc-icon-size: 20px;
-        }
-        .name-cell {
-          font-size: 13px;
-        }
-        .badge {
-          font-size: 8px;
-          padding: 1px 4px;
-        }
-        .filter-bar {
-          gap: 6px;
-        }
-        .search-field {
-          padding: 6px 10px;
-        }
-        /* tabs move to bottom bar on narrow via template logic */
         .shopping-summary {
           flex-wrap: wrap;
           gap: 8px;
