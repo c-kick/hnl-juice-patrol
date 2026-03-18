@@ -80,6 +80,34 @@ def _no_prediction(
     )
 
 
+def _validate_and_sort_readings(
+    readings: list[dict[str, float]],
+) -> list[dict[str, float]]:
+    """Validate and sort readings by timestamp, removing duplicates.
+
+    Ensures readings are sorted by time (oldest first), removes entries
+    with duplicate timestamps (keeps last), and filters out readings
+    with timestamps in the future (clock skew tolerance: 1 hour).
+    """
+    if len(readings) <= 1:
+        return readings
+
+    # Sort by timestamp
+    readings = sorted(readings, key=lambda r: r["t"])
+
+    # Remove duplicate timestamps (keep last occurrence at each timestamp)
+    seen: dict[float, dict[str, float]] = {}
+    for r in readings:
+        seen[r["t"]] = r
+    readings = sorted(seen.values(), key=lambda r: r["t"])
+
+    # Filter out future timestamps (allow 1 hour tolerance for clock skew)
+    cutoff = time.time() + 3600
+    readings = [r for r in readings if r["t"] <= cutoff]
+
+    return readings
+
+
 def predict_discharge(
     readings: list[dict[str, float]],
     target_level: float = 0.0,
@@ -100,7 +128,8 @@ def predict_discharge(
     Returns:
         PredictionResult with prediction data and confidence.
     """
-    # Subsample large histories for performance (Pi 3/4 safety)
+    # Validate and sort input, then subsample for performance (Pi 3/4 safety)
+    readings = _validate_and_sort_readings(readings)
     readings = _subsample_readings(readings)
 
     if len(readings) < min_readings:
@@ -184,9 +213,11 @@ def predict_discharge(
     now = time.time()
     now_days = (now - t0) / 86400.0
 
+    n_cleaned = len(cleaned)
+
     if slope > 0.01:
         # Battery is charging or increasing — no empty prediction
-        conf = _classify_confidence(r_squared, timespan_hours)
+        conf = _classify_confidence(r_squared, timespan_hours, n_cleaned)
         return PredictionResult(
             slope_per_day=round(slope, 4),
             slope_per_hour=slope_per_hour,
@@ -196,10 +227,10 @@ def predict_discharge(
             estimated_empty_timestamp=None,
             estimated_days_remaining=None,
             estimated_hours_remaining=None,
-            data_points_used=len(cleaned),
+            data_points_used=n_cleaned,
             status=PredictionStatus.CHARGING,
             reliability=compute_reliability(
-                len(cleaned), timespan_hours, r_squared, conf,
+                n_cleaned, timespan_hours, r_squared, conf,
                 days_remaining=None,
             ),
             t0=t0,
@@ -207,7 +238,7 @@ def predict_discharge(
 
     if abs(slope) <= 0.02:
         # Extremely flat — effectively no drain
-        conf = _classify_confidence(r_squared, timespan_hours)
+        conf = _classify_confidence(r_squared, timespan_hours, n_cleaned)
         return PredictionResult(
             slope_per_day=round(slope, 4),
             slope_per_hour=slope_per_hour,
@@ -217,10 +248,10 @@ def predict_discharge(
             estimated_empty_timestamp=None,
             estimated_days_remaining=None,
             estimated_hours_remaining=None,
-            data_points_used=len(cleaned),
+            data_points_used=n_cleaned,
             status=PredictionStatus.FLAT,
             reliability=compute_reliability(
-                len(cleaned), timespan_hours, r_squared, conf,
+                n_cleaned, timespan_hours, r_squared, conf,
                 days_remaining=None,
             ),
             t0=t0,
@@ -229,7 +260,7 @@ def predict_discharge(
     # R² gate: if the model explains < 10% of variance, the slope
     # is indistinguishable from noise — suppress rate and prediction.
     if r_squared < 0.10:
-        conf = _classify_confidence(r_squared, timespan_hours)
+        conf = _classify_confidence(r_squared, timespan_hours, n_cleaned)
         return PredictionResult(
             slope_per_day=None,
             slope_per_hour=None,
@@ -239,10 +270,10 @@ def predict_discharge(
             estimated_empty_timestamp=None,
             estimated_days_remaining=None,
             estimated_hours_remaining=None,
-            data_points_used=len(cleaned),
+            data_points_used=n_cleaned,
             status=PredictionStatus.NOISY,
             reliability=compute_reliability(
-                len(cleaned), timespan_hours, r_squared, conf,
+                n_cleaned, timespan_hours, r_squared, conf,
                 days_remaining=None,
             ),
             t0=t0,
@@ -259,7 +290,7 @@ def predict_discharge(
 
     hours_remaining = round(days_remaining * 24.0, 1)
     estimated_empty_timestamp = now + (days_remaining * 86400.0)
-    conf = _classify_confidence(r_squared, timespan_hours)
+    conf = _classify_confidence(r_squared, timespan_hours, n_cleaned)
 
     return PredictionResult(
         slope_per_day=round(slope, 4),
@@ -270,10 +301,10 @@ def predict_discharge(
         estimated_empty_timestamp=round(estimated_empty_timestamp, 0),
         estimated_days_remaining=round(days_remaining, 1),
         estimated_hours_remaining=hours_remaining,
-        data_points_used=len(cleaned),
+        data_points_used=n_cleaned,
         status=PredictionStatus.NORMAL,
         reliability=compute_reliability(
-            len(cleaned), timespan_hours, r_squared, conf,
+            n_cleaned, timespan_hours, r_squared, conf,
             days_remaining=days_remaining,
         ),
         t0=t0,
@@ -365,7 +396,7 @@ def predict_discharge_multisession(
     timespan_hours = (all_readings[-1]["t"] - all_readings[0]["t"]) / 3600
 
     if status == PredictionStatus.CHARGING or status == PredictionStatus.FLAT:
-        conf = _classify_confidence(r_squared, timespan_hours)
+        conf = _classify_confidence(r_squared, timespan_hours, total_points)
         return PredictionResult(
             slope_per_day=round(median_slope, 4),
             slope_per_hour=slope_per_hour,
@@ -388,7 +419,7 @@ def predict_discharge_multisession(
     # Predict time to target
     if median_slope >= 0:
         # Not draining — can't predict empty
-        conf = _classify_confidence(r_squared, timespan_hours)
+        conf = _classify_confidence(r_squared, timespan_hours, total_points)
         return PredictionResult(
             slope_per_day=round(median_slope, 4),
             slope_per_hour=slope_per_hour,
@@ -412,7 +443,7 @@ def predict_discharge_multisession(
 
     hours_remaining = round(days_remaining * 24.0, 1)
     estimated_empty_timestamp = now + (days_remaining * 86400.0)
-    conf = _classify_confidence(r_squared, timespan_hours)
+    conf = _classify_confidence(r_squared, timespan_hours, total_points)
 
     return PredictionResult(
         slope_per_day=round(median_slope, 4),
@@ -715,10 +746,17 @@ def _subsample_readings(
             transitions.add(i)
             transitions.add(i - 1)  # keep the reading before the transition
 
-    # If transitions alone exceed budget, keep them all
-    # (they ARE the signal — don't discard them)
+    # If transitions exceed budget, subsample transitions themselves
+    # to prevent unbounded output on noisy sensors.
     if len(transitions) >= max_points:
         indices = sorted(transitions)
+        if len(indices) > max_points * 2:
+            # Too many transitions — keep first, last, and evenly-spaced sample
+            step = max(1, len(indices) // max_points)
+            kept = set(indices[::step])
+            kept.add(indices[0])
+            kept.add(indices[-1])
+            indices = sorted(kept)
         return [readings[i] for i in indices]
 
     # Fill remaining budget with evenly-spaced samples
@@ -738,14 +776,18 @@ def _subsample_readings(
 
 
 def _classify_confidence(
-    r_squared: float, timespan_hours: float
+    r_squared: float, timespan_hours: float, data_points: int = 10,
 ) -> Confidence:
-    """Classify prediction confidence."""
+    """Classify prediction confidence.
+
+    Considers R-squared, timespan, AND data point count.
+    A 3-point prediction with high R-squared should not be HIGH confidence.
+    """
     timespan_days = timespan_hours / 24.0
 
-    if r_squared > 0.8 and timespan_days >= 7:
+    if r_squared > 0.8 and timespan_days >= 7 and data_points >= 10:
         return Confidence.HIGH
-    if r_squared > 0.3 and timespan_days >= 3:
+    if r_squared > 0.3 and timespan_days >= 3 and data_points >= 5:
         return Confidence.MEDIUM
     if r_squared > 0.1:
         return Confidence.LOW
@@ -812,48 +854,6 @@ def compute_reliability(
         span_score + density_score + r2_score
         + consistency_bonus + extrap_penalty
     )))
-
-
-def _prediction_stability_score(
-    history: list[dict[str, float]],
-) -> float:
-    """Compute prediction stability from historical empty estimates.
-
-    Measures how much the predicted EMPTY BY timestamp has been shifting
-    between successive prediction runs. Stable predictions that converge
-    on the same date are far more trustworthy than ones that swing wildly.
-
-    This function scores only — it will be wired into compute_reliability()
-    when the coordinator persistence layer stores prediction_history.
-
-    Args:
-        history: List of {"computed_at": timestamp, "empty_ts": timestamp|None}
-                 dicts, ordered chronologically (oldest first).
-
-    Returns:
-        A score from 0.0 (wildly unstable) to 10.0 (rock solid).
-    """
-    timestamps = [
-        h["empty_ts"] for h in history
-        if h.get("empty_ts") is not None
-    ]
-    if len(timestamps) < 3:
-        return 0.0  # Not enough history to assess stability
-
-    # Convert to days for interpretable scale
-    days = [ts / 86400 for ts in timestamps]
-    diffs = [abs(days[i] - days[i - 1]) for i in range(1, len(days))]
-    avg_shift = sum(diffs) / len(diffs)
-
-    if avg_shift < 1:
-        return 10.0  # Predictions barely move — very stable
-    if avg_shift < 3:
-        return 7.0
-    if avg_shift < 7:
-        return 4.0
-    if avg_shift < 14:
-        return 2.0
-    return 0.0  # Predictions are all over the place
 
 
 # ---------------------------------------------------------------------------
@@ -1001,7 +1001,7 @@ def predict_charge(
 
     # R² gate
     if r_squared < 0.10:
-        conf = _classify_confidence(r_squared, timespan_hours)
+        conf = _classify_confidence(r_squared, timespan_hours, len(readings))
         return ChargePredictionResult(
             slope_per_hour=round(slope, 4),
             intercept=round(intercept, 2),
@@ -1039,7 +1039,7 @@ def predict_charge(
         )
 
     estimated_full_timestamp = now + (hours_remaining * 3600.0)
-    conf = _classify_confidence(r_squared, timespan_hours)
+    conf = _classify_confidence(r_squared, timespan_hours, len(readings))
 
     return ChargePredictionResult(
         slope_per_hour=round(slope, 4),

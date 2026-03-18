@@ -38,5 +38,10 @@ STORE_MINOR_VERSION = 3  # Internal data schema version (bumped for replacement_
 HISTORY_CACHE_TTL = 1800  # 30 min cache for recorder queries
 HISTORY_DEFAULT_DAYS = 365  # how far back to query recorder
 
+# Memory limits
+MAX_REPLACEMENT_HISTORY = 50  # max replacement timestamps per device
+MAX_DENIED_REPLACEMENTS = 50  # max denied replacement timestamps per device
+MAX_HISTORY_CACHE_ENTRIES = 500  # max entities in the history cache
+
 # Platforms
 PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR]

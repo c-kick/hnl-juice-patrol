@@ -10,7 +10,13 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
-from ..const import STORE_KEY, STORE_MINOR_VERSION, STORE_VERSION
+from ..const import (
+    MAX_DENIED_REPLACEMENTS,
+    MAX_REPLACEMENT_HISTORY,
+    STORE_KEY,
+    STORE_MINOR_VERSION,
+    STORE_VERSION,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -155,7 +161,11 @@ class JuicePatrolStore:
             self._data = StoreData()
 
     async def async_save(self) -> None:
-        """Save data to disk if dirty."""
+        """Save data to disk if dirty.
+
+        Only clears the dirty flag after a successful save so data
+        is re-persisted on the next attempt if the write fails.
+        """
         if not self._dirty:
             return
 
@@ -166,9 +176,16 @@ class JuicePatrolStore:
                 for entity_id, dev in self._data.devices.items()
             },
         }
-        await self._store.async_save(data)
-        self._dirty = False
-        _LOGGER.debug("Store saved (%d devices)", len(self._data.devices))
+        try:
+            await self._store.async_save(data)
+            self._dirty = False
+            _LOGGER.debug("Store saved (%d devices)", len(self._data.devices))
+        except Exception:
+            _LOGGER.warning(
+                "Failed to save store, will retry on next save cycle",
+                exc_info=True,
+            )
+            # Do NOT clear _dirty — data will be retried on next save
 
     def ensure_device(
         self,
@@ -193,13 +210,44 @@ class JuicePatrolStore:
         """Get device data for an entity."""
         return self._data.devices.get(entity_id)
 
+    @staticmethod
+    def _dedup_and_cap_timestamps(
+        timestamps: list[float], max_count: int, tolerance: float = 60.0
+    ) -> list[float]:
+        """Deduplicate timestamps within tolerance and cap the list length.
+
+        Keeps the most recent entries when exceeding max_count.
+        """
+        if not timestamps:
+            return timestamps
+        timestamps.sort()
+        # Deduplicate: remove entries within tolerance of each other
+        deduped = [timestamps[0]]
+        for ts in timestamps[1:]:
+            if abs(ts - deduped[-1]) > tolerance:
+                deduped.append(ts)
+        # Cap: keep most recent entries
+        if len(deduped) > max_count:
+            deduped = deduped[-max_count:]
+        return deduped
+
     def mark_replaced(self, entity_id: str) -> bool:
         """Manually mark a battery as replaced (appends to history)."""
         dev = self._data.devices.get(entity_id)
         if dev is None:
             return False
 
-        dev.replacement_history.append(time.time())
+        now = time.time()
+        # Deduplicate: don't add if there's already a timestamp within 60s
+        if dev.replacement_history and abs(dev.replacement_history[-1] - now) < 60:
+            dev.replacement_confirmed = True
+            self._dirty = True
+            return True
+
+        dev.replacement_history.append(now)
+        dev.replacement_history = self._dedup_and_cap_timestamps(
+            dev.replacement_history, MAX_REPLACEMENT_HISTORY
+        )
         dev.replacement_confirmed = True
         self._dirty = True
         _LOGGER.info("Battery manually marked as replaced: %s", entity_id)
@@ -211,8 +259,16 @@ class JuicePatrolStore:
         if dev is None:
             return False
 
+        # Deduplicate: don't add if there's already a timestamp within 60s
+        if any(abs(ts - timestamp) < 60 for ts in dev.replacement_history):
+            dev.replacement_confirmed = True
+            self._dirty = True
+            return True
+
         dev.replacement_history.append(timestamp)
-        dev.replacement_history.sort()
+        dev.replacement_history = self._dedup_and_cap_timestamps(
+            dev.replacement_history, MAX_REPLACEMENT_HISTORY
+        )
         dev.replacement_confirmed = True
         self._dirty = True
         _LOGGER.info("Battery marked as replaced at %s: %s", timestamp, entity_id)
@@ -238,6 +294,9 @@ class JuicePatrolStore:
             return False
 
         dev.denied_replacements.append(timestamp)
+        dev.denied_replacements = self._dedup_and_cap_timestamps(
+            dev.denied_replacements, MAX_DENIED_REPLACEMENTS
+        )
         self._dirty = True
         _LOGGER.info("Suspected replacement denied at %s: %s", timestamp, entity_id)
         return True

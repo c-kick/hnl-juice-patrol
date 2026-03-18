@@ -132,17 +132,23 @@ async def async_discover_batteries(
             model=model,
         )
 
-    # Pass 2: entities with battery attributes (that weren't already found)
+    # Pass 2: entities with battery attributes (that weren't already found).
+    # Pre-filter: only check entities that actually have battery attributes
+    # to avoid iterating thousands of irrelevant states.
     for state in hass.states.async_all():
         if state.entity_id in ignored or state.entity_id in discovered:
             continue
 
-        # Skip our own entities
+        attrs = state.attributes
+        # Quick check: does this entity have any battery attribute?
+        if not any(attr_name in attrs for attr_name in BATTERY_ATTRIBUTES):
+            continue
+
+        # Skip our own entities (check after attribute filter for efficiency)
         reg_entry = ent_reg.async_get(state.entity_id)
         if reg_entry and reg_entry.platform == DOMAIN:
             continue
 
-        attrs = state.attributes
         for attr_name in BATTERY_ATTRIBUTES:
             if attr_name not in attrs:
                 continue
@@ -151,9 +157,7 @@ async def async_discover_batteries(
             if level is None:
                 continue
 
-            # Find device_id from entity registry
-            entry = ent_reg.async_get(state.entity_id)
-            device_id = entry.device_id if entry else None
+            device_id = reg_entry.device_id if reg_entry else None
             device_name, manufacturer, model = _get_device_info(dev_reg, device_id)
 
             discovered[state.entity_id] = DiscoveredBattery(
@@ -162,7 +166,7 @@ async def async_discover_batteries(
                 device_name=device_name,
                 current_level=level,
                 source_type=SourceType.ATTRIBUTE_BATTERY_LEVEL,
-                platform=entry.platform if entry else None,
+                platform=reg_entry.platform if reg_entry else None,
                 manufacturer=manufacturer,
                 model=model,
             )
@@ -201,9 +205,20 @@ async def async_discover_batteries(
                 prefer_new = True
 
             if prefer_new:
+                _LOGGER.debug(
+                    "Dedup: preferring %s over %s for device %s "
+                    "(source: %s vs %s)",
+                    entity_id, existing_eid, battery.device_id,
+                    battery.source_type, existing.source_type,
+                )
                 del deduped[existing_eid]
                 seen_devices[battery.device_id] = entity_id
                 deduped[entity_id] = battery
+            else:
+                _LOGGER.debug(
+                    "Dedup: keeping %s, discarding %s for device %s",
+                    existing_eid, entity_id, battery.device_id,
+                )
 
     result = list(deduped.values())
     _LOGGER.info("Discovered %d battery entities (%d before dedup)",
