@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -48,6 +48,7 @@ from ..engine import (
     extract_charging_segment,
     predict_charge,
     predict_discharge,
+    predict_discharge_multisession,
 )
 from .battery_types import BatteryTypeResolver
 from .history import HistoryCache, async_get_readings
@@ -306,7 +307,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 dev = self.store.get_device(entity_id)
                 if dev:
-                    dev.last_replaced = time.time()
+                    dev.replacement_history.append(time.time())
                     dev.replacement_confirmed = False
                     self.store.mark_dirty()
                 self._history_cache.invalidate(entity_id)
@@ -349,13 +350,8 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> dict[str, Any]:
         """Build the data dict for a single entity (async — queries recorder)."""
         dev = self.store.get_device(entity_id)
-        since = (
-            datetime.fromtimestamp(dev.last_replaced, tz=timezone.utc)
-            if dev and dev.last_replaced
-            else None
-        )
         all_readings = await async_get_readings(
-            self.hass, entity_id, since=since, cache=self._history_cache
+            self.hass, entity_id, since=None, cache=self._history_cache
         )
 
         # Update last known level from readings
@@ -368,6 +364,15 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             dev.custom_threshold if dev and dev.custom_threshold
             else self.low_threshold
         )
+
+        # Determine if this device is rechargeable (check store override first,
+        # then behavioral detection from previous data)
+        is_rechargeable_hint = False
+        if dev and dev.is_rechargeable is True:
+            is_rechargeable_hint = True
+        elif self.data is not None:
+            prev_data = self.data.get(entity_id, {})
+            is_rechargeable_hint = prev_data.get("is_rechargeable", False)
 
         # For cyclic (rechargeable) devices, extract only the current
         # discharge segment for prediction. Full history is still used
@@ -390,16 +395,31 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         else:
             min_span = float(MIN_TIMESPAN_HOURS)
 
-        prediction = predict_discharge(
-            readings,
-            target_level=0.0,
-            half_life_days=None,
-            min_readings=MIN_READINGS_FOR_PREDICTION,
-            min_timespan_hours=min_span,
+        # Choose prediction strategy based on rechargeable status
+        current = battery.current_level
+        battery_state = self._get_battery_state(entity_id, battery.device_id)
+        is_charging = (
+            battery_state
+            and battery_state.lower() in ("charging",)
         )
 
+        if is_rechargeable_hint and not is_charging and len(all_readings) >= 3:
+            # Multi-session discharge analysis for rechargeable devices
+            prediction = predict_discharge_multisession(
+                all_readings,
+                current_level=current if current is not None else 0.0,
+                target_level=0.0,
+            )
+        else:
+            prediction = predict_discharge(
+                readings,
+                target_level=0.0,
+                half_life_days=None,
+                min_readings=MIN_READINGS_FOR_PREDICTION,
+                min_timespan_hours=min_span,
+            )
+
         # Sanity-check predictions against actual current level
-        current = battery.current_level
         if prediction.estimated_days_remaining is not None:
             # Model says "already past target" (days=0) but actual level
             # is still well above 0% — model has diverged from reality.
@@ -420,15 +440,11 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 entity_id, battery.device_id
             )
 
-        # Run behavior analysis on the current segment (not full cyclic history)
-        battery_state = self._get_battery_state(entity_id, battery.device_id)
-
         # If the device reports it's actively charging, override prediction status.
         # The mathematical slope may still be negative (e.g. recent charge didn't
         # exceed the 20% segment-split threshold), but the device knows best.
         if (
-            battery_state
-            and battery_state.lower() in ("charging",)
+            is_charging
             and prediction.status == PredictionStatus.NORMAL
         ):
             prediction.status = PredictionStatus.CHARGING
@@ -504,6 +520,8 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "is_low": is_low,
             "is_stale": is_stale,
             "last_calculated": now,
+            "session_count": prediction.session_count,
+            "replacement_history": dev.replacement_history if dev else [],
         }
 
     def _get_battery_state(self, entity_id: str, device_id: str | None) -> str | None:
@@ -704,13 +722,8 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return None
 
         dev = self.store.get_device(entity_id)
-        since = (
-            datetime.fromtimestamp(dev.last_replaced, tz=timezone.utc)
-            if dev and dev.last_replaced
-            else None
-        )
         all_readings = await async_get_readings(
-            self.hass, entity_id, since=since, cache=self._history_cache
+            self.hass, entity_id, since=None, cache=self._history_cache
         )
         readings = _extract_current_segment(all_readings)
 
@@ -798,12 +811,14 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "charge_prediction": charge_pred_dict,
             "threshold": threshold,
             "last_replaced": dev.last_replaced if dev else None,
+            "replacement_history": dev.replacement_history if dev else [],
             "is_rechargeable": is_rechargeable,
             "first_reading_timestamp": readings[0]["t"] if readings else None,
             "device_name": battery.device_name,
             "level": battery.current_level,
             "battery_type": entity_data.get("battery_type"),
             "charging_state": entity_data.get("charging_state"),
+            "session_count": entity_data.get("session_count"),
         }
 
     async def async_shutdown(self) -> None:

@@ -10,7 +10,7 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
-from ..const import STORE_KEY, STORE_VERSION
+from ..const import STORE_KEY, STORE_MINOR_VERSION, STORE_VERSION
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ _LOGGER = logging.getLogger(__name__)
 class DeviceData:
     """In-memory representation of a single device's metadata."""
 
-    last_replaced: float | None = None
+    replacement_history: list[float] = field(default_factory=list)
     ignored: bool = False
     custom_threshold: int | None = None
     battery_type: str | None = None  # e.g. "CR2032", "AA", "AAA"
@@ -28,11 +28,22 @@ class DeviceData:
     source_entity: str = ""
     device_id: str | None = None
 
+    @property
+    def last_replaced(self) -> float | None:
+        """Return the most recent replacement timestamp, or None."""
+        return self.replacement_history[-1] if self.replacement_history else None
+
     @classmethod
     def from_dict(cls, data: dict[str, Any], entity_id: str) -> DeviceData:
         """Create from stored dict."""
+        # Support both v3 (replacement_history) and v2 (last_replaced) formats
+        replacement_history = data.get("replacement_history", [])
+        if not replacement_history:
+            last_replaced = data.get("last_replaced")
+            if last_replaced is not None:
+                replacement_history = [last_replaced]
         return cls(
-            last_replaced=data.get("last_replaced"),
+            replacement_history=replacement_history,
             ignored=data.get("ignored", False),
             custom_threshold=data.get("custom_threshold"),
             battery_type=data.get("battery_type"),
@@ -45,7 +56,7 @@ class DeviceData:
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for storage."""
         result: dict[str, Any] = {
-            "last_replaced": self.last_replaced,
+            "replacement_history": self.replacement_history,
             "ignored": self.ignored,
             "replacement_confirmed": self.replacement_confirmed,
             "source_entity": self.source_entity,
@@ -64,7 +75,7 @@ class DeviceData:
 class StoreData:
     """Full store contents."""
 
-    version: int = STORE_VERSION
+    version: int = STORE_MINOR_VERSION
     devices: dict[str, DeviceData] = field(default_factory=dict)
 
 
@@ -107,19 +118,27 @@ class JuicePatrolStore:
         try:
             old_version = raw.get("version", 1)
 
-            # Migration from v1 → v2: strip readings from each device
-            if old_version < STORE_VERSION:
+            if old_version < STORE_MINOR_VERSION:
                 _LOGGER.info(
-                    "Migrating store from v%d to v%d (stripping readings)",
+                    "Migrating store from v%d to v%d",
                     old_version,
-                    STORE_VERSION,
+                    STORE_MINOR_VERSION,
                 )
                 for dev_data in raw.get("devices", {}).values():
-                    dev_data.pop("readings", None)
+                    # v1 → v2: strip readings
+                    if old_version < 2:
+                        dev_data.pop("readings", None)
+                    # v2 → v3: convert last_replaced to replacement_history
+                    if old_version < 3:
+                        lr = dev_data.pop("last_replaced", None)
+                        if lr is not None:
+                            dev_data["replacement_history"] = [lr]
+                        else:
+                            dev_data.setdefault("replacement_history", [])
                 self._dirty = True
 
             self._data = StoreData(
-                version=STORE_VERSION,
+                version=STORE_MINOR_VERSION,
                 devices={
                     entity_id: DeviceData.from_dict(dev_data, entity_id)
                     for entity_id, dev_data in raw.get("devices", {}).items()
@@ -172,24 +191,25 @@ class JuicePatrolStore:
         return self._data.devices.get(entity_id)
 
     def mark_replaced(self, entity_id: str) -> bool:
-        """Manually mark a battery as replaced."""
+        """Manually mark a battery as replaced (appends to history)."""
         dev = self._data.devices.get(entity_id)
         if dev is None:
             return False
 
-        dev.last_replaced = time.time()
+        dev.replacement_history.append(time.time())
         dev.replacement_confirmed = True
         self._dirty = True
         _LOGGER.info("Battery manually marked as replaced: %s", entity_id)
         return True
 
     def undo_replacement(self, entity_id: str) -> bool:
-        """Undo a manual replacement — clear last_replaced timestamp."""
+        """Undo the most recent replacement (pops from history stack)."""
         dev = self._data.devices.get(entity_id)
         if dev is None:
             return False
 
-        dev.last_replaced = None
+        if dev.replacement_history:
+            dev.replacement_history.pop()
         dev.replacement_confirmed = True
         self._dirty = True
         _LOGGER.info("Battery replacement undone: %s", entity_id)

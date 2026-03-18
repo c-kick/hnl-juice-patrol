@@ -25,6 +25,7 @@ class JuicePatrolPanel extends LitElement {
       _flashGeneration: { state: true },
       _expandedGroups: { state: true },
       _ignoredEntities: { state: true },
+      _chartRange: { state: true },
     };
   }
 
@@ -59,6 +60,7 @@ class JuicePatrolPanel extends LitElement {
     this._chartLastLevel = null;
     this._flashGeneration = 0;
     this._ignoredEntities = null;
+    this._chartRange = "auto";
     this._flashCleanupTimer = null;
     this._refreshTimer = null;
     this._chartDebounce = null;
@@ -66,8 +68,13 @@ class JuicePatrolPanel extends LitElement {
   }
 
   set hass(hass) {
+    const prevConnection = this._hass?.connection;
     this._hass = hass;
-    this._processHassUpdate(!this._hassInitialized);
+    const isFirstLoad = !this._hassInitialized;
+    // Detect WS reconnection: HA replaces the connection object after a drop.
+    // Treat it like a first load to re-fetch config and rebuild state.
+    const connectionChanged = !isFirstLoad && hass?.connection && hass.connection !== prevConnection;
+    this._processHassUpdate(isFirstLoad || connectionChanged);
     this._hassInitialized = true;
   }
 
@@ -99,6 +106,25 @@ class JuicePatrolPanel extends LitElement {
       this._syncViewFromUrl();
     };
     window.addEventListener("popstate", this._popstateHandler);
+    // Recover from background/idle: when the tab regains visibility,
+    // re-process hass to rebuild entity state and reload chart if needed.
+    this._visibilityHandler = () => {
+      if (document.visibilityState === "visible" && this._hass) {
+        this._processHassUpdate(false);
+        if (this._activeView === "detail" && this._detailEntity) {
+          // Only reload chart if data is stale (>5 min) or missing
+          const staleMs = 5 * 60 * 1000;
+          const age = this._chartData?.last_calculated
+            ? Date.now() - this._chartData.last_calculated * 1000
+            : Infinity;
+          this._chartLoading = false;
+          if (age > staleMs) {
+            this._loadChartData(this._detailEntity);
+          }
+        }
+      }
+    };
+    document.addEventListener("visibilitychange", this._visibilityHandler);
   }
 
   disconnectedCallback() {
@@ -114,6 +140,10 @@ class JuicePatrolPanel extends LitElement {
     if (this._popstateHandler) {
       window.removeEventListener("popstate", this._popstateHandler);
       this._popstateHandler = null;
+    }
+    if (this._visibilityHandler) {
+      document.removeEventListener("visibilitychange", this._visibilityHandler);
+      this._visibilityHandler = null;
     }
   }
 
@@ -156,7 +186,7 @@ class JuicePatrolPanel extends LitElement {
   }
 
   updated(changed) {
-    if (changed.has("_chartData") && this._chartData) {
+    if ((changed.has("_chartData") || changed.has("_chartRange")) && this._chartData) {
       requestAnimationFrame(() => this._initChart(this._chartData));
     }
     if (changed.has("_entities")) {
@@ -698,6 +728,10 @@ class JuicePatrolPanel extends LitElement {
         entity_id: entityId,
       });
       this._showToast("Battery marked as replaced");
+      // Reload chart data to show the new replacement marker
+      if (this._detailEntity === entityId) {
+        setTimeout(() => this._loadChartData(entityId), 500);
+      }
     } catch (e) {
       this._showToast("Failed to mark as replaced");
     }
@@ -715,6 +749,7 @@ class JuicePatrolPanel extends LitElement {
         battery pack itself (e.g. a worn-out cell that no longer holds charge).</p>
         <p>If you just recharged the device, you can ignore this \u2014 Juice Patrol
         already handles that.</p>`,
+      confirmLabel: "Mark as replaced",
       onConfirm: () => this._doMarkReplaced(entityId),
     });
   }
@@ -724,12 +759,16 @@ class JuicePatrolPanel extends LitElement {
       title: "Mark battery as replaced?",
       bodyHtml: `
         <p style="margin-top:0">This tells Juice Patrol that you swapped the batteries.
-        The discharge history will be reset and tracking starts fresh.</p>`,
+        A replacement marker will be added to the timeline. All history is preserved
+        for life expectancy tracking.</p>
+        <p style="color:var(--secondary-text-color); font-size:0.9em; margin-bottom:0">
+        This can be undone later if needed.</p>`,
+      confirmLabel: "Mark as replaced",
       onConfirm: () => this._doMarkReplaced(entityId),
     });
   }
 
-  _showConfirmDialog({ title, bodyHtml, onConfirm }) {
+  _showConfirmDialog({ title, bodyHtml, onConfirm, confirmLabel, confirmVariant }) {
     const dialog = document.createElement("ha-dialog");
     dialog.open = true;
     dialog.headerTitle = title;
@@ -740,13 +779,9 @@ class JuicePatrolPanel extends LitElement {
     const body = document.createElement("div");
     body.innerHTML = `
       ${bodyHtml}
-      <p style="border-left:3px solid var(--error-color, #db4437); padding:4px 12px; margin:16px 0">
-        <strong>Warning:</strong> This will discard all Juice Patrol history for this
-        device and start tracking from scratch. Recorder data is not affected.
-        This action can be undone.</p>
       <div class="jp-dialog-actions">
         <ha-button variant="neutral" class="jp-dialog-cancel">Cancel</ha-button>
-        <ha-button class="jp-dialog-confirm" variant="danger">Yes, battery was replaced</ha-button>
+        <ha-button class="jp-dialog-confirm" ${confirmVariant ? `variant="${confirmVariant}"` : ""}>${confirmLabel || "Confirm"}</ha-button>
       </div>
     `;
     dialog.appendChild(body);
@@ -764,7 +799,11 @@ class JuicePatrolPanel extends LitElement {
         type: "juice_patrol/undo_replacement",
         entity_id: entityId,
       });
-      this._showToast("Replacement undone — history restored");
+      this._showToast("Replacement undone");
+      // Reload chart data to remove the replacement marker
+      if (this._detailEntity === entityId) {
+        setTimeout(() => this._loadChartData(entityId), 500);
+      }
     } catch (e) {
       this._showToast("Failed to undo replacement");
     }
@@ -905,6 +944,7 @@ class JuicePatrolPanel extends LitElement {
     this._activeView = "detail";
     this._chartData = null;
     this._chartLastLevel = null;
+    this._chartRange = "auto";
     const detailUrl = `${this._basePath}/detail/${encodeURIComponent(entityId)}`;
     history.pushState({ jpDetail: entityId }, "", detailUrl);
     this._loadChartData(entityId);
@@ -1260,11 +1300,12 @@ class JuicePatrolPanel extends LitElement {
     const colorLegend = this._resolveColor("--primary-text-color", "#212121");
 
     const readings = chartData.readings;
+    const allReadings = chartData.all_readings || readings;
     const pred = chartData.prediction;
     const t0 = chartData.first_reading_timestamp;
     const threshold = chartData.threshold;
 
-    const observed = readings.map((r) => [r.t * 1000, r.v]);
+    const observed = allReadings.map((r) => [r.t * 1000, r.v]);
 
     const chargePred = chartData.charge_prediction;
     const isCharging =
@@ -1291,11 +1332,11 @@ class JuicePatrolPanel extends LitElement {
       }
     }
 
-    const tMin = observed[0]?.[0] || Date.now();
+    // ── Compute auto tMin/tMax (smart default) ──
+    const autoTMin = observed[0]?.[0] || Date.now();
     const nowMs = Date.now();
-    let tMax;
+    let autoTMax;
     if (isCharging && chargePred && chargePred.segment_start_timestamp != null) {
-      // Estimate charge endpoint for x-axis scoping
       const segStartV = chargePred.segment_start_level;
       const currentLevel = chartData.level;
       const slopeH = hasChargePred
@@ -1307,19 +1348,46 @@ class JuicePatrolPanel extends LitElement {
         const fullT = hasChargePred
           ? chargePred.estimated_full_timestamp * 1000
           : nowMs + ((100 - currentLevel) / slopeH) * 3600000;
-        const pad = (fullT - tMin) * 0.1;
-        tMax = fullT + pad;
+        const pad = (fullT - autoTMin) * 0.1;
+        autoTMax = fullT + pad;
       } else {
-        // Charging but can't compute rate — show observed + 20% padding
-        tMax = nowMs + (nowMs - tMin) * 0.2;
+        autoTMax = nowMs + (nowMs - autoTMin) * 0.2;
       }
     } else if (isCharging) {
-      // Charging but no charge prediction data at all
-      tMax = nowMs + (nowMs - tMin) * 0.2;
+      autoTMax = nowMs + (nowMs - autoTMin) * 0.2;
     } else {
-      tMax = fitted.length
+      autoTMax = fitted.length
         ? fitted[fitted.length - 1][0]
         : observed[observed.length - 1]?.[0] || nowMs;
+    }
+
+    // ── Apply chart range ──
+    const rangeDurations = {
+      "1w": 7 * 86400000,
+      "1m": 30 * 86400000,
+      "3m": 90 * 86400000,
+      "6m": 180 * 86400000,
+      "1y": 365 * 86400000,
+    };
+    let tMin, tMax;
+    const range = this._chartRange || "auto";
+    if (range === "auto") {
+      tMin = autoTMin;
+      tMax = autoTMax;
+    } else if (range === "all") {
+      // Show everything: earliest reading to predicted empty (or furthest prediction)
+      const earliestMs = allReadings.length ? allReadings[0].t * 1000 : autoTMin;
+      const emptyMs = pred.estimated_empty_timestamp
+        ? pred.estimated_empty_timestamp * 1000
+        : null;
+      const latestPred = fitted.length ? fitted[fitted.length - 1][0] : nowMs;
+      tMin = Math.min(earliestMs, autoTMin);
+      tMax = Math.max(latestPred, emptyMs || 0, autoTMax);
+    } else {
+      const dur = rangeDurations[range] || 30 * 86400000;
+      tMin = nowMs - dur;
+      const predEnd = fitted.length ? fitted[fitted.length - 1][0] : nowMs;
+      tMax = Math.max(nowMs + dur, predEnd);
     }
 
     const series = [
@@ -1388,30 +1456,120 @@ class JuicePatrolPanel extends LitElement {
       }
     }
 
+    // Compute threshold crossing point (used by threshold line, discharge line, and marker)
+    // Shared label style for chart markers (threshold crossing, replacements)
+    const _markerLabel = (text, color) => ({
+      show: true,
+      formatter: text,
+      position: "left",
+      fontSize: 10,
+      color,
+      distance: 6,
+      backgroundColor: "rgba(0,0,0,0.6)",
+      borderRadius: 3,
+      padding: [3, 6],
+    });
+
+    let crossingMs = null;
+    if (
+      pred.slope_per_day != null && pred.slope_per_day < 0 &&
+      pred.intercept != null && t0 != null && !isCharging
+    ) {
+      const crossingT = t0 + ((threshold - pred.intercept) / pred.slope_per_day) * 86400;
+      if (crossingT * 1000 > Date.now()) {
+        crossingMs = crossingT * 1000;
+      }
+    }
+
+    // Ensure discharge line extends to both the crossing point and the empty date
+    if (fitted.length > 0 && pred.slope_per_day != null && pred.intercept != null && t0 != null) {
+      const fittedY = (t) => {
+        const days = (t / 1000 - t0) / 86400;
+        return pred.slope_per_day * days + pred.intercept;
+      };
+      const emptyMs = pred.estimated_empty_timestamp
+        ? pred.estimated_empty_timestamp * 1000
+        : null;
+      const lastMs = fitted[fitted.length - 1][0];
+      // Add crossing point if it's between existing points
+      if (crossingMs && crossingMs > lastMs - 1 && crossingMs < (emptyMs || Infinity)) {
+        fitted.push([crossingMs, Math.max(0, Math.min(100, fittedY(crossingMs)))]);
+      }
+      // Extend to predicted empty if not already there
+      if (emptyMs && emptyMs > lastMs + 1) {
+        fitted.push([emptyMs, Math.max(0, fittedY(emptyMs))]);
+      }
+    }
+
+    // Threshold line spans from earliest data to at least the crossing point
+    const thresholdMin = observed[0]?.[0] || tMin;
+    const thresholdMax = Math.max(
+      fitted.length ? fitted[fitted.length - 1][0] : tMax,
+      crossingMs || 0,
+      tMax,
+    );
     series.push({
       name: "Threshold",
       type: "line",
       data: [
-        [tMin, threshold],
-        [tMax, threshold],
+        [thresholdMin, threshold],
+        [thresholdMax, threshold],
       ],
       symbol: "none",
       lineStyle: { width: 1, type: "dotted", color: colorThreshold },
       itemStyle: { color: colorThreshold },
     });
 
-    series.push({
-      name: "Now",
-      type: "line",
-      data: [],
-      markLine: {
-        silent: true,
-        symbol: "none",
-        data: [{ xAxis: Date.now() }],
-        lineStyle: { type: "solid", width: 1, color: colorNowLine },
-        label: { formatter: "Now", fontSize: 11, color: colorNowLine },
-      },
-    });
+    // Threshold crossing vertical marker
+    if (crossingMs) {
+      const crossingLabel = new Date(crossingMs).toLocaleDateString(undefined, {
+        day: "numeric", month: "short", year: "numeric",
+      });
+      series.push({
+        name: "Low battery",
+        type: "line",
+        data: [
+          { value: [crossingMs, 0], symbol: "none", symbolSize: 0 },
+          {
+            value: [crossingMs, threshold],
+            symbol: "diamond",
+            symbolSize: 6,
+            label: _markerLabel(`Low ${crossingLabel}`, colorThreshold),
+          },
+        ],
+        lineStyle: { width: 1, type: "dotted", color: colorThreshold },
+        itemStyle: { color: colorThreshold },
+        tooltip: { show: false },
+      });
+    }
+
+    // Replacement history vertical markers
+    const replacementHistory = chartData.replacement_history || [];
+    if (replacementHistory.length > 0) {
+      const colorReplacement = this._resolveColor("--success-color", "#4caf50");
+      for (let i = 0; i < replacementHistory.length; i++) {
+        const ts = replacementHistory[i] * 1000;
+        const dateLabel = new Date(ts).toLocaleDateString(undefined, {
+          day: "numeric", month: "short",
+        });
+        series.push({
+          name: i === 0 ? "Replaced" : `Replaced ${i + 1}`,
+          type: "line",
+          data: [
+            { value: [ts, 0], symbol: "none", symbolSize: 0 },
+            {
+              value: [ts, 100],
+              symbol: "diamond",
+              symbolSize: 6,
+              label: _markerLabel(`Replaced ${dateLabel}`, colorReplacement),
+            },
+          ],
+          lineStyle: { width: 1, type: "dashed", color: colorReplacement },
+          itemStyle: { color: colorReplacement },
+          tooltip: { show: false },
+        });
+      }
+    }
 
     const isNarrow = container.clientWidth < 500;
 
@@ -1448,7 +1606,7 @@ class JuicePatrolPanel extends LitElement {
             date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
           let h = `<b>${dateStr}</b><br>`;
           for (const p of params) {
-            if (p.seriesName === "Now") continue;
+            if (p.seriesName?.startsWith("Replaced") || p.seriesName === "Low battery") continue;
             const val =
               typeof p.value[1] === "number" ? p.value[1].toFixed(1) + "%" : "\u2014";
             h += `${p.marker} ${p.seriesName}: ${val}<br>`;
@@ -1459,6 +1617,7 @@ class JuicePatrolPanel extends LitElement {
       legend: {
         show: true,
         bottom: 0,
+        data: series.filter((s) => !s.name?.startsWith("Replaced") && s.name !== "Low battery").map((s) => s.name).filter((v, i, a) => a.indexOf(v) === i),
         textStyle: { color: colorLegend, fontSize: isNarrow ? 10 : 11 },
         itemWidth: isNarrow ? 12 : 16,
         itemHeight: isNarrow ? 8 : 10,
@@ -1469,14 +1628,37 @@ class JuicePatrolPanel extends LitElement {
           "Charge prediction": isCharging,
         },
       },
+      dataZoom: [
+        {
+          type: "slider",
+          xAxisIndex: 0,
+          filterMode: "none",
+          startValue: tMin,
+          endValue: tMax,
+          bottom: isNarrow ? 30 : 24,
+          height: isNarrow ? 18 : 22,
+          borderColor: colorGrid,
+          fillerColor: "rgba(100,150,200,0.15)",
+          handleStyle: { color: colorLevel },
+          dataBackground: {
+            lineStyle: { color: colorLevel, opacity: 0.3 },
+            areaStyle: { color: colorLevel, opacity: 0.05 },
+          },
+          textStyle: { color: colorAxis, fontSize: 10 },
+        },
+        {
+          type: "inside",
+          xAxisIndex: 0,
+          filterMode: "none",
+        },
+      ],
       grid: {
         left: isNarrow ? 40 : 50,
         right: isNarrow ? 10 : 20,
         top: 20,
-        bottom: isNarrow ? 60 : 50,
+        bottom: isNarrow ? 82 : 72,
         containLabel: false,
       },
-      series,
     };
 
     const chart = document.createElement("ha-chart-base");
@@ -1486,14 +1668,10 @@ class JuicePatrolPanel extends LitElement {
     container.appendChild(chart);
 
     requestAnimationFrame(() => {
-      if ("chartOptions" in chart) {
-        chart.chartOptions = option;
-      } else if ("data" in chart && "options" in chart) {
-        chart.data = series;
-        chart.options = option;
-      } else {
-        chart.chart_options = option;
-      }
+      // ha-chart-base uses separate data (series) and options properties.
+      // Do NOT include series in options — it would override data via replaceMerge.
+      chart.data = series;
+      chart.options = option;
     });
   }
 
@@ -2315,7 +2493,7 @@ class JuicePatrolPanel extends LitElement {
           <div class="detail-meta-item">
             <div class="detail-meta-label">Data Points</div>
             <div class="detail-meta-value">
-              ${pred.data_points_used ?? (cd?.readings?.length ?? "\u2014")}
+              ${pred.data_points_used ?? (cd?.readings?.length ?? "\u2014")}${cd?.session_count ? html` <span style="color:var(--secondary-text-color); font-size:0.85em">(${cd.session_count} session${cd.session_count !== 1 ? "s" : ""})</span>` : nothing}
             </div>
           </div>
           ${cd?.charge_prediction?.estimated_full_timestamp
@@ -2376,15 +2554,51 @@ class JuicePatrolPanel extends LitElement {
         </div>
       `;
     }
-    return html`<div class="detail-chart" id="jp-chart"></div>`;
+    const ranges = [
+      { key: "auto", label: "Auto" },
+      { key: "1w", label: "1W" },
+      { key: "1m", label: "1M" },
+      { key: "3m", label: "3M" },
+      { key: "6m", label: "6M" },
+      { key: "1y", label: "1Y" },
+      { key: "all", label: "All" },
+    ];
+    return html`
+      <div class="chart-range-bar">
+        ${ranges.map(
+          (r) => html`
+            <button
+              class="range-pill ${this._chartRange === r.key ? "active" : ""}"
+              @click=${() => { this._chartRange = r.key; }}
+            >${r.label}</button>
+          `
+        )}
+      </div>
+      <div class="detail-chart" id="jp-chart"></div>
+    `;
   }
 
   _renderDetailActions() {
     const entityId = this._detailEntity;
     if (!entityId) return nothing;
     const dev = this._getDevice(entityId);
+    const cd = this._chartData;
+    const replacementHistory = cd?.replacement_history || [];
 
     return html`
+      ${replacementHistory.length > 0 ? html`
+        <div class="replacement-history">
+          <div class="detail-meta-label" style="margin-bottom: 4px">Replacement History</div>
+          <div class="replacement-history-list">
+            ${[...replacementHistory].reverse().map((ts) => html`
+              <div class="replacement-history-item">
+                <ha-icon icon="mdi:battery-sync" style="--mdc-icon-size:16px; color:var(--secondary-text-color)"></ha-icon>
+                <span>${this._formatDate(ts * 1000, true)}</span>
+              </div>
+            `)}
+          </div>
+        </div>
+      ` : nothing}
       <div class="detail-actions">
         <ha-button
           @click=${() => {
@@ -3259,21 +3473,64 @@ class JuicePatrolPanel extends LitElement {
         background: color-mix(in srgb, var(--secondary-text-color) 15%, transparent);
         color: var(--secondary-text-color);
       }
+      .chart-range-bar {
+        display: flex;
+        gap: 4px;
+        margin-bottom: 8px;
+        flex-wrap: wrap;
+      }
+      .range-pill {
+        border: 1px solid var(--divider-color, rgba(0,0,0,0.12));
+        background: transparent;
+        color: var(--primary-text-color);
+        padding: 4px 12px;
+        border-radius: 16px;
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.15s ease;
+        font-family: inherit;
+        line-height: 1.4;
+      }
+      .range-pill:hover {
+        background: color-mix(in srgb, var(--primary-color) 10%, transparent);
+        border-color: var(--primary-color);
+      }
+      .range-pill.active {
+        background: var(--primary-color);
+        color: var(--text-primary-color, #fff);
+        border-color: var(--primary-color);
+      }
       .detail-chart {
         background: var(--card-bg);
         border-radius: 12px;
         border: 1px solid var(--border);
         padding: 16px;
         margin-bottom: 16px;
-        min-height: 400px;
+        min-height: 430px;
         display: flex;
         align-items: center;
         justify-content: center;
       }
       .detail-chart ha-chart-base {
         width: 100%;
-        height: 380px;
+        height: 410px;
         display: block;
+      }
+      .replacement-history {
+        padding: 12px 16px;
+      }
+      .replacement-history-list {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .replacement-history-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 0.9em;
+        color: var(--primary-text-color);
       }
       .detail-actions {
         display: flex;
@@ -3344,10 +3601,14 @@ class JuicePatrolPanel extends LitElement {
         }
         .detail-chart {
           padding: 8px;
-          min-height: 320px;
+          min-height: 350px;
         }
         .detail-chart ha-chart-base {
-          height: 300px;
+          height: 330px;
+        }
+        .range-pill {
+          padding: 3px 9px;
+          font-size: 11px;
         }
         .detail-actions {
           flex-wrap: wrap;

@@ -18,7 +18,9 @@ from .predictions import (
     extract_charging_segment,
     predict_charge,
     predict_discharge,
+    predict_discharge_multisession,
 )
+from .sessions import extract_discharge_sessions
 from .utils import detect_step_size
 
 __all__ = [
@@ -33,6 +35,8 @@ __all__ = [
     "compute_reliability",
     "detect_step_size",
     "extract_charging_segment",
+    "extract_discharge_sessions",
     "predict_charge",
     "predict_discharge",
+    "predict_discharge_multisession",
 ]

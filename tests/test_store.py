@@ -69,7 +69,7 @@ class TestDeviceData:
 
     def test_to_dict(self):
         d = DeviceData(
-            last_replaced=100.0,
+            replacement_history=[100.0],
             ignored=False,
             custom_threshold=25,
             battery_type="AA",
@@ -78,10 +78,12 @@ class TestDeviceData:
             device_id="dev1",
         )
         result = d.to_dict()
-        assert result["last_replaced"] == 100.0
+        assert result["replacement_history"] == [100.0]
         assert result["custom_threshold"] == 25
         assert result["battery_type"] == "AA"
         assert result["device_id"] == "dev1"
+        # last_replaced property still works
+        assert d.last_replaced == 100.0
 
     def test_to_dict_omits_none_optionals(self):
         d = DeviceData(source_entity="sensor.test")
@@ -93,7 +95,7 @@ class TestDeviceData:
     def test_roundtrip(self):
         """from_dict(to_dict(x)) should preserve data."""
         original = DeviceData(
-            last_replaced=500.0,
+            replacement_history=[500.0],
             ignored=True,
             custom_threshold=15,
             battery_type="AAA",

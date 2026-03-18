@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass
 from enum import StrEnum
 
+from .sessions import extract_discharge_sessions
 from .utils import detect_step_size as _detect_step_size, median as _median
 
 
@@ -52,10 +53,13 @@ class PredictionResult:
     data_points_used: int
     status: PredictionStatus
     reliability: int | None = None  # 0-100 score
+    session_count: int | None = None  # number of discharge sessions (multi-session only)
 
 
 def _no_prediction(
-    status: PredictionStatus, data_points: int
+    status: PredictionStatus,
+    data_points: int,
+    session_count: int | None = None,
 ) -> PredictionResult:
     """Create a PredictionResult for early-exit cases with no usable prediction."""
     return PredictionResult(
@@ -70,6 +74,7 @@ def _no_prediction(
         data_points_used=data_points,
         status=status,
         reliability=None,
+        session_count=session_count,
     )
 
 
@@ -259,6 +264,157 @@ def predict_discharge(
             len(cleaned), timespan_hours, r_squared, conf,
             days_remaining=days_remaining,
         ),
+    )
+
+
+def predict_discharge_multisession(
+    all_readings: list[dict[str, float]],
+    current_level: float,
+    target_level: float = 0.0,
+    min_sessions: int = 1,
+) -> PredictionResult:
+    """Predict discharge for rechargeable devices using multi-session analysis.
+
+    Instead of fitting a single regression line to sawtooth data, this
+    extracts individual discharge sessions and computes the median slope
+    across all sessions.
+
+    Args:
+        all_readings: Full reading history (sawtooth), sorted by time.
+        current_level: Current battery level (%).
+        target_level: Target level to predict reaching (default 0).
+        min_sessions: Minimum number of discharge sessions required.
+
+    Returns:
+        Standard PredictionResult so all downstream consumers work unchanged.
+    """
+    sessions = extract_discharge_sessions(all_readings)
+    total_points = sum(len(s) for s in sessions)
+
+    if len(sessions) < min_sessions:
+        return _no_prediction(
+            PredictionStatus.INSUFFICIENT_DATA, total_points,
+            session_count=len(sessions),
+        )
+
+    # Compute Theil-Sen slope for each session (cache r² for single-session path)
+    session_results: list[tuple[float, float]] = []  # (slope, r_squared)
+    for session in sessions:
+        t0 = session[0]["t"]
+        x = [(r["t"] - t0) / 86400.0 for r in session]
+        y = [r["v"] for r in session]
+        slope, _, r_sq = _theil_sen(x, y)
+        if slope != 0:
+            session_results.append((slope, r_sq))
+
+    session_slopes = [s for s, _ in session_results]
+
+    if not session_slopes:
+        return _no_prediction(
+            PredictionStatus.FLAT, total_points,
+            session_count=len(sessions),
+        )
+
+    median_slope = _median(session_slopes)
+    slope_per_hour = round(median_slope / 24.0, 4)
+
+    # Determine status from slope
+    if median_slope > 0.01:
+        status = PredictionStatus.CHARGING
+    elif abs(median_slope) <= 0.02:
+        status = PredictionStatus.FLAT
+    else:
+        status = PredictionStatus.NORMAL
+
+    # Calibrate intercept to current level at now
+    now = time.time()
+    # intercept = current_level - slope * 0  (at t=now, days_offset=0)
+    # For chart formula: y = slope * ((t - t0) / 86400) + intercept
+    # We set t0 = now, so intercept = current_level
+    intercept = current_level
+
+    # Compute R² across all session points (how consistent the slopes are)
+    # Use coefficient of variation of slopes as a proxy
+    if len(session_slopes) >= 2:
+        mean_slope = sum(session_slopes) / len(session_slopes)
+        if mean_slope != 0:
+            variance = sum((s - mean_slope) ** 2 for s in session_slopes) / len(session_slopes)
+            cv = (variance ** 0.5) / abs(mean_slope)
+            # Map CV to R²-like score: CV=0 → R²=1.0, CV=1 → R²=0.0
+            r_squared = max(0.0, min(1.0, 1.0 - cv))
+        else:
+            r_squared = 0.0
+    else:
+        # Single session — reuse the cached R² from the loop
+        r_squared = session_results[0][1] if session_results else 0.0
+
+    # Compute total timespan across all readings for confidence
+    timespan_hours = (all_readings[-1]["t"] - all_readings[0]["t"]) / 3600
+
+    if status == PredictionStatus.CHARGING or status == PredictionStatus.FLAT:
+        conf = _classify_confidence(r_squared, timespan_hours)
+        return PredictionResult(
+            slope_per_day=round(median_slope, 4),
+            slope_per_hour=slope_per_hour,
+            intercept=round(intercept, 2),
+            r_squared=round(r_squared, 4),
+            confidence=conf,
+            estimated_empty_timestamp=None,
+            estimated_days_remaining=None,
+            estimated_hours_remaining=None,
+            data_points_used=total_points,
+            status=status,
+            reliability=compute_reliability(
+                total_points, timespan_hours, r_squared, conf,
+                days_remaining=None,
+            ),
+            session_count=len(sessions),
+        )
+
+    # Predict time to target
+    if median_slope >= 0:
+        # Not draining — can't predict empty
+        conf = _classify_confidence(r_squared, timespan_hours)
+        return PredictionResult(
+            slope_per_day=round(median_slope, 4),
+            slope_per_hour=slope_per_hour,
+            intercept=round(intercept, 2),
+            r_squared=round(r_squared, 4),
+            confidence=conf,
+            estimated_empty_timestamp=None,
+            estimated_days_remaining=None,
+            estimated_hours_remaining=None,
+            data_points_used=total_points,
+            status=PredictionStatus.FLAT,
+            reliability=None,
+            session_count=len(sessions),
+        )
+
+    # slope is negative (discharging): days = (target - current) / slope
+    days_remaining = (target_level - current_level) / median_slope
+    if days_remaining < 0:
+        days_remaining = 0.0
+
+    hours_remaining = round(days_remaining * 24.0, 1)
+    estimated_empty_timestamp = now + (days_remaining * 86400.0)
+    conf = _classify_confidence(r_squared, timespan_hours)
+
+    return PredictionResult(
+        slope_per_day=round(median_slope, 4),
+        slope_per_hour=slope_per_hour,
+        intercept=round(intercept, 2),
+        r_squared=round(r_squared, 4),
+        confidence=conf,
+        estimated_empty_timestamp=round(estimated_empty_timestamp, 0),
+        estimated_days_remaining=round(days_remaining, 1),
+        estimated_hours_remaining=hours_remaining,
+        data_points_used=total_points,
+        status=PredictionStatus.NORMAL,
+        reliability=compute_reliability(
+            total_points, timespan_hours, r_squared, conf,
+            days_remaining=days_remaining,
+        ),
+        session_count=len(sessions),
     )
 
 
