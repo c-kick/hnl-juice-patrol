@@ -331,6 +331,12 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._fired_low.discard(entity_id)
             self._fired_predicted_low.discard(entity_id)
 
+        # Only rebuild when the level actually changed (or replacement detected).
+        # HA fires state_changed on attribute changes too — without this gate,
+        # every attribute update triggers a full prediction recalculation.
+        if level == old_level and not replaced:
+            return
+
         # Schedule async rebuild for this entity
         self.hass.async_create_task(
             self._async_rebuild_entity(entity_id, battery)
@@ -339,12 +345,71 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_rebuild_entity(
         self, entity_id: str, battery: DiscoveredBattery
     ) -> None:
-        """Rebuild data for a single entity and update coordinator data."""
+        """Rebuild data for a single entity and update coordinator data.
+
+        Skips the coordinator update (which pushes to entities and UI) when
+        the new data is not meaningfully different from the previous data.
+        This prevents erratic sensors that jump ±1-2% every few seconds from
+        triggering constant UI redraws with near-identical predictions.
+        """
         entity_data = await self._async_build_entity_data(entity_id, battery)
+        prev = self.data.get(entity_id) if self.data else None
+
+        if prev is not None and not self._is_significant_change(prev, entity_data):
+            return
+
         data = dict(self.data) if self.data else {}
         data[entity_id] = entity_data
         self._fire_events_for_entity(entity_id, entity_data)
         self.async_set_updated_data(data)
+
+    @staticmethod
+    def _is_significant_change(
+        old: dict[str, Any], new: dict[str, Any]
+    ) -> bool:
+        """Return True if new entity data differs meaningfully from old.
+
+        Checks boolean/categorical flags exactly, and numeric predictions
+        with a ~10% relative tolerance.
+        """
+        # Boolean / categorical flags — any change is significant
+        for key in ("is_low", "is_stale", "charging_state", "replacement_pending"):
+            if old.get(key) != new.get(key):
+                return True
+
+        # Level change > 1% absolute — significant
+        old_level = old.get("level")
+        new_level = new.get("level")
+        if old_level is None or new_level is None:
+            if old_level != new_level:
+                return True
+        elif abs(new_level - old_level) > 1:
+            return True
+
+        # Prediction estimate — 10% relative tolerance
+        old_pred = old.get("prediction")
+        new_pred = new.get("prediction")
+        old_days = old_pred.estimated_days_remaining if old_pred else None
+        new_days = new_pred.estimated_days_remaining if new_pred else None
+
+        if old_days is None or new_days is None:
+            # None ↔ value transition is always significant
+            if old_days != new_days:
+                return True
+        elif old_days == 0:
+            # Any change from zero is significant
+            if new_days != 0:
+                return True
+        elif abs(new_days - old_days) / abs(old_days) > 0.1:
+            return True
+
+        # Prediction status change (e.g. normal → charging)
+        old_status = old_pred.status if old_pred else None
+        new_status = new_pred.status if new_pred else None
+        if old_status != new_status:
+            return True
+
+        return False
 
     async def _async_build_entity_data(
         self, entity_id: str, battery: DiscoveredBattery
@@ -419,7 +484,6 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 min_readings=MIN_READINGS_FOR_PREDICTION,
                 min_timespan_hours=min_span,
             )
-
         # Sanity-check predictions against actual current level
         if prediction.estimated_days_remaining is not None:
             # Model says "already past target" (days=0) but actual level

@@ -34,13 +34,6 @@ class DischargeAnomaly(StrEnum):
 # Replacement detection — mirrors const.REPLACEMENT_LOW_MULTIPLIER (engine/ cannot import HA deps)
 _REPLACEMENT_LOW_MULTIPLIER = 2
 
-# Battery types known to be rechargeable
-RECHARGEABLE_TYPES = frozenset({
-    "li-ion", "lipo", "li-po", "lithium-ion", "lithium-polymer",
-    "nimh", "ni-mh", "nicd", "ni-cd",
-    "built-in", "internal", "rechargeable",
-})
-
 
 @dataclass
 class AnalysisResult:
@@ -449,11 +442,8 @@ def _detect_rechargeable(
     if is_rechargeable_override is not None:
         return is_rechargeable_override, "manual" if is_rechargeable_override else None
 
-    # Battery type indicates rechargeable
-    if battery_type and battery_type.lower().strip() in RECHARGEABLE_TYPES:
-        return True, f"battery type: {battery_type}"
-
-    # battery_state attribute indicates a rechargeable device
+    # battery_state attribute indicates a rechargeable device — this is a
+    # direct signal from the device itself, not a heuristic.
     # Values vary by integration: "Charging", "Not Charging", "Full",
     # "not_charging", "discharging", etc.
     if battery_state:
@@ -462,20 +452,5 @@ def _detect_rechargeable(
             "charging", "not_charging", "full", "discharging",
         ):
             return True, f"battery_state: {battery_state}"
-
-    # Behavioral: detect gradual level increases (not a jump/replacement)
-    if len(readings) >= 10:
-        # Look for multiple gradual increases over the last 20 readings
-        window = readings[-20:]
-        gradual_increases = 0
-        for i in range(1, len(window)):
-            diff = window[i]["v"] - window[i - 1]["v"]
-            time_hours = (window[i]["t"] - window[i - 1]["t"]) / 3600
-            # Gradual increase: 0.5-15% over at least 30 min
-            if 0.5 <= diff <= 15 and time_hours >= 0.5:
-                gradual_increases += 1
-
-        if gradual_increases >= 3:
-            return True, "gradual charging detected"
 
     return False, None

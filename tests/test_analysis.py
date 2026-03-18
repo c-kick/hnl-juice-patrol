@@ -144,27 +144,15 @@ class TestRechargeableDetection:
         )
         assert result.is_rechargeable is False
 
-    def test_battery_type_lithium(self):
-        result = analyze_battery(
-            _readings([90, 88, 86, 84, 82]),
-            battery_type="Li-ion",
-        )
-        assert result.is_rechargeable is True
-        assert "battery type" in result.rechargeable_reason
-
-    def test_battery_type_nimh(self):
-        result = analyze_battery(
-            _readings([90, 88, 86, 84, 82]),
-            battery_type="NiMH",
-        )
-        assert result.is_rechargeable is True
-
-    def test_battery_type_cr2032_not_rechargeable(self):
-        result = analyze_battery(
-            _readings([90, 88, 86, 84, 82]),
-            battery_type="CR2032",
-        )
-        assert result.is_rechargeable is False
+    def test_battery_type_not_rechargeable(self):
+        """Battery type alone no longer triggers rechargeable — only manual
+        override and battery_state do."""
+        for btype in ("Li-ion", "NiMH", "CR2032"):
+            result = analyze_battery(
+                _readings([90, 88, 86, 84, 82]),
+                battery_type=btype,
+            )
+            assert result.is_rechargeable is False
 
     def test_battery_state_charging(self):
         result = analyze_battery(
@@ -181,16 +169,16 @@ class TestRechargeableDetection:
         )
         assert result.is_rechargeable is True
 
-    def test_behavioral_detection(self):
-        """Gradual increases in readings indicate rechargeable."""
+    def test_gradual_increases_not_rechargeable(self):
+        """Gradual increases alone no longer trigger rechargeable —
+        removed behavioral heuristic to prevent false positives from
+        staircase sensors bouncing between discrete levels."""
         now = time.time()
         readings = []
         for i in range(15):
-            # Gradual increase: +2% every 2 hours
             readings.append({"t": now - (14 - i) * 7200, "v": 50 + i * 2})
         result = analyze_battery(readings)
-        assert result.is_rechargeable is True
-        assert "gradual charging" in result.rechargeable_reason
+        assert result.is_rechargeable is False
 
     def test_no_rechargeable_indicators(self):
         result = analyze_battery(

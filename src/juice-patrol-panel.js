@@ -21,6 +21,7 @@ class JuicePatrolPanel extends LitElement {
       _detailEntity: { state: true },
       _chartData: { state: true },
       _chartLoading: { state: true },
+      _chartStale: { state: true },
       _shoppingData: { state: true },
       _shoppingLoading: { state: true },
       _refreshing: { state: true },
@@ -55,6 +56,7 @@ class JuicePatrolPanel extends LitElement {
     this._detailEntity = null;
     this._chartData = null;
     this._chartLoading = false;
+    this._chartStale = false;
     this._chartLastLevel = null;
     this._flashGeneration = 0;
     this._ignoredEntities = null;
@@ -62,7 +64,6 @@ class JuicePatrolPanel extends LitElement {
     this._filters = { status: { value: ["active", "low"] } };
     this._flashCleanupTimer = null;
     this._refreshTimer = null;
-    this._chartDebounce = null;
     this._entityMap = new Map();
   }
 
@@ -133,7 +134,7 @@ class JuicePatrolPanel extends LitElement {
 
   disconnectedCallback() {
     super.disconnectedCallback();
-    for (const t of ["_flashCleanupTimer", "_refreshTimer", "_chartDebounce"]) {
+    for (const t of ["_flashCleanupTimer", "_refreshTimer"]) {
       if (this[t]) { clearTimeout(this[t]); this[t] = null; }
     }
     this._refreshing = false;
@@ -250,15 +251,13 @@ class JuicePatrolPanel extends LitElement {
       this._loadIgnored();
     }
 
-    // Auto-refresh chart data when entity level changes in detail view.
-    // Use a longer debounce (5s) to avoid cascading reloads from background
-    // coordinator refreshes that update entity sensors.
+    // When in detail view and the entity level changes from a background
+    // coordinator update, show a stale notice instead of redrawing the chart
+    // — avoids annoying mid-view redraws from hourly scans or erratic sensors.
     if (this._activeView === "detail" && this._detailEntity && !this._chartLoading) {
       const dev = this._getDevice(this._detailEntity);
       if (dev && dev.level !== this._chartLastLevel) {
-        this._chartLastLevel = dev.level;
-        clearTimeout(this._chartDebounce);
-        this._chartDebounce = setTimeout(() => this._loadChartData(this._detailEntity), 5000);
+        this._chartStale = true;
       }
     }
   }
@@ -956,6 +955,7 @@ class JuicePatrolPanel extends LitElement {
       });
       this._chartLastLevel = data?.level ?? null;
       this._chartData = data;
+      this._chartStale = false;
     } catch (e) {
       console.error("Juice Patrol: failed to load chart data", e);
       this._showToast(this._wsErrorMessage(e, "chart view"));
@@ -983,6 +983,7 @@ class JuicePatrolPanel extends LitElement {
     this._detailEntity = entityId;
     this._activeView = "detail";
     this._chartData = null;
+    this._chartStale = false;
     this._chartLastLevel = null;
     this._chartRange = "auto";
     const detailUrl = `${this._basePath}/detail/${encodeURIComponent(entityId)}`;
@@ -1361,6 +1362,7 @@ class JuicePatrolPanel extends LitElement {
 
     // ── Apply chart range ──
     const rangeDurations = {
+      "1d": 1 * 86400000,
       "1w": 7 * 86400000,
       "1m": 30 * 86400000,
       "3m": 90 * 86400000,
@@ -2494,6 +2496,7 @@ class JuicePatrolPanel extends LitElement {
     }
     const ranges = [
       { key: "auto", label: "Auto" },
+      { key: "1d", label: "1D" },
       { key: "1w", label: "1W" },
       { key: "1m", label: "1M" },
       { key: "3m", label: "3M" },
@@ -2512,6 +2515,12 @@ class JuicePatrolPanel extends LitElement {
           `
         )}
       </div>
+      ${this._chartStale
+        ? html`<div class="chart-stale-notice" @click=${() => this._loadChartData(this._detailEntity)}>
+            <ha-icon icon="mdi:refresh" style="--mdc-icon-size:16px"></ha-icon>
+            Data updated \u2014 tap to refresh
+          </div>`
+        : nothing}
       <div class="detail-chart" id="jp-chart"></div>
     `;
   }
@@ -3004,6 +3013,22 @@ class JuicePatrolPanel extends LitElement {
         background: var(--primary-color);
         color: var(--text-primary-color, #fff);
         border-color: var(--primary-color);
+      }
+      .chart-stale-notice {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 12px;
+        margin-bottom: 8px;
+        border-radius: 8px;
+        background: color-mix(in srgb, var(--primary-color) 10%, transparent);
+        color: var(--primary-color);
+        font-size: 13px;
+        cursor: pointer;
+        transition: background 0.15s ease;
+      }
+      .chart-stale-notice:hover {
+        background: color-mix(in srgb, var(--primary-color) 18%, transparent);
       }
       .detail-chart {
         background: var(--card-bg);

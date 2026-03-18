@@ -124,6 +124,13 @@ def predict_discharge(
     if value_range <= step_size:
         return _no_prediction(PredictionStatus.INSUFFICIENT_RANGE, len(readings))
 
+    # Compress staircase data: devices that report in discrete steps (e.g.
+    # 100% for months, then 65%, then 61%) produce thousands of flat readings
+    # that drown out the actual transitions in Theil-Sen's median slope.
+    # Compress each plateau to its boundary readings (first + last) so the
+    # transitions carry proportional weight.
+    readings = _compress_plateaus(readings, unique_values)
+
     # Convert timestamps to days relative to the first reading
     t0 = readings[0]["t"]
     x = [(r["t"] - t0) / 86400.0 for r in readings]
@@ -625,6 +632,55 @@ def _reject_by_residual(
         [f[1] for f in filtered],
         [f[2] for f in filtered],
     )
+
+
+def _compress_plateaus(
+    readings: list[dict[str, float]],
+    unique_values: set[float],
+    max_unique_ratio: float = 0.05,
+) -> list[dict[str, float]]:
+    """Compress staircase discharge data by collapsing plateaus.
+
+    Devices with coarse reporting (e.g. Zigbee door sensors) discharge in
+    discrete jumps: 100% for months, then 65% for weeks, then 61%.  This
+    produces thousands of identical readings per plateau.  Theil-Sen computes
+    the median of all pairwise slopes — when >95% of pairs are within a
+    single flat plateau, the median slope is ≈ 0, masking a real 39% drop.
+
+    Fix: for staircase data (few unique values relative to reading count),
+    compress each plateau to its first and last reading.  The timing of
+    transitions is preserved, and they now dominate the slope calculation.
+
+    Args:
+        readings: Subsampled readings (sorted by time).
+        unique_values: Set of unique rounded values (already computed).
+        max_unique_ratio: Trigger compression when unique/total ≤ this ratio.
+
+    Returns:
+        Compressed readings, or original if not a staircase pattern.
+    """
+    if len(readings) < 20:
+        return readings
+
+    # Only compress if the data looks like a staircase: very few unique
+    # values compared to the number of readings.
+    if len(unique_values) > max(3, len(readings) * max_unique_ratio):
+        return readings
+
+    compressed: list[dict[str, float]] = []
+    i = 0
+    while i < len(readings):
+        val = round(readings[i]["v"], 1)
+        j = i + 1
+        while j < len(readings) and round(readings[j]["v"], 1) == val:
+            j += 1
+        # Keep first and last of each plateau
+        compressed.append(readings[i])
+        if j - 1 > i:
+            compressed.append(readings[j - 1])
+        i = j
+
+    return compressed
 
 
 def _subsample_readings(
