@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from homeassistant.core import HomeAssistant
 from homeassistant.util.dt import utcnow
 
-from ..const import HISTORY_CACHE_TTL, HISTORY_DEFAULT_DAYS
+from ..const import HISTORY_CACHE_TTL, HISTORY_DEFAULT_DAYS, MAX_HISTORY_CACHE_ENTRIES
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -50,7 +50,26 @@ class HistoryCache:
         return readings
 
     def set(self, entity_id: str, readings: list[dict[str, float]]) -> None:
-        """Store readings in cache with TTL."""
+        """Store readings in cache with TTL.
+
+        Evicts expired entries and caps total size to prevent unbounded growth.
+        """
+        # Evict expired entries before adding (background cleanup)
+        if len(self._cache) >= MAX_HISTORY_CACHE_ENTRIES:
+            now = time.time()
+            expired = [
+                k for k, (expire_ts, _) in self._cache.items()
+                if now > expire_ts
+            ]
+            for k in expired:
+                del self._cache[k]
+
+        # If still over limit after eviction, drop oldest entries
+        if len(self._cache) >= MAX_HISTORY_CACHE_ENTRIES:
+            oldest = sorted(self._cache.items(), key=lambda x: x[1][0])
+            for k, _ in oldest[: len(self._cache) - MAX_HISTORY_CACHE_ENTRIES + 1]:
+                del self._cache[k]
+
         self._cache[entity_id] = (time.time() + HISTORY_CACHE_TTL, readings)
 
 

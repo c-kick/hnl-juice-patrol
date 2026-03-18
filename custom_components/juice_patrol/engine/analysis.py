@@ -167,8 +167,9 @@ def _analyze_stability(
 
     values = [r["v"] for r in recent]
     mean = sum(values) / len(values)
-    if mean == 0:
-        return Stability.STABLE, 0.0, 0.0
+    if mean <= 1.0:
+        # Battery is dead or near-dead — not meaningful to analyze variance
+        return Stability.STABLE, 0.0, round(mean, 1)
 
     variance = sum((v - mean) ** 2 for v in values) / len(values)
     stddev = math.sqrt(variance)

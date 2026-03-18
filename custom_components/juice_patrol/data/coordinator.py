@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Callable
@@ -121,6 +122,14 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._fired_predicted_low: set[str] = set()
         self._fired_stale: set[str] = set()
         self._first_full_build = True
+        # Debounce: pending rebuild tasks per entity (cancel-on-supersede)
+        self._pending_rebuilds: dict[str, asyncio.Task] = {}
+        # Lock to prevent concurrent full rebuilds
+        self._rebuild_lock = asyncio.Lock()
+        # Chart data cache: {entity_id: (expire_ts, chart_data)}
+        self._chart_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        _CHART_CACHE_TTL = 30  # seconds
+        self._chart_cache_ttl = _CHART_CACHE_TTL
         # Callback for dynamic entity creation
         self._new_device_callbacks: list[
             Callable[[list[str]], None]
@@ -337,10 +346,16 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if level == old_level and not replaced:
             return
 
+        # Cancel any pending rebuild for this entity (debounce rapid updates)
+        existing_task = self._pending_rebuilds.pop(entity_id, None)
+        if existing_task and not existing_task.done():
+            existing_task.cancel()
+
         # Schedule async rebuild for this entity
-        self.hass.async_create_task(
+        task = self.hass.async_create_task(
             self._async_rebuild_entity(entity_id, battery)
         )
+        self._pending_rebuilds[entity_id] = task
 
     async def _async_rebuild_entity(
         self, entity_id: str, battery: DiscoveredBattery
@@ -357,6 +372,9 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         if prev is not None and not self._is_significant_change(prev, entity_data):
             return
+
+        # Invalidate chart cache for this entity on significant change
+        self._chart_cache.pop(entity_id, None)
 
         data = dict(self.data) if self.data else {}
         data[entity_id] = entity_data
@@ -484,16 +502,21 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 min_readings=MIN_READINGS_FOR_PREDICTION,
                 min_timespan_hours=min_span,
             )
-        # Sanity-check predictions against actual current level
+        # Sanity-check predictions against actual current level.
+        # Copy before mutating to avoid corrupting shared state.
         if prediction.estimated_days_remaining is not None:
             # Model says "already past target" (days=0) but actual level
             # is still well above 0% — model has diverged from reality.
             if prediction.estimated_days_remaining == 0.0 and (
                 current is not None and current > 5
             ):
-                prediction.estimated_days_remaining = None
-                prediction.estimated_hours_remaining = None
-                prediction.estimated_empty_timestamp = None
+                from dataclasses import replace as _replace
+                prediction = _replace(
+                    prediction,
+                    estimated_days_remaining=None,
+                    estimated_hours_remaining=None,
+                    estimated_empty_timestamp=None,
+                )
 
         # Auto-detect battery type if not manually set
         manual_type = dev.battery_type if dev else None
@@ -508,14 +531,19 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # If the device reports it's actively charging, override prediction status.
         # The mathematical slope may still be negative (e.g. recent charge didn't
         # exceed the 20% segment-split threshold), but the device knows best.
+        # Copy before mutating to avoid corrupting shared state.
         if (
             is_charging
             and prediction.status == PredictionStatus.NORMAL
         ):
-            prediction.status = PredictionStatus.CHARGING
-            prediction.estimated_empty_timestamp = None
-            prediction.estimated_days_remaining = None
-            prediction.estimated_hours_remaining = None
+            from dataclasses import replace as _replace
+            prediction = _replace(
+                prediction,
+                status=PredictionStatus.CHARGING,
+                estimated_empty_timestamp=None,
+                estimated_days_remaining=None,
+                estimated_hours_remaining=None,
+            )
 
         analysis = analyze_battery(
             readings,
@@ -532,7 +560,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.store.mark_dirty()
 
         level = battery.current_level
-        is_low = level is not None and level <= threshold
+        is_low = level is not None and level < threshold
 
         now = time.time()
         is_stale = False
@@ -624,25 +652,35 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Queries are run sequentially to avoid overwhelming the recorder's
         SQLite database with dozens of concurrent reads.
         """
-        data: dict[str, Any] = {}
-        for entity_id, battery in self.discovered.items():
-            try:
-                data[entity_id] = await self._async_build_entity_data(
-                    entity_id, battery
-                )
-            except Exception:
-                _LOGGER.warning(
-                    "Failed to build data for %s", entity_id, exc_info=True
-                )
-                continue
+        async with self._rebuild_lock:
+            data: dict[str, Any] = {}
+            failed_count = 0
+            for entity_id, battery in self.discovered.items():
+                try:
+                    data[entity_id] = await self._async_build_entity_data(
+                        entity_id, battery
+                    )
+                except Exception:
+                    _LOGGER.warning(
+                        "Failed to build data for %s", entity_id, exc_info=True
+                    )
+                    failed_count += 1
+                    continue
 
-        # On first full build, pre-populate dedup sets (#5)
-        if self._first_full_build:
-            self._first_full_build = False
-            self._pre_populate_event_dedup(data)
-        else:
-            self._fire_events(data)
-        return data
+            if failed_count:
+                _LOGGER.warning(
+                    "Partial data build: %d/%d entities failed",
+                    failed_count,
+                    len(self.discovered),
+                )
+
+            # On first full build, pre-populate dedup sets (#5)
+            if self._first_full_build:
+                self._first_full_build = False
+                self._pre_populate_event_dedup(data)
+            else:
+                self._fire_events(data)
+            return data
 
     async def async_manual_refresh(self) -> None:
         """Force refresh with cache invalidation."""
@@ -808,7 +846,18 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return readings + prediction metadata for a single entity's chart.
 
         Returns None if the entity is not discovered.
+        Uses a short-lived cache to prevent hammering the recorder on
+        rapid frontend re-renders.
         """
+        # Check chart cache first
+        cached = self._chart_cache.get(entity_id)
+        if cached is not None:
+            expire_ts, chart_data = cached
+            if time.time() < expire_ts:
+                return chart_data
+            else:
+                del self._chart_cache[entity_id]
+
         battery = self.discovered.get(entity_id)
         if battery is None:
             return None
@@ -907,7 +956,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 denied_replacements=dev.denied_replacements if dev else [],
             )
 
-        return {
+        result = {
             "readings": readings,
             "all_readings": all_readings,
             "prediction": pred_dict,
@@ -925,9 +974,24 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "session_count": entity_data.get("session_count"),
         }
 
+        # Cache the result for short-lived reuse
+        self._chart_cache[entity_id] = (
+            time.time() + self._chart_cache_ttl,
+            result,
+        )
+
+        return result
+
     async def async_shutdown(self) -> None:
         """Shut down the coordinator, save store, remove listeners."""
         if self._unsub_state_listener:
             self._unsub_state_listener()
             self._unsub_state_listener = None
+        # Cancel any pending rebuild tasks
+        for task in self._pending_rebuilds.values():
+            if not task.done():
+                task.cancel()
+        self._pending_rebuilds.clear()
+        # Clear callbacks to prevent leaks on reload
+        self._new_device_callbacks.clear()
         await self.store.async_save()
