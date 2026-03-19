@@ -62,6 +62,48 @@ _LOGGER = logging.getLogger(__name__)
 _WS_REFRESH_MIN_INTERVAL = 5.0
 
 
+def _historical_charge_rate(
+    readings: list[dict[str, float]],
+) -> float | None:
+    """Compute median historical charge rate (%/hour) from trough→peak cycles.
+
+    Finds local minima and maxima in the readings, pairs consecutive min→max
+    as charge cycles, and returns the median rate. Returns None if fewer than
+    2 charge cycles found.
+    """
+    if len(readings) < 3:
+        return None
+
+    extrema: list[tuple[str, float, float]] = []  # (type, timestamp, value)
+    direction = 0  # 0=unknown, 1=rising, -1=falling
+    for i in range(1, len(readings)):
+        diff = readings[i]["v"] - readings[i - 1]["v"]
+        if diff > 1:
+            if direction == -1:
+                extrema.append(("min", readings[i - 1]["t"], readings[i - 1]["v"]))
+            direction = 1
+        elif diff < -1:
+            if direction == 1:
+                extrema.append(("max", readings[i - 1]["t"], readings[i - 1]["v"]))
+            direction = -1
+
+    # Pair min→max to get charge rates
+    rates: list[float] = []
+    for i in range(len(extrema) - 1):
+        if extrema[i][0] == "min" and extrema[i + 1][0] == "max":
+            rise = extrema[i + 1][2] - extrema[i][2]
+            hours = (extrema[i + 1][1] - extrema[i][1]) / 3600
+            if rise >= 10 and hours > 0:
+                rates.append(rise / hours)
+
+    if len(rates) < 2:
+        return None
+
+    rates.sort()
+    mid = len(rates) // 2
+    return rates[mid] if len(rates) % 2 else (rates[mid - 1] + rates[mid]) / 2
+
+
 def _extract_current_segment(
     readings: list[dict[str, float]],
 ) -> list[dict[str, float]]:
@@ -453,14 +495,24 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             else self.low_threshold
         )
 
-        # Determine if this device is rechargeable (check store override first,
-        # then behavioral detection from previous data)
+        # Determine if this device is rechargeable.
+        # User's manual label (True/False) is the single source of truth.
+        # Only auto-detect when the user hasn't set a preference yet (None).
         is_rechargeable_hint = False
-        if dev and dev.is_rechargeable is True:
-            is_rechargeable_hint = True
-        elif self.data is not None:
-            prev_data = self.data.get(entity_id, {})
-            is_rechargeable_hint = prev_data.get("is_rechargeable", False)
+        if dev and dev.is_rechargeable is not None:
+            # User has explicitly set this — trust it
+            is_rechargeable_hint = dev.is_rechargeable
+        else:
+            # No user preference: check battery_state for initial guess
+            battery_state_init = self._get_battery_state(entity_id, battery.device_id)
+            if battery_state_init:
+                normalized = battery_state_init.lower().replace(" ", "_")
+                if normalized in ("charging", "not_charging", "full", "discharging"):
+                    is_rechargeable_hint = True
+            # Also carry forward from previous coordinator data if available
+            if not is_rechargeable_hint and self.data is not None:
+                prev_data = self.data.get(entity_id, {})
+                is_rechargeable_hint = prev_data.get("is_rechargeable", False)
 
         # For cyclic (rechargeable) devices, extract only the current
         # discharge segment for prediction. Full history is still used
@@ -498,6 +550,24 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 current_level=current if current is not None else 0.0,
                 target_level=0.0,
             )
+            # Suppress discharge prediction when the device is idle (not actively
+            # discharging). Check the last few readings: if the level is stable or
+            # rising, the device is on its charger or in standby — projecting a
+            # discharge line would be misleading.
+            if prediction.status == PredictionStatus.NORMAL:
+                tail = all_readings[-5:] if len(all_readings) >= 5 else all_readings[-2:]
+                if len(tail) >= 2:
+                    tail_drop = tail[0]["v"] - tail[-1]["v"]
+                    # Need at least 2% drop in the tail to consider it discharging
+                    if tail_drop < 2.0:
+                        from dataclasses import replace as _replace
+                        prediction = _replace(
+                            prediction,
+                            status=PredictionStatus.IDLE,
+                            estimated_empty_timestamp=None,
+                            estimated_days_remaining=None,
+                            estimated_hours_remaining=None,
+                        )
         else:
             prediction = predict_discharge(
                 readings,
@@ -536,11 +606,11 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # The mathematical slope may still be negative (e.g. recent charge didn't
         # exceed the 20% segment-split threshold), but the device knows best.
         # Copy before mutating to avoid corrupting shared state.
+        from dataclasses import replace as _replace
         if (
             is_charging
             and prediction.status == PredictionStatus.NORMAL
         ):
-            from dataclasses import replace as _replace
             prediction = _replace(
                 prediction,
                 status=PredictionStatus.CHARGING,
@@ -549,11 +619,19 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 estimated_hours_remaining=None,
             )
 
+        # Non-rechargeable devices can't charge — a positive slope is sensor noise
+        # or slow drift. Reclassify CHARGING → FLAT to avoid misleading status.
+        if (
+            not is_rechargeable_hint
+            and prediction.status == PredictionStatus.CHARGING
+        ):
+            prediction = _replace(prediction, status=PredictionStatus.FLAT)
+
         analysis = analyze_battery(
             readings,
             battery_type=battery_type,
             battery_state=battery_state,
-            is_rechargeable_override=dev.is_rechargeable if dev else None,
+            is_rechargeable_override=is_rechargeable_hint,
             last_replaced=dev.last_replaced if dev else None,
             low_threshold=float(threshold),
         )
@@ -739,13 +817,20 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return False
         return True
 
-    async def async_undo_replacement(self, entity_id: str) -> bool:
-        """Undo a manual replacement: update store, invalidate cache.
+    async def async_undo_replacement(
+        self, entity_id: str, *, timestamp: float | None = None
+    ) -> bool:
+        """Undo a replacement: update store, invalidate cache.
 
+        If timestamp is given, remove that specific replacement.
+        Otherwise pop the most recent one.
         Returns False if entity_id not found in store.
         Schedules a background refresh (not awaited) for sensor updates.
         """
-        if not self.store.undo_replacement(entity_id):
+        if timestamp is not None:
+            if not self.store.remove_replacement(entity_id, timestamp):
+                return False
+        elif not self.store.undo_replacement(entity_id):
             return False
         self._history_cache.invalidate(entity_id)
         self.hass.async_create_task(self.async_request_refresh())
@@ -969,6 +1054,36 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "estimated_full_timestamp": None,
                         "segment_start_timestamp": charging_segment[0]["t"],
                         "segment_start_level": charging_segment[0]["v"],
+                    }
+
+            # Fallback: device reports charging but no live segment detected.
+            # Use historical charge cycles to estimate time to full.
+            is_charging_now = (
+                entity_data.get("charging_state", "").lower() == "charging"
+            )
+            current_level = battery.current_level
+            if (
+                charge_pred_dict is None
+                and is_charging_now
+                and current_level is not None
+                and current_level < 100
+            ):
+                hist_rate = _historical_charge_rate(all_readings)
+                if hist_rate is not None and hist_rate > 0:
+                    now_ts = time.time()
+                    hours_to_full = (100 - current_level) / hist_rate
+                    charge_pred_dict = {
+                        "slope_per_hour": hist_rate,
+                        "intercept": None,
+                        "r_squared": None,
+                        "confidence": "history-based",
+                        "estimated_full_timestamp": now_ts + hours_to_full * 3600,
+                        "estimated_hours_to_full": hours_to_full,
+                        "status": "history-based",
+                        "reliability": None,
+                        "data_points_used": 0,
+                        "segment_start_timestamp": now_ts,
+                        "segment_start_level": current_level,
                     }
 
         # Detect suspected historical replacements (non-rechargeable only)

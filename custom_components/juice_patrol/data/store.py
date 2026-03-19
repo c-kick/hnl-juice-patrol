@@ -287,6 +287,20 @@ class JuicePatrolStore:
         _LOGGER.info("Battery replacement undone: %s", entity_id)
         return True
 
+    def remove_replacement(self, entity_id: str, timestamp: float) -> bool:
+        """Remove a specific replacement by timestamp."""
+        dev = self._data.devices.get(entity_id)
+        if dev is None:
+            return False
+        try:
+            dev.replacement_history.remove(timestamp)
+        except ValueError:
+            return False
+        dev.replacement_confirmed = True
+        self._dirty = True
+        _LOGGER.info("Battery replacement removed (ts=%s): %s", timestamp, entity_id)
+        return True
+
     def deny_replacement(self, entity_id: str, timestamp: float) -> bool:
         """Deny a suspected replacement (prevents re-suggestion)."""
         dev = self._data.devices.get(entity_id)

@@ -32,6 +32,7 @@ class PredictionStatus(StrEnum):
     NORMAL = "normal"
     CHARGING = "charging"
     FLAT = "flat"
+    IDLE = "idle"
     NOISY = "noisy"
     INSUFFICIENT_DATA = "insufficient_data"
     SINGLE_LEVEL = "single_level"

@@ -60,6 +60,7 @@ export function buildColumns(panel) {
       title: "Level",
       sortable: true,
       type: "numeric",
+      valueColumn: "_levelSort",
       minWidth: "70px",
       maxWidth: "90px",
       showNarrow: true,
@@ -193,33 +194,23 @@ export function getBadgeLabels(dev, panel) {
       description: erraticTooltip(dev),
     });
   }
-  const skipReasons = dev.isRechargeable ? new Set(["flat", "charging"]) : new Set();
+  const skipReasons = dev.isRechargeable ? new Set(["flat", "charging", "idle"]) : new Set();
   if (!dev.predictedEmpty && predictionReason(dev) && !skipReasons.has(dev.predictionStatus)) {
     labels.push({
       label_id: "no-pred",
-      name: `No prediction: ${predictionReason(dev)}`,
+      name: predictionReason(dev),
       color: "#9E9E9E",
       description: predictionReasonDetail(dev.predictionStatus) || "",
     });
   }
-  if (dev.isRechargeable) {
-    if (isActivelyCharging(dev)) {
-      labels.push({
-        label_id: "charging",
-        name: "Charging",
-        icon: "mdi:battery-charging",
-        color: "#4CAF50",
-        description: "Currently charging",
-      });
-    } else {
-      labels.push({
-        label_id: "rechargeable",
-        name: "Rechargeable",
-        icon: "mdi:power-plug-battery",
-        color: "#4CAF50",
-        description: `Rechargeable: ${dev.rechargeableReason || "detected"}`,
-      });
-    }
+  if (dev.isRechargeable && isActivelyCharging(dev)) {
+    labels.push({
+      label_id: "charging",
+      name: "Charging",
+      icon: "mdi:battery-charging",
+      color: "#4CAF50",
+      description: "Currently charging",
+    });
   }
   if (
     dev.meanLevel !== null &&
@@ -260,11 +251,6 @@ export function renderDropdownItems(dev) {
       <ha-icon slot="icon" icon="mdi:battery-sync"></ha-icon>
       Mark as replaced
     </ha-dropdown-item>
-    ${dev?.lastReplaced ? html`
-    <ha-dropdown-item value="undo-replace">
-      <ha-icon slot="icon" icon="mdi:undo"></ha-icon>
-      Undo replacement
-    </ha-dropdown-item>` : nothing}
     <ha-dropdown-item value="recalculate">
       <ha-icon slot="icon" icon="mdi:calculator-variant"></ha-icon>
       Recalculate

@@ -153,19 +153,108 @@ export async function initChart(panel, chartData) {
     tMax = Math.max(nowMs + dur, predEnd);
   }
 
+  // Detect charging periods for rechargeable devices.
+  // A charging period is a trough-to-peak segment where the level rises by ≥10%.
+  // We find local minima and maxima, then pair min→max as charging periods.
+  const chargingAreas = [];
+  if (chartData.is_rechargeable && allReadings.length >= 3) {
+    // Find local extrema (simplified: track direction changes)
+    const extrema = []; // {type: 'min'|'max', idx, t, v}
+    let dir = 0; // 0=unknown, 1=rising, -1=falling
+    for (let i = 1; i < allReadings.length; i++) {
+      const diff = allReadings[i].v - allReadings[i - 1].v;
+      if (diff > 1) {
+        if (dir === -1) extrema.push({ type: "min", idx: i - 1, t: allReadings[i - 1].t, v: allReadings[i - 1].v });
+        dir = 1;
+      } else if (diff < -1) {
+        if (dir === 1) extrema.push({ type: "max", idx: i - 1, t: allReadings[i - 1].t, v: allReadings[i - 1].v });
+        dir = -1;
+      }
+    }
+    // Pair consecutive min→max as charging periods (min rise of 10%)
+    for (let i = 0; i < extrema.length - 1; i++) {
+      if (extrema[i].type === "min" && extrema[i + 1].type === "max") {
+        const rise = extrema[i + 1].v - extrema[i].v;
+        if (rise >= 10) {
+          chargingAreas.push([
+            { xAxis: extrema[i].t * 1000 },
+            { xAxis: extrema[i + 1].t * 1000 },
+          ]);
+        }
+      }
+    }
+  }
+
+  // Split observed data into normal (above threshold) and low (at/below threshold)
+  // segments. Each segment shares boundary points for seamless rendering.
+  const normalData = [];
+  const lowData = [];
+  for (let i = 0; i < observed.length; i++) {
+    const [t, v] = observed[i];
+    const isLow = v <= threshold;
+    normalData.push(isLow ? [t, null] : [t, v]);
+    lowData.push(isLow ? [t, v] : [t, null]);
+    // Add boundary point at threshold crossing to connect the segments
+    if (i > 0) {
+      const [pt, pv] = observed[i - 1];
+      const prevLow = pv <= threshold;
+      if (prevLow !== isLow) {
+        // Interpolate crossing point
+        const ratio = (threshold - pv) / (v - pv);
+        const crossT = pt + (t - pt) * ratio;
+        // Insert crossing point in both series (before current point)
+        normalData.splice(-1, 0, [crossT, threshold]);
+        lowData.splice(-1, 0, [crossT, threshold]);
+      }
+    }
+  }
+
+  const showSymbol = observed.length <= 50;
   const series = [
     {
       name: "Battery Level",
       type: "line",
-      data: observed,
+      data: normalData,
       smooth: false,
-      symbol: observed.length > 50 ? "none" : "circle",
+      symbol: showSymbol ? "circle" : "none",
       symbolSize: 4,
+      connectNulls: false,
       lineStyle: { width: 2, color: colorLevel },
       itemStyle: { color: colorLevel },
       areaStyle: { color: colorLevel, opacity: 0.07 },
     },
+    {
+      name: "Battery Level",
+      type: "line",
+      data: lowData,
+      smooth: false,
+      symbol: showSymbol ? "circle" : "none",
+      symbolSize: 4,
+      connectNulls: false,
+      lineStyle: { width: 2, color: colorThreshold },
+      itemStyle: { color: colorThreshold },
+      areaStyle: { color: colorThreshold, opacity: 0.1 },
+    },
   ];
+
+  // Charging period highlights rendered as filled area series (markArea doesn't
+  // work through ha-chart-base). Each area is a 4-point polygon from 0% to 100%.
+  if (chargingAreas.length > 0) {
+    for (let i = 0; i < chargingAreas.length; i++) {
+      const startMs = chargingAreas[i][0].xAxis;
+      const endMs = chargingAreas[i][1].xAxis;
+      series.push({
+        name: i === 0 ? "Charging" : `Charging ${i + 1}`,
+        type: "line",
+        data: [[startMs, 100], [endMs, 100]],
+        symbol: "none",
+        lineStyle: { width: 0 },
+        areaStyle: { color: "rgba(76, 175, 80, 0.18)", origin: 0 },
+        silent: true,
+        tooltip: { show: false },
+      });
+    }
+  }
 
   if (fitted.length > 0) {
     series.push({
@@ -179,12 +268,26 @@ export async function initChart(panel, chartData) {
     });
   }
 
+  // Shared label style for chart markers (threshold crossing, replacements, charge)
+  const _markerLabel = (text, color) => ({
+    show: true,
+    formatter: text,
+    position: "left",
+    fontSize: 10,
+    color,
+    distance: 6,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    borderRadius: 3,
+    padding: [3, 6],
+  });
+
   // Charge prediction line (rechargeable devices currently charging)
   if (isCharging && chargePred && chargePred.segment_start_timestamp != null) {
     const segStartT = chargePred.segment_start_timestamp;
     const segStartV = chargePred.segment_start_level;
     const nowT = Date.now() / 1000;
     const currentLevel = chartData.level;
+    const isHistoryBased = chargePred.status === "history-based";
 
     // Use engine prediction if available, otherwise compute from observed rise
     let slopePerHour = hasChargePred ? chargePred.slope_per_hour : null;
@@ -204,16 +307,33 @@ export async function initChart(panel, chartData) {
         const hours = (t - segStartT) / 3600;
         return slopePerHour * hours + segStartV;
       };
-      const chargePoints = [segStartT, nowT, endT].map(
-        (t) => [t * 1000, Math.max(0, Math.min(100, fittedChargeY(t)))]
-      );
+      // For history-based: line from current level to projected full
+      const chargeStartT = isHistoryBased ? nowT : segStartT;
+      const chargePoints = isHistoryBased
+        ? [[nowT * 1000, currentLevel], [endT * 1000, 100]]
+        : [segStartT, nowT, endT].map(
+            (t) => [t * 1000, Math.max(0, Math.min(100, fittedChargeY(t)))]
+          );
+      // Endpoint label for estimated full time
+      const fullDate = new Date(endT * 1000);
+      const fullLabel = fullDate.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+      const endPoint = chargePoints[chargePoints.length - 1];
+      chargePoints[chargePoints.length - 1] = {
+        value: endPoint,
+        symbol: "diamond",
+        symbolSize: 6,
+        label: _markerLabel(
+          `Est. full ${fullLabel}`,
+          colorCharge,
+        ),
+      };
       series.push({
         name: "Charge prediction",
         type: "line",
         data: chargePoints,
         smooth: false,
         symbol: "none",
-        lineStyle: { width: 2, type: "dashed", color: colorCharge },
+        lineStyle: { width: 2, type: isHistoryBased ? "dotted" : "dashed", color: colorCharge },
         itemStyle: { color: colorCharge },
       });
     }
@@ -223,19 +343,6 @@ export async function initChart(panel, chartData) {
   // Only show crossing/empty markers when we have a real discharge prediction
   // (status "normal" means the engine produced an estimated_empty_timestamp).
   const hasActivePrediction = pred.status === "normal" && pred.estimated_empty_timestamp != null;
-
-  // Shared label style for chart markers (threshold crossing, replacements)
-  const _markerLabel = (text, color) => ({
-    show: true,
-    formatter: text,
-    position: "left",
-    fontSize: 10,
-    color,
-    distance: 6,
-    backgroundColor: "rgba(0,0,0,0.6)",
-    borderRadius: 3,
-    padding: [3, 6],
-  });
 
   let crossingMs = null;
   if (
@@ -269,24 +376,8 @@ export async function initChart(panel, chartData) {
     }
   }
 
-  // Threshold line spans from earliest data to at least the crossing point
-  const thresholdMin = observed[0]?.[0] || tMin;
-  const thresholdMax = Math.max(
-    fitted.length ? fitted[fitted.length - 1][0] : tMax,
-    crossingMs || 0,
-    tMax,
-  );
-  series.push({
-    name: "Threshold",
-    type: "line",
-    data: [
-      [thresholdMin, threshold],
-      [thresholdMax, threshold],
-    ],
-    symbol: "none",
-    lineStyle: { width: 1, type: "dotted", color: colorThreshold },
-    itemStyle: { color: colorThreshold },
-  });
+  // Threshold is shown via visualMap (line turns red below threshold)
+  // No separate threshold line series needed.
 
   // Threshold crossing vertical marker
   if (crossingMs) {
@@ -345,10 +436,10 @@ export async function initChart(panel, chartData) {
     }
   }
 
-  // Suspected replacement markers (amber, dotted)
+  // Suspected replacement markers (purple, dotted — distinct from orange prediction line)
   const suspectedReplacements = chartData.suspected_replacements || [];
   if (suspectedReplacements.length > 0) {
-    const colorSuspected = rc("--warning-color", "#ff9800");
+    const colorSuspected = "#ab47bc";
     for (let i = 0; i < suspectedReplacements.length; i++) {
       const ts = suspectedReplacements[i].timestamp * 1000;
       const dateLabel = new Date(ts).toLocaleDateString(undefined, {
@@ -373,7 +464,7 @@ export async function initChart(panel, chartData) {
     }
   }
 
-  const isNarrow = container.clientWidth < 500;
+  const isNarrow = panel.narrow || container.clientWidth < 500;
 
   const option = {
     xAxis: {
@@ -407,8 +498,12 @@ export async function initChart(panel, chartData) {
           " " +
           date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
         let h = `<b>${dateStr}</b><br>`;
+        const seen = new Set();
         for (const p of params) {
           if (p.seriesName?.startsWith("Replaced") || p.seriesName === "Low battery") continue;
+          if (p.value[1] == null) continue;
+          if (seen.has(p.seriesName)) continue;
+          seen.add(p.seriesName);
           const val =
             typeof p.value[1] === "number" ? p.value[1].toFixed(1) + "%" : "\u2014";
           h += `${p.marker} ${p.seriesName}: ${val}<br>`;
@@ -417,14 +512,11 @@ export async function initChart(panel, chartData) {
       },
     },
     legend: {
-      show: true,
       bottom: 0,
-      data: series.filter((s) => !s.name?.startsWith("Replaced") && s.name !== "Low battery").map((s) => s.name).filter((v, i, a) => a.indexOf(v) === i),
-      textStyle: { color: colorLegend, fontSize: isNarrow ? 10 : 11 },
-      itemWidth: isNarrow ? 12 : 16,
-      itemHeight: isNarrow ? 8 : 10,
-      itemGap: isNarrow ? 6 : 8,
-      padding: [4, 0, 0, 0],
+      left: "center",
+      data: ["Battery Level", "Discharge prediction"],
+      textStyle: { color: colorLegend, fontSize: isNarrow ? 10 : 12 },
+      itemGap: isNarrow ? 6 : 12,
       selected: {
         "Discharge prediction": !isCharging,
         "Charge prediction": isCharging,
@@ -432,34 +524,19 @@ export async function initChart(panel, chartData) {
     },
     dataZoom: [
       {
-        type: "slider",
+        type: "inside",
         xAxisIndex: 0,
         filterMode: "none",
         startValue: tMin,
         endValue: tMax,
-        bottom: isNarrow ? 30 : 24,
-        height: isNarrow ? 18 : 22,
-        borderColor: colorGrid,
-        fillerColor: "rgba(100,150,200,0.15)",
-        handleStyle: { color: colorLevel },
-        dataBackground: {
-          lineStyle: { color: colorLevel, opacity: 0.3 },
-          areaStyle: { color: colorLevel, opacity: 0.05 },
-        },
-        textStyle: { color: colorAxis, fontSize: 10 },
-      },
-      {
-        type: "inside",
-        xAxisIndex: 0,
-        filterMode: "none",
       },
     ],
     grid: {
-      left: isNarrow ? 40 : 50,
-      right: isNarrow ? 10 : 20,
-      top: 20,
-      bottom: isNarrow ? 82 : 72,
-      containLabel: false,
+      left: isNarrow ? 4 : 12,
+      right: isNarrow ? 4 : 12,
+      top: 8,
+      bottom: isNarrow ? 32 : 28,
+      containLabel: true,
     },
   };
 
@@ -473,6 +550,9 @@ export async function initChart(panel, chartData) {
     panel._chartEl = chart;
   }
   chart.hass = panel._hass;
+  // Override ha-chart-base's default height (clientWidth/2) which is too short
+  // for discharge curves. Use a string value to set CSS height directly.
+  chart.height = isNarrow ? "300px" : "400px";
 
   requestAnimationFrame(() => {
     // ha-chart-base uses separate data (series) and options properties.

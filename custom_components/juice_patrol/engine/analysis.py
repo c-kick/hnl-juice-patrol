@@ -439,19 +439,9 @@ def _detect_rechargeable(
 
     Returns (is_rechargeable, reason).
     """
-    # Manual override takes priority
+    # The user's manual label is the single source of truth.
+    # No auto-detection from battery_state or other heuristics.
     if is_rechargeable_override is not None:
         return is_rechargeable_override, "manual" if is_rechargeable_override else None
-
-    # battery_state attribute indicates a rechargeable device — this is a
-    # direct signal from the device itself, not a heuristic.
-    # Values vary by integration: "Charging", "Not Charging", "Full",
-    # "not_charging", "discharging", etc.
-    if battery_state:
-        normalized = battery_state.lower().replace(" ", "_")
-        if normalized in (
-            "charging", "not_charging", "full", "discharging",
-        ):
-            return True, f"battery_state: {battery_state}"
 
     return False, None

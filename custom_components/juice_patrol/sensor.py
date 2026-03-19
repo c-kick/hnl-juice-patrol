@@ -97,6 +97,9 @@ class JuicePatrolDischargeRate(JuicePatrolEntity, SensorEntity):
         analysis = info.get("analysis")
         attrs: dict[str, Any] = {
             "source_entity": self._source_entity_id,
+            "source_name": info.get("device_name"),
+            "level": info.get("level"),
+            "threshold": info.get("threshold"),
             "platform": info.get("platform"),
             "manufacturer": info.get("manufacturer"),
             "model": info.get("model"),

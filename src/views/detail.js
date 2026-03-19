@@ -41,11 +41,14 @@ export function renderDetailView(panel) {
 function renderDetailMeta(panel, dev) {
   const cd = panel._chartData;
   const pred = cd?.prediction || {};
+  const chargePred = cd?.charge_prediction;
+  const isHistoryBased = chargePred?.status === "history-based";
 
   const statusTexts = {
     normal: "Normal discharge",
     charging: "Currently charging",
     flat: "Flat \u2014 no significant discharge detected",
+    idle: "Idle \u2014 not currently discharging",
     noisy: "Noisy \u2014 data too irregular for prediction",
     insufficient_data: "Not enough data for prediction",
     single_level: "Single level \u2014 all readings identical",
@@ -83,8 +86,9 @@ function renderDetailMeta(panel, dev) {
         <div class="detail-meta-item">
           <div class="detail-meta-label">Confidence</div>
           <div class="detail-meta-value">
-            <span class="confidence-dot ${pred.confidence || ""}"></span>
-            ${pred.confidence || "\u2014"}
+            ${chargePred?.confidence
+              ? html`<span class="confidence-dot ${chargePred.confidence}"></span>${chargePred.confidence}`
+              : html`<span class="confidence-dot ${pred.confidence || ""}"></span>${pred.confidence || "\u2014"}`}
           </div>
         </div>
         ${pred.r_squared != null
@@ -130,12 +134,14 @@ function renderDetailMeta(panel, dev) {
           : nothing}
       </div>
       ${!dev.predictedEmpty && pred.status && pred.status !== "normal"
-        && !(pred.status === "charging" && cd?.charge_prediction?.segment_start_timestamp != null)
+        && !(pred.status === "charging" && cd?.charge_prediction?.segment_start_timestamp != null && !isHistoryBased)
         ? html`<div class="detail-reason">
             <ha-icon icon="mdi:information-outline" style="--mdc-icon-size:18px; color:var(--secondary-text-color); flex-shrink:0"></ha-icon>
             <div>
-              <strong>Why is there no prediction?</strong>
-              <div class="detail-reason-text">${predictionReasonDetail(pred.status) || "Unknown reason."}</div>
+              <strong>${isHistoryBased ? "Charge estimate based on history" : "Why is there no prediction?"}</strong>
+              <div class="detail-reason-text">${isHistoryBased
+                ? "Currently charging. The estimated time to full is based on previous charging cycles since no live charging data is available yet. Once the battery starts reporting increased levels, the estimate will be based on actual charging data."
+                : (predictionReasonDetail(pred.status) || "Unknown reason.")}</div>
             </div>
           </div>`
         : nothing}
@@ -198,37 +204,69 @@ function renderDetailActions(panel) {
   const replacementHistory = cd?.replacement_history || [];
   const suspectedReplacements = cd?.suspected_replacements || [];
 
+  // Build combined replacement entries sorted by date (newest first)
+  const entries = [
+    ...[...replacementHistory].map((ts) => ({ type: "confirmed", timestamp: ts })),
+    ...suspectedReplacements.map((s) => ({ type: "suspected", timestamp: s.timestamp, old_level: s.old_level, new_level: s.new_level })),
+  ].sort((a, b) => b.timestamp - a.timestamp);
+
   return html`
-    ${replacementHistory.length > 0 || suspectedReplacements.length > 0 ? html`
-      <div class="replacement-history">
-        <div class="detail-meta-label" style="margin-bottom: 4px">Replacement History</div>
-        <div class="replacement-history-list">
-          ${[...replacementHistory].reverse().map((ts) => html`
-            <div class="replacement-history-item">
-              <ha-icon icon="mdi:battery-sync" style="--mdc-icon-size:16px; color:var(--secondary-text-color)"></ha-icon>
-              <span>${formatDate(ts * 1000, true)}</span>
+    ${entries.length > 0 ? html`
+      <ha-card>
+        <div class="card-content">
+          <div class="detail-meta-label" style="margin-bottom:8px">Replacement History</div>
+          <div class="replacement-table">
+            <div class="replacement-table-header">
+              <span>Date</span>
+              <span>Type</span>
+              <span>Details</span>
+              <span></span>
             </div>
-          `)}
-          ${suspectedReplacements.map((s) => html`
-            <div class="replacement-history-item suspected">
-              <ha-icon icon="mdi:help-circle-outline" style="--mdc-icon-size:16px; color:var(--warning-color, #ff9800)"></ha-icon>
-              <span style="flex:1">${formatDate(s.timestamp * 1000, true)}
-                <span style="color:var(--secondary-text-color); font-size:0.85em"> — suspected (${Math.round(s.old_level)}% → ${Math.round(s.new_level)}%)</span>
-              </span>
-              <ha-icon-button
-                .path=${ICON_CHECK}
-                style="--mdc-icon-button-size:28px; color:var(--success-color, #4caf50)"
-                @click=${() => panel._confirmSuspectedReplacement(entityId, s.timestamp)}
-              ></ha-icon-button>
-              <ha-icon-button
-                .path=${ICON_CLOSE}
-                style="--mdc-icon-button-size:28px; color:var(--error-color, #f44336)"
-                @click=${() => panel._denySuspectedReplacement(entityId, s.timestamp)}
-              ></ha-icon-button>
-            </div>
-          `)}
+            ${entries.map((e) => html`
+              <div class="replacement-table-row ${e.type}">
+                <span>${formatDate(e.timestamp * 1000, true)}</span>
+                <span>
+                  ${e.type === "confirmed" ? html`
+                    <ha-icon icon="mdi:battery-sync" style="--mdc-icon-size:16px;color:var(--success-color,#4caf50)"></ha-icon>
+                    Replaced
+                  ` : html`
+                    <ha-icon icon="mdi:help-circle-outline" style="--mdc-icon-size:16px;color:var(--warning-color,#ff9800)"></ha-icon>
+                    Suspected
+                  `}
+                </span>
+                <span style="color:var(--secondary-text-color)">
+                  ${e.type === "suspected"
+                    ? html`${Math.round(e.old_level)}% \u2192 ${Math.round(e.new_level)}%`
+                    : html`\u2014`}
+                </span>
+                <span>
+                  ${e.type === "suspected" ? html`
+                    <ha-icon-button
+                      .path=${ICON_CHECK}
+                      style="--mdc-icon-button-size:28px;color:var(--success-color,#4caf50)"
+                      title="Confirm replacement"
+                      @click=${() => panel._confirmSuspectedReplacement(entityId, e.timestamp)}
+                    ></ha-icon-button>
+                    <ha-icon-button
+                      .path=${ICON_CLOSE}
+                      style="--mdc-icon-button-size:28px;color:var(--error-color,#f44336)"
+                      title="Not a replacement"
+                      @click=${() => panel._denySuspectedReplacement(entityId, e.timestamp)}
+                    ></ha-icon-button>
+                  ` : html`
+                    <ha-icon-button
+                      .path=${ICON_CLOSE}
+                      style="--mdc-icon-button-size:28px;color:var(--secondary-text-color)"
+                      title="Remove this replacement"
+                      @click=${() => panel._undoReplacementAt(entityId, e.timestamp)}
+                    ></ha-icon-button>
+                  `}
+                </span>
+              </div>
+            `)}
+          </div>
         </div>
-      </div>
+      </ha-card>
     ` : nothing}
     <div class="detail-actions">
       <ha-button
@@ -251,13 +289,6 @@ function renderDetailActions(panel) {
         <ha-icon slot="start" icon="mdi:battery-sync"></ha-icon>
         Mark as replaced
       </ha-button>
-      ${dev?.lastReplaced ? html`
-      <ha-button variant="danger"
-        @click=${() => panel._undoReplacement(entityId)}
-      >
-        <ha-icon slot="start" icon="mdi:undo"></ha-icon>
-        Undo replacement
-      </ha-button>` : nothing}
       <ha-button
         @click=${async () => {
           await panel._recalculate(entityId);

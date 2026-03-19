@@ -63,6 +63,7 @@ class JuicePatrolPanel extends LitElement {
     this._ignoredEntities = null;
     this._chartRange = "auto";
     this._filters = { status: { value: ["active", "low"] } };
+    this._sorting = { column: "level", direction: "asc" };
     this._flashCleanupTimer = null;
     this._refreshTimer = null;
     this._entityMap = new Map();
@@ -197,6 +198,7 @@ class JuicePatrolPanel extends LitElement {
         this._detailEntity = null;
         this._chartData = null;
         this._chartEl = null;
+        this._chartRetried = false;
       }
       if (this._activeView !== "shopping") {
         this._activeView = "shopping";
@@ -210,6 +212,7 @@ class JuicePatrolPanel extends LitElement {
       this._detailEntity = null;
       this._chartData = null;
       this._chartEl = null;
+      this._chartRetried = false;
     }
     this._activeView = "devices";
     this._entities = this._entityList;
@@ -339,7 +342,7 @@ class JuicePatrolPanel extends LitElement {
         dev.isRechargeable = attrs.is_rechargeable ?? false;
         dev.rechargeableReason = attrs.rechargeable_reason ?? null;
         dev.chargingState = attrs.charging_state ?? null;
-        dev.anomaly = attrs.anomaly ?? null;
+        dev.anomaly = attrs.discharge_anomaly ?? null;
         dev.dropSize = attrs.drop_size ?? null;
         dev.stability = attrs.stability ?? null;
         dev.stabilityCv = attrs.stability_cv ?? null;
@@ -375,6 +378,9 @@ class JuicePatrolPanel extends LitElement {
       // Build search text
       const parts = [dev.name, sourceEntity, dev.batteryType, dev.manufacturer, dev.model, dev.platform];
       dev._searchText = parts.filter(Boolean).join(" ").toLowerCase();
+
+      // Sort key: null levels go to bottom (999 in asc, -1 in desc)
+      dev._levelSort = dev.level !== null ? dev.level : 999;
 
       // Status filter
       if (dev.level === null || (states[sourceEntity]?.state === "unavailable")) {
@@ -416,8 +422,18 @@ class JuicePatrolPanel extends LitElement {
 
   _getFilteredEntities() {
     const statusValues = this._filters.status?.value || [];
-    if (statusValues.length === 0) return this._entities;
-    return this._entities.filter((d) => statusValues.includes(d._statusFilter));
+    const predValues = this._filters.prediction?.value || [];
+    const batteryValues = this._filters.battery?.value || [];
+    if (statusValues.length === 0 && predValues.length === 0 && batteryValues.length === 0) return this._entities;
+    return this._entities.filter((d) => {
+      if (statusValues.length > 0 && !statusValues.includes(d._statusFilter)) return false;
+      if (predValues.length > 0 && !predValues.includes(d.predictionStatus || "")) return false;
+      if (batteryValues.length > 0) {
+        const type = d.isRechargeable ? "rechargeable" : "disposable";
+        if (!batteryValues.includes(type)) return false;
+      }
+      return true;
+    });
   }
 
   // ── Helpers (thin wrappers that delegate to imported functions) ──
@@ -528,6 +544,31 @@ class JuicePatrolPanel extends LitElement {
     }
   }
 
+  _undoReplacementAt(entityId, timestamp) {
+    const date = new Date(timestamp * 1000).toLocaleDateString();
+    showConfirmDialog(this, {
+      title: "Remove replacement?",
+      bodyHtml: `<p style="margin-top:0">Remove the replacement marker from <strong>${date}</strong>? Battery history is never deleted.</p>`,
+      confirmLabel: "Remove",
+      confirmVariant: "danger",
+      onConfirm: async () => {
+        try {
+          await this._hass.callWS({
+            type: "juice_patrol/undo_replacement",
+            entity_id: entityId,
+            timestamp,
+          });
+          this._showToast("Replacement removed");
+          if (this._detailEntity === entityId) {
+            setTimeout(() => this._loadChartData(entityId), 500);
+          }
+        } catch (e) {
+          this._showToast("Failed to remove replacement");
+        }
+      },
+    });
+  }
+
   async _confirmReplacement(entityId) {
     try {
       await this._hass.callWS({
@@ -585,6 +626,24 @@ class JuicePatrolPanel extends LitElement {
     } catch (e) {
       this._showToast(wsErrorMessage(e, "recalculation"));
     }
+  }
+
+  _confirmRefresh() {
+    showConfirmDialog(this, {
+      title: "Force refresh",
+      bodyHtml: `
+        <p>Juice Patrol automatically updates predictions whenever a battery level changes and runs a full scan every hour.</p>
+        <p>A manual refresh clears all cached recorder data and recalculates every device from scratch. This is only needed if:</p>
+        <ul style="margin:8px 0;padding-left:20px">
+          <li>You changed a battery type or threshold and want immediate results</li>
+          <li>Predictions seem stale or incorrect after a HA restart</li>
+          <li>You imported historical recorder data</li>
+        </ul>
+        <p style="color:var(--secondary-text-color);font-size:13px">This may take a moment depending on the number of devices.</p>
+      `,
+      confirmLabel: "Refresh now",
+      onConfirm: () => this._refresh(),
+    });
   }
 
   async _refresh() {
@@ -691,13 +750,11 @@ class JuicePatrolPanel extends LitElement {
       if (!this._chartRetried) {
         this._chartRetried = true;
         this._chartLoading = false;
-        setTimeout(() => {
-          this._chartRetried = false;
-          this._loadChartData(entityId);
-        }, 1000);
+        setTimeout(() => this._loadChartData(entityId), 1000);
         return;
       }
-      this._chartRetried = false;
+      // Don't reset _chartRetried here — it's cleared when leaving detail view.
+      // Resetting it would allow infinite retry loops on persistent errors.
       console.error("Juice Patrol: failed to load chart data", e);
       this._showToast(wsErrorMessage(e, "chart view"));
     }
@@ -788,6 +845,10 @@ class JuicePatrolPanel extends LitElement {
     if (entityId) this._openDetail(entityId);
   }
 
+  _handleSortingChanged(e) {
+    this._sorting = e.detail;
+  }
+
   _setBatteryType(entityId, currentType) {
     showBatteryTypeDialog(this, entityId, currentType);
   }
@@ -819,17 +880,11 @@ class JuicePatrolPanel extends LitElement {
         <ha-icon-button
           id="refreshBtn"
           class=${this._refreshing ? "spinning" : ""}
-          title="Re-fetch all battery data and recalculate predictions"
+          title="Force refresh"
           .disabled=${this._refreshing}
-          @click=${this._refresh}
+          @click=${this._confirmRefresh}
         >
           <ha-icon icon="mdi:refresh"></ha-icon>
-        </ha-icon-button>
-        <ha-icon-button
-          title="Settings"
-          @click=${this._toggleSettings}
-        >
-          <ha-icon icon="mdi:cog"></ha-icon>
         </ha-icon-button>
       </div>
     `;
@@ -892,10 +947,11 @@ class JuicePatrolPanel extends LitElement {
         .searchLabel=${"Search " + filtered.length + " devices"}
         .noDataText=${"No devices match the current filter."}
         clickable
-        .initialSorting=${{ column: "level", direction: "asc" }}
+        .initialSorting=${this._sorting}
         has-filters
         .filters=${this._activeFilterCount}
         @row-click=${this._handleRowClick}
+        @sorting-changed=${this._handleSortingChanged}
         @clear-filter=${this._clearFilters}
       >
         ${this._renderToolbarIcons()}
@@ -906,11 +962,22 @@ class JuicePatrolPanel extends LitElement {
 
   _renderFilterPane() {
     const statusValues = this._filters.status?.value || [];
+    const predValues = this._filters.prediction?.value || [];
     const statuses = [
       { value: "active", label: "Active", icon: "mdi:check-circle" },
       { value: "low", label: "Low battery", icon: "mdi:battery-alert" },
       { value: "stale", label: "Stale", icon: "mdi:clock-alert-outline" },
       { value: "unavailable", label: "Unavailable", icon: "mdi:help-circle-outline" },
+    ];
+    const predictions = [
+      { value: "normal", label: "Normal discharge", icon: "mdi:trending-down" },
+      { value: "flat", label: "Flat", icon: "mdi:minus" },
+      { value: "idle", label: "Idle", icon: "mdi:sleep" },
+      { value: "charging", label: "Charging", icon: "mdi:battery-charging" },
+      { value: "insufficient_data", label: "Not enough data", icon: "mdi:database-off-outline" },
+      { value: "single_level", label: "Single level", icon: "mdi:equal" },
+      { value: "insufficient_range", label: "Tiny range", icon: "mdi:approximately-equal" },
+      { value: "noisy", label: "Noisy data", icon: "mdi:chart-scatter-plot" },
     ];
     return html`
       <ha-expansion-panel slot="filter-pane" outlined expanded header="Status">
@@ -920,7 +987,7 @@ class JuicePatrolPanel extends LitElement {
             <label class="jp-filter-item">
               <ha-checkbox
                 .checked=${statusValues.includes(s.value)}
-                @change=${(e) => this._toggleStatusFilter(s.value, e.target.checked)}
+                @change=${(e) => this._toggleFilter("status", s.value, e.target.checked)}
               ></ha-checkbox>
               <ha-icon icon=${s.icon} style="--mdc-icon-size:18px"></ha-icon>
               <span>${s.label}</span>
@@ -928,15 +995,48 @@ class JuicePatrolPanel extends LitElement {
           `)}
         </div>
       </ha-expansion-panel>
+      <ha-expansion-panel slot="filter-pane" outlined header="Battery">
+        <ha-icon slot="leading-icon" icon="mdi:battery" style="--mdc-icon-size:20px"></ha-icon>
+        <div class="jp-filter-list">
+          ${[
+            { value: "disposable", label: "Disposable", icon: "mdi:battery" },
+            { value: "rechargeable", label: "Rechargeable", icon: "mdi:battery-charging" },
+          ].map((b) => html`
+            <label class="jp-filter-item">
+              <ha-checkbox
+                .checked=${(this._filters.battery?.value || []).includes(b.value)}
+                @change=${(e) => this._toggleFilter("battery", b.value, e.target.checked)}
+              ></ha-checkbox>
+              <ha-icon icon=${b.icon} style="--mdc-icon-size:18px"></ha-icon>
+              <span>${b.label}</span>
+            </label>
+          `)}
+        </div>
+      </ha-expansion-panel>
+      <ha-expansion-panel slot="filter-pane" outlined header="Prediction">
+        <ha-icon slot="leading-icon" icon="mdi:crystal-ball" style="--mdc-icon-size:20px"></ha-icon>
+        <div class="jp-filter-list">
+          ${predictions.map((p) => html`
+            <label class="jp-filter-item">
+              <ha-checkbox
+                .checked=${predValues.includes(p.value)}
+                @change=${(e) => this._toggleFilter("prediction", p.value, e.target.checked)}
+              ></ha-checkbox>
+              <ha-icon icon=${p.icon} style="--mdc-icon-size:18px"></ha-icon>
+              <span>${p.label}</span>
+            </label>
+          `)}
+        </div>
+      </ha-expansion-panel>
     `;
   }
 
-  _toggleStatusFilter(status, checked) {
-    const current = this._filters.status?.value || [];
+  _toggleFilter(group, value, checked) {
+    const current = this._filters[group]?.value || [];
     const next = checked
-      ? [...current, status]
-      : current.filter((s) => s !== status);
-    this._filters = { ...this._filters, status: { value: next } };
+      ? [...current, value]
+      : current.filter((s) => s !== value);
+    this._filters = { ...this._filters, [group]: { value: next } };
   }
 
   _clearFilters() {

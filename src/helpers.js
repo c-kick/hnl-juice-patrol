@@ -67,6 +67,7 @@ export function predictionReason(dev) {
   const labels = {
     charging: "Charging",
     flat: "Flat",
+    idle: "Idle",
     noisy: "Noisy data",
     insufficient_data: "Not enough data",
     single_level: "Single level",
@@ -79,6 +80,7 @@ export function predictionReasonDetail(status) {
   const details = {
     charging: "This battery is currently charging, so no discharge prediction is generated. Once it starts discharging again, a new prediction will be calculated.",
     flat: "The battery level has been essentially flat \u2014 no significant discharge detected. This is normal for devices with very slow drain. A prediction will appear once enough change is observed.",
+    idle: "This rechargeable device is not currently discharging. A discharge prediction will appear once the battery level starts dropping.",
     noisy: "The battery data is too irregular to fit a reliable trend line. This can happen with sensors that report inconsistent values. The prediction will improve as more stable readings accumulate.",
     insufficient_data: "There are not enough data points or the observation period is too short to calculate a prediction. Juice Patrol needs at least 3 readings spanning 24 hours.",
     single_level: "All recorded readings have the same battery level. This typically means the sensor reports a fixed value or hasn't changed since discovery.",

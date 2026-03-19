@@ -412,36 +412,45 @@ export const panelStyles = css`
     background: var(--card-bg);
     border-radius: 12px;
     border: 1px solid var(--border);
-    padding: 16px;
+    padding: 8px;
     margin-bottom: 16px;
-    min-height: 430px;
     display: flex;
     align-items: center;
     justify-content: center;
   }
   .detail-chart ha-chart-base {
     width: 100%;
-    height: 410px;
-    display: block;
   }
-  .replacement-history {
-    padding: 12px 16px;
+  .replacement-table {
+    display: grid;
+    grid-template-columns: auto auto 1fr auto;
+    gap: 0;
+    font-size: 0.9em;
   }
-  .replacement-history-list {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+  .replacement-table-header {
+    display: contents;
   }
-  .replacement-history-item {
+  .replacement-table-header > span {
+    padding: 6px 12px 6px 0;
+    font-size: 0.8em;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--secondary-text-color);
+    border-bottom: 1px solid var(--divider-color, rgba(255,255,255,0.12));
+  }
+  .replacement-table-row {
+    display: contents;
+  }
+  .replacement-table-row > span {
     display: flex;
     align-items: center;
-    gap: 8px;
-    font-size: 0.9em;
-    color: var(--primary-text-color);
+    gap: 6px;
+    padding: 8px 12px 8px 0;
+    border-bottom: 1px solid var(--divider-color, rgba(255,255,255,0.06));
   }
-  .replacement-history-item.suspected {
-    padding: 4px 0;
-    border-top: 1px dashed var(--divider-color, #e0e0e0);
+  .replacement-table-row.suspected > span {
+    background: rgba(255, 152, 0, 0.05);
   }
   .detail-actions {
     display: flex;
@@ -471,11 +480,7 @@ export const panelStyles = css`
       min-width: 60px;
     }
     .detail-chart {
-      padding: 8px;
-      min-height: 350px;
-    }
-    .detail-chart ha-chart-base {
-      height: 330px;
+      padding: 4px;
     }
     .range-pill {
       padding: 3px 9px;

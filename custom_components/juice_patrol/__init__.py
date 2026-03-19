@@ -217,7 +217,6 @@ def _register_services(hass: HomeAssistant) -> None:
 # ---------------------------------------------------------------------------
 
 
-@websocket_api.require_admin
 @websocket_api.websocket_command(
     {vol.Required("type"): "juice_patrol/get_settings"}
 )
@@ -238,7 +237,6 @@ async def ws_get_settings(hass, connection, msg):
     })
 
 
-@websocket_api.require_admin
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "juice_patrol/update_settings",
@@ -264,7 +262,6 @@ async def ws_update_settings(hass, connection, msg):
     connection.send_result(msg["id"], new_options)
 
 
-@websocket_api.require_admin
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "juice_patrol/set_battery_type",
@@ -288,7 +285,6 @@ async def ws_set_battery_type(hass, connection, msg):
         connection.send_error(msg["id"], "not_found", f"Entity {entity_id} not in store")
 
 
-@websocket_api.require_admin
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "juice_patrol/set_rechargeable",
@@ -311,7 +307,6 @@ async def ws_set_rechargeable(hass, connection, msg):
         connection.send_error(msg["id"], "not_found", f"Entity {entity_id} not in store")
 
 
-@websocket_api.require_admin
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "juice_patrol/confirm_replacement",
@@ -332,7 +327,6 @@ async def ws_confirm_replacement(hass, connection, msg):
         connection.send_error(msg["id"], "not_found", f"Entity {entity_id} not in store")
 
 
-@websocket_api.require_admin
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "juice_patrol/mark_replaced",
@@ -363,21 +357,22 @@ async def ws_mark_replaced(hass, connection, msg):
         connection.send_error(msg["id"], "not_found", f"Entity {entity_id} not in store")
 
 
-@websocket_api.require_admin
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "juice_patrol/undo_replacement",
         vol.Required("entity_id"): cv.entity_id,
+        vol.Optional("timestamp"): vol.Coerce(float),
     }
 )
 @websocket_api.async_response
 async def ws_undo_replacement(hass, connection, msg):
-    """Undo a manual battery replacement."""
+    """Undo a battery replacement. If timestamp given, remove that specific one; otherwise pop most recent."""
     coordinator = _ws_get_coordinator(hass, connection, msg["id"])
     if not coordinator:
         return
     entity_id = msg["entity_id"]
-    if await coordinator.async_undo_replacement(entity_id):
+    timestamp = msg.get("timestamp")
+    if await coordinator.async_undo_replacement(entity_id, timestamp=timestamp):
         connection.send_result(msg["id"], {"ok": True})
     else:
         connection.send_error(
@@ -385,7 +380,6 @@ async def ws_undo_replacement(hass, connection, msg):
         )
 
 
-@websocket_api.require_admin
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "juice_patrol/deny_replacement",
@@ -408,7 +402,6 @@ async def ws_deny_replacement(hass, connection, msg):
         )
 
 
-@websocket_api.require_admin
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "juice_patrol/detect_battery_type",
@@ -433,7 +426,6 @@ async def ws_detect_battery_type(hass, connection, msg):
     })
 
 
-@websocket_api.require_admin
 @websocket_api.websocket_command(
     {vol.Required("type"): "juice_patrol/refresh"}
 )
@@ -450,7 +442,6 @@ async def ws_refresh(hass, connection, msg):
     connection.send_result(msg["id"], {"ok": True})
 
 
-@websocket_api.require_admin
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "juice_patrol/recalculate",
@@ -472,7 +463,6 @@ async def ws_recalculate(hass, connection, msg):
     connection.send_result(msg["id"], {"ok": True})
 
 
-@websocket_api.require_admin
 @websocket_api.websocket_command(
     {vol.Required("type"): "juice_patrol/get_shopping_list"}
 )
@@ -541,7 +531,6 @@ async def ws_get_shopping_list(hass, connection, msg):
     })
 
 
-@websocket_api.require_admin
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "juice_patrol/get_entity_chart",
@@ -564,7 +553,6 @@ async def ws_get_entity_chart(hass, connection, msg):
     connection.send_result(msg["id"], chart_data)
 
 
-@websocket_api.require_admin
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "juice_patrol/set_ignored",
@@ -584,7 +572,6 @@ async def ws_set_ignored(hass, connection, msg):
     connection.send_result(msg["id"], {"ok": True})
 
 
-@websocket_api.require_admin
 @websocket_api.websocket_command(
     {vol.Required("type"): "juice_patrol/get_ignored"}
 )
