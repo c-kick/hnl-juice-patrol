@@ -4,6 +4,7 @@ import {
   getBatteryIcon, getLevelColor, formatLevel, formatRate,
   formatTimeRemaining, formatDate, isFastDischarge,
   predictionReasonDetail, renderReliabilityBadge, getDeviceSubText,
+  confidenceTooltip,
 } from "../helpers.js";
 
 /**
@@ -25,7 +26,23 @@ export function renderDetailView(panel) {
         style="color:${getLevelColor(dev.level, dev.threshold)};--mdc-icon-size:40px"
       ></ha-icon>
       <div>
-        <h1>${dev.name || dev.sourceEntity}</h1>
+        <div class="detail-name-row">
+          <h1>${dev.name || dev.sourceEntity}</h1>
+          <ha-icon-button
+            .path=${"M11,9H13V7H11M12,20C7.59,20 4,16.41 4,12C4,7.59 7.59,4 12,4C16.41,4 20,7.59 20,12C20,16.41 16.41,20 12,20M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M11,17H13V11H11V17Z"}
+            style="--mdc-icon-button-size:32px;--mdc-icon-size:20px;color:var(--secondary-text-color)"
+            title="More info"
+            @click=${() => {
+              panel.dispatchEvent(
+                new CustomEvent("hass-more-info", {
+                  bubbles: true,
+                  composed: true,
+                  detail: { entityId },
+                })
+              );
+            }}
+          ></ha-icon-button>
+        </div>
         ${subText ? html`<div class="detail-header-sub">${subText}</div>` : nothing}
       </div>
     </div>
@@ -85,7 +102,7 @@ function renderDetailMeta(panel, dev) {
         </div>
         <div class="detail-meta-item">
           <div class="detail-meta-label">Confidence</div>
-          <div class="detail-meta-value">
+          <div class="detail-meta-value" title="${confidenceTooltip(chargePred || pred, cd)}">
             ${chargePred?.confidence
               ? html`<span class="confidence-dot ${chargePred.confidence}"></span>${chargePred.confidence}`
               : html`<span class="confidence-dot ${pred.confidence || ""}"></span>${pred.confidence || "\u2014"}`}
@@ -219,7 +236,6 @@ function renderDetailActions(panel) {
             <div class="replacement-table-header">
               <span>Date</span>
               <span>Type</span>
-              <span>Details</span>
               <span></span>
             </div>
             ${entries.map((e) => html`
@@ -231,13 +247,8 @@ function renderDetailActions(panel) {
                     Replaced
                   ` : html`
                     <ha-icon icon="mdi:help-circle-outline" style="--mdc-icon-size:16px;color:var(--warning-color,#ff9800)"></ha-icon>
-                    Suspected
+                    Suspected (${Math.round(e.old_level)}% \u2192 ${Math.round(e.new_level)}%)
                   `}
-                </span>
-                <span style="color:var(--secondary-text-color)">
-                  ${e.type === "suspected"
-                    ? html`${Math.round(e.old_level)}% \u2192 ${Math.round(e.new_level)}%`
-                    : html`\u2014`}
                 </span>
                 <span>
                   ${e.type === "suspected" ? html`
@@ -269,20 +280,6 @@ function renderDetailActions(panel) {
       </ha-card>
     ` : nothing}
     <div class="detail-actions">
-      <ha-button
-        @click=${() => {
-          panel.dispatchEvent(
-            new CustomEvent("hass-more-info", {
-              bubbles: true,
-              composed: true,
-              detail: { entityId },
-            })
-          );
-        }}
-      >
-        <ha-icon slot="start" icon="mdi:information-outline"></ha-icon>
-        More info
-      </ha-button>
       <ha-button
         @click=${() => panel._markReplaced(entityId)}
       >

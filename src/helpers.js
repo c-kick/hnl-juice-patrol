@@ -168,6 +168,64 @@ export function erraticTooltip(dev) {
   return parts.join(". ");
 }
 
+export function confidenceTooltip(pred, chartData) {
+  if (!pred) return "";
+  const conf = pred.confidence;
+  const r2 = pred.r_squared;
+  const points = pred.data_points_used;
+
+  // Total history timespan from chart readings
+  const readings = chartData?.readings;
+  const totalSpanDays = readings?.length >= 2
+    ? (readings[readings.length - 1].t - readings[0].t) / 86400
+    : null;
+
+  // Regression window from t0
+  const regSpanDays = pred.t0 ? (Date.now() / 1000 - pred.t0) / 86400 : null;
+
+  // Did regime-change detection narrow the window?
+  const isNarrowed = totalSpanDays != null && regSpanDays != null
+    && totalSpanDays > regSpanDays * 2;
+
+  if (conf === "high") {
+    const parts = ["Good trend fit (R\u00b2 > 0.8), 7+ days of data, 10+ readings"];
+    if (isNarrowed) {
+      parts.push(`Based on recent trend (${_fmtDays(regSpanDays)}) after a rate change was detected in ${_fmtDays(totalSpanDays)} of history`);
+    }
+    return parts.join(". ");
+  }
+
+  // Explain what's limiting confidence
+  const factors = [];
+  if (r2 != null && r2 <= 0.8) {
+    factors.push(`trend fit is ${r2 <= 0.3 ? "weak" : "moderate"} (R\u00b2 ${r2.toFixed(2)})`);
+  }
+  if (regSpanDays != null && regSpanDays < 7 && !isNarrowed) {
+    factors.push(`only ${_fmtDays(regSpanDays)} of data (need 7d+)`);
+  }
+  if (points != null && points < 10) {
+    factors.push(`only ${points} readings (need 10+)`);
+  }
+
+  const label = conf === "medium" ? "Medium" : conf === "low" ? "Low" : "Insufficient";
+  const reason = factors.length ? `: ${factors.join(", ")}` : "";
+
+  if (isNarrowed) {
+    return `${label} confidence${reason}. A rate change was detected \u2014 prediction uses the recent ${_fmtDays(regSpanDays)} trend from ${_fmtDays(totalSpanDays)} of history.`;
+  }
+
+  if (conf === "insufficient_data") {
+    return "Insufficient data: not enough readings or trend too weak to make a prediction";
+  }
+  return `${label} confidence${reason}`;
+}
+
+function _fmtDays(d) {
+  if (d < 1) return `${Math.round(d * 24)}h`;
+  if (d < 30) return `${d.toFixed(1)}d`;
+  return `${Math.round(d / 30)}mo`;
+}
+
 export function getDeviceSubText(dev) {
   const parts = [];
   const nameLC = (dev.name || "").toLowerCase();

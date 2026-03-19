@@ -8,6 +8,7 @@ from custom_components.juice_patrol.engine.predictions import (
     PredictionResult,
     PredictionStatus,
     _adaptive_half_life,
+    _detect_regime_change,
     _median,
     _prediction_stability_score,
     _reject_by_residual,
@@ -838,3 +839,138 @@ class TestPredictCharge:
         result = predict_charge(readings)
         # slope ~0.2%/hr → 450h to full — should be capped
         assert result.estimated_full_timestamp is None
+
+
+class TestDetectRegimeChange:
+    """Test _detect_regime_change function."""
+
+    def _make_two_phase(
+        self,
+        slow_hours: int,
+        slow_start: float,
+        slow_end: float,
+        fast_hours: int,
+        fast_start: float,
+        fast_end: float,
+    ) -> tuple[list[dict], list[float], list[float], float]:
+        """Create two-phase readings and return (readings, x, y, ts_slope)."""
+        t0 = time.time() - (slow_hours + fast_hours) * 3600
+        readings = []
+        for h in range(slow_hours):
+            v = slow_start + (slow_end - slow_start) * h / max(slow_hours - 1, 1)
+            readings.append({"t": t0 + h * 3600, "v": v})
+        for h in range(fast_hours):
+            v = fast_start + (fast_end - fast_start) * h / max(fast_hours - 1, 1)
+            readings.append({"t": t0 + (slow_hours + h) * 3600, "v": v})
+        x = [(r["t"] - readings[0]["t"]) / 86400.0 for r in readings]
+        y = [r["v"] for r in readings]
+        slope, _, _ = _theil_sen(x, y)
+        return readings, x, y, slope
+
+    def test_no_change_gradual_drain(self):
+        """Gradual drain should not trigger regime change."""
+        readings = _make_readings(100, 70, 168, span_hours=168)
+        x = [(r["t"] - readings[0]["t"]) / 86400.0 for r in readings]
+        y = [r["v"] for r in readings]
+        slope, _, _ = _theil_sen(x, y)
+        assert _detect_regime_change(readings, x, y, slope) is None
+
+    def test_acceleration_detected(self):
+        """Slow drain then steep drop should be detected."""
+        readings, x, y, slope = self._make_two_phase(
+            slow_hours=150, slow_start=100, slow_end=92,
+            fast_hours=15, fast_start=92, fast_end=70,
+        )
+        result = _detect_regime_change(readings, x, y, slope)
+        assert result is not None
+        tail_readings, _, _ = result
+        # Tail should contain only the steep portion
+        assert tail_readings[-1]["v"] < 75
+
+    def test_deceleration_detected(self):
+        """Fast drain then slowdown should be detected."""
+        readings, x, y, slope = self._make_two_phase(
+            slow_hours=120, slow_start=100, slow_end=30,
+            fast_hours=72, fast_start=30, fast_end=20,
+        )
+        result = _detect_regime_change(readings, x, y, slope)
+        assert result is not None
+
+    def test_flat_overall_not_triggered(self):
+        """Flat overall slope should not trigger detection."""
+        readings = _make_readings(99.5, 99.0, 100, span_hours=168)
+        x = [(r["t"] - readings[0]["t"]) / 86400.0 for r in readings]
+        y = [r["v"] for r in readings]
+        # Force a near-flat overall slope
+        assert _detect_regime_change(readings, x, y, -0.005) is None
+
+    def test_insufficient_points(self):
+        """Too few readings should return None."""
+        readings = _make_readings(100, 90, 6, span_hours=6)
+        x = [(r["t"] - readings[0]["t"]) / 86400.0 for r in readings]
+        y = [r["v"] for r in readings]
+        slope, _, _ = _theil_sen(x, y)
+        assert _detect_regime_change(readings, x, y, slope) is None
+
+    def test_tail_range_too_small(self):
+        """Tail with < 3% range should not trigger."""
+        readings, x, y, slope = self._make_two_phase(
+            slow_hours=120, slow_start=100, slow_end=40,
+            fast_hours=48, fast_start=40, fast_end=38.5,
+        )
+        result = _detect_regime_change(readings, x, y, slope)
+        assert result is None
+
+    def test_sign_flip_detected(self):
+        """Draining then rising should be detected."""
+        readings, x, y, slope = self._make_two_phase(
+            slow_hours=120, slow_start=100, slow_end=40,
+            fast_hours=48, fast_start=40, fast_end=55,
+        )
+        result = _detect_regime_change(readings, x, y, slope)
+        assert result is not None
+
+
+class TestPredictDischargeRegimeChange:
+    """Integration tests: predict_discharge with regime changes."""
+
+    def test_acceleration_uses_tail(self):
+        """Acceleration should produce steeper slope than overall data."""
+        t0 = time.time() - 175 * 3600
+        readings = []
+        # Flat at 100% for 26 hours
+        for h in range(26):
+            readings.append({"t": t0 + h * 3600, "v": 100.0})
+        # Slow drain for 130 hours
+        for h in range(130):
+            v = 99.9 - (h / 130) * 8.5
+            readings.append({"t": t0 + (26 + h) * 3600, "v": v})
+        # Steep drop for 15 hours
+        for h in range(15):
+            v = 91.4 - (h / 14) * 21.8
+            readings.append({"t": t0 + (156 + h) * 3600, "v": v})
+
+        result = predict_discharge(readings, target_level=0.0)
+        # With regime change detection, should use the steep tail
+        assert result.slope_per_day is not None
+        assert abs(result.slope_per_day) > 5.0  # Much steeper than ~1.5
+        assert result.estimated_days_remaining is not None
+        assert result.estimated_days_remaining < 20  # Not 55+
+
+    def test_no_double_recursion(self):
+        """Three-phase data should not recurse beyond depth 1."""
+        t0 = time.time() - 300 * 3600
+        readings = []
+        # Phase 1: slow (100h)
+        for h in range(100):
+            readings.append({"t": t0 + h * 3600, "v": 100 - h * 0.05})
+        # Phase 2: medium (100h)
+        for h in range(100):
+            readings.append({"t": t0 + (100 + h) * 3600, "v": 95 - h * 0.3})
+        # Phase 3: steep (50h)
+        for h in range(50):
+            readings.append({"t": t0 + (200 + h) * 3600, "v": 65 - h * 1.0})
+
+        # Should not raise RecursionError — depth is capped at 1
+        result = predict_discharge(readings, target_level=0.0)
+        assert result.status in (PredictionStatus.NORMAL, PredictionStatus.FLAT)

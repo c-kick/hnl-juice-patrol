@@ -115,6 +115,7 @@ def predict_discharge(
     half_life_days: float | None = None,
     min_readings: int = 3,
     min_timespan_hours: float = 24.0,
+    _depth: int = 0,
 ) -> PredictionResult:
     """Predict when a battery will reach the target level.
 
@@ -165,6 +166,49 @@ def predict_discharge(
     t0 = readings[0]["t"]
     x = [(r["t"] - t0) / 86400.0 for r in readings]
     y = [r["v"] for r in readings]
+
+    # Regime-change detection (BEFORE outlier rejection, at depth 0 only).
+    # Must run on the unfiltered data because outlier rejection would remove
+    # the steep tail readings — they look like outliers relative to the slow
+    # trend, but they ARE the signal we want to capture.
+    # Limited to depth 0 to prevent cascading recursion on multi-phase data.
+    if _depth == 0:
+        pre_ts_slope, _, _ = _theil_sen(x, y)
+        tail_result = _detect_regime_change(readings, x, y, pre_ts_slope)
+        if tail_result is not None:
+            tail_readings, _, _ = tail_result
+            result = predict_discharge(
+                tail_readings,
+                target_level=target_level,
+                half_life_days=half_life_days,
+                min_readings=min(min_readings, 3),
+                min_timespan_hours=min(min_timespan_hours, 1.0),
+                _depth=1,
+            )
+            # Reclassify confidence using the full dataset context.
+            # The tail prediction is backed by the full history — the
+            # regime-change detector analyzed all of it and deliberately
+            # chose the tail.  Using only the tail's narrow timespan for
+            # confidence would mislead users who can see months of data.
+            from dataclasses import replace as _replace
+            full_conf = _classify_confidence(
+                result.r_squared or 0.0,
+                timespan_hours,
+                len(readings),
+            )
+            if full_conf != result.confidence:
+                result = _replace(
+                    result,
+                    confidence=full_conf,
+                    reliability=compute_reliability(
+                        result.data_points_used,
+                        timespan_hours,
+                        result.r_squared,
+                        full_conf,
+                        days_remaining=result.estimated_days_remaining,
+                    ),
+                )
+            return result
 
     # Reject outliers using residual-based method (time-aware).
     # _reject_by_residual runs its own Theil-Sen fit to compute residuals.
@@ -557,6 +601,94 @@ def _theil_sen(
     r_squared = max(0.0, 1.0 - ss_res / ss_tot) if ss_tot > 0 else 0.0
 
     return slope, intercept, r_squared
+
+
+def _detect_regime_change(
+    readings: list[dict[str, float]],
+    x: list[float],
+    y: list[float],
+    overall_slope: float,
+    min_tail_points: int = 5,
+    change_ratio: float = 3.0,
+) -> tuple[list[dict[str, float]], list[float], list[float]] | None:
+    """Detect if the recent tail has a dramatically different slope.
+
+    Catches two scenarios:
+    - **Acceleration:** battery drains slowly then hits a voltage cliff and
+      drops steeply.  Theil-Sen's median is dominated by the slow period.
+    - **Deceleration:** battery was draining fast then stabilised (e.g. device
+      entered power-save mode).  Theil-Sen's median overestimates the drain.
+
+    Checks whether the last 24 hours of readings (or the last 20% of readings,
+    whichever gives more points, min 5) have a slope whose magnitude differs
+    by ≥ change_ratio from the overall slope.  If so, returns the tail readings
+    for re-prediction.
+
+    Args:
+        readings: Pre-rejection readings (sorted by time).
+        x: Time values (days relative to t0).
+        y: Level values.
+        overall_slope: Slope from the full-data Theil-Sen fit.
+        min_tail_points: Minimum readings required in the tail.
+        change_ratio: How many times steeper/shallower the tail must be.
+
+    Returns:
+        (tail_readings, tail_x, tail_y) if regime change detected, else None.
+    """
+    if len(readings) < min_tail_points + 3:
+        # Need enough readings for both a tail and a meaningful "before"
+        return None
+
+    if abs(overall_slope) < 0.01:
+        # Overall trend is flat — regime change detection not useful
+        return None
+
+    # Determine tail cutoff: last 24 hours or last 20% of readings
+    now_t = readings[-1]["t"]
+    cutoff_24h = now_t - 86400
+    idx_24h = next(
+        (i for i in range(len(readings)) if readings[i]["t"] >= cutoff_24h),
+        len(readings),
+    )
+    idx_20pct = max(0, len(readings) - max(min_tail_points, len(readings) // 5))
+    # Use whichever gives more tail points (but stay within the data)
+    tail_start = min(idx_24h, idx_20pct)
+
+    tail_readings = readings[tail_start:]
+    if len(tail_readings) < min_tail_points:
+        return None
+
+    # Need meaningful range in the tail — at least 3% change
+    tail_range = abs(tail_readings[0]["v"] - tail_readings[-1]["v"])
+    if tail_range < 3.0:
+        return None
+
+    # Compute Theil-Sen slope on the tail
+    tail_t0 = tail_readings[0]["t"]
+    tail_x = [(r["t"] - tail_t0) / 86400.0 for r in tail_readings]
+    tail_y = [r["v"] for r in tail_readings]
+    tail_slope, _, _ = _theil_sen(tail_x, tail_y)
+
+    # Check if the ratio between tail and overall slope magnitude
+    # exceeds the threshold — in either direction:
+    # - ratio >> 1: acceleration (tail is steeper)
+    # - ratio << 1: deceleration (tail is shallower / opposite sign)
+    abs_overall = abs(overall_slope)
+    abs_tail = abs(tail_slope)
+
+    # Sign flip (e.g. was draining, now charging) is always a regime change
+    if overall_slope * tail_slope < 0 and abs_tail > 0.1:
+        return tail_readings, tail_x, tail_y
+
+    # Acceleration: tail is much steeper
+    if abs_overall > 0 and abs_tail / abs_overall >= change_ratio:
+        return tail_readings, tail_x, tail_y
+
+    # Deceleration: tail is much shallower (but tail must have meaningful slope)
+    if abs_tail > 0.05 and abs_overall / abs_tail >= change_ratio:
+        return tail_readings, tail_x, tail_y
+
+    return None
 
 
 def _adaptive_half_life(

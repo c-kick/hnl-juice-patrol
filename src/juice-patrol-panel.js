@@ -59,6 +59,7 @@ class JuicePatrolPanel extends LitElement {
     this._chartStale = false;
     this._chartEl = null;
     this._chartLastLevel = null;
+    this._chartLastPredictedEmpty = null;
     this._flashGeneration = 0;
     this._ignoredEntities = null;
     this._chartRange = "auto";
@@ -260,13 +261,19 @@ class JuicePatrolPanel extends LitElement {
       this._loadIgnored();
     }
 
-    // When in detail view and the entity level changes from a background
-    // coordinator update, show a stale notice instead of redrawing the chart
-    // — avoids annoying mid-view redraws from hourly scans or erratic sensors.
-    if (this._activeView === "detail" && this._detailEntity && !this._chartLoading) {
+    // When in detail view and the prediction changes significantly, show a
+    // stale notice instead of redrawing the chart — avoids annoying mid-view
+    // redraws from hourly scans or erratic sensors.
+    // "Significant" is relative to time remaining: a 1-day shift matters when
+    // the battery dies in 2 days, not when it has 2 years left.
+    if (this._activeView === "detail" && this._detailEntity && !this._chartLoading && this._chartData) {
       const dev = this._getDevice(this._detailEntity);
-      if (dev && dev.level !== this._chartLastLevel) {
-        this._chartStale = true;
+      if (dev) {
+        const newPredTs = dev.predictedEmpty ? new Date(dev.predictedEmpty).getTime() : null;
+        const oldPredTs = this._chartLastPredictedEmpty;
+        if (this._isPredictionSignificantlyChanged(oldPredTs, newPredTs)) {
+          this._chartStale = true;
+        }
       }
     }
   }
@@ -434,6 +441,28 @@ class JuicePatrolPanel extends LitElement {
       }
       return true;
     });
+  }
+
+  /**
+   * Check if the predicted-empty timestamp changed significantly.
+   *
+   * "Significant" is relative to the time remaining: a 1-day shift is
+   * meaningful when the battery dies in 2 days (50%), but not when it
+   * has 2 years left (0.1%).  Uses a 10% relative threshold.
+   *
+   * Also triggers on state transitions: prediction appearing/disappearing.
+   */
+  _isPredictionSignificantlyChanged(oldTs, newTs) {
+    // State transitions: no-prediction ↔ prediction is always significant
+    if ((oldTs == null) !== (newTs == null)) return true;
+    // Both null — no change
+    if (oldTs == null && newTs == null) return false;
+
+    const now = Date.now();
+    const timeRemaining = Math.max(Math.max(oldTs, newTs) - now, 3_600_000); // floor: 1h
+    const shift = Math.abs(newTs - oldTs);
+    // Significant if the shift exceeds 10% of time remaining
+    return shift / timeRemaining > 0.10;
   }
 
   // ── Helpers (thin wrappers that delegate to imported functions) ──
@@ -742,6 +771,8 @@ class JuicePatrolPanel extends LitElement {
         entity_id: entityId,
       });
       this._chartLastLevel = data?.level ?? null;
+      const predTs = data?.prediction?.estimated_empty_timestamp;
+      this._chartLastPredictedEmpty = predTs ? predTs * 1000 : null; // to ms
       this._chartData = data;
       this._chartStale = false;
     } catch (e) {

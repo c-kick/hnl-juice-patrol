@@ -25,6 +25,11 @@ export const panelStyles = css`
     gap: 16px;
     margin-bottom: 16px;
   }
+  .detail-name-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
   .detail-header h1 {
     margin: 0;
     font-size: 24px;
@@ -95,6 +100,7 @@ export const panelStyles = css`
   .confidence-dot.high { background: var(--success-color); }
   .confidence-dot.medium { background: var(--warning-color); }
   .confidence-dot.low { background: var(--error-color); }
+  .confidence-dot.history-based { background: var(--disabled-text-color, #999); }
   .empty-state {
     padding: 40px;
     text-align: center;
@@ -423,7 +429,7 @@ export const panelStyles = css`
   }
   .replacement-table {
     display: grid;
-    grid-template-columns: auto auto 1fr auto;
+    grid-template-columns: auto 1fr auto;
     gap: 0;
     font-size: 0.9em;
   }
