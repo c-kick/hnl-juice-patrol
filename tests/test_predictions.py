@@ -914,14 +914,19 @@ class TestDetectRegimeChange:
         slope, _, _ = _theil_sen(x, y)
         assert _detect_regime_change(readings, x, y, slope) is None
 
-    def test_tail_range_too_small(self):
-        """Tail with < 3% range should not trigger."""
+    def test_deceleration_into_plateau_detected(self):
+        """Clear discharge head decelerating into near-flat tail SHOULD trigger.
+
+        This is the TRADFRI scenario: 100→40 over weeks, then sitting at
+        ~40 with tiny oscillation. The head slope is clearly discharging,
+        so we want to detect the regime change and predict from the tail.
+        """
         readings, x, y, slope = self._make_two_phase(
             slow_hours=120, slow_start=100, slow_end=40,
             fast_hours=48, fast_start=40, fast_end=38.5,
         )
         result = _detect_regime_change(readings, x, y, slope)
-        assert result is None
+        assert result is not None
 
     def test_sign_flip_detected(self):
         """Draining then rising should be detected."""

@@ -190,6 +190,12 @@ export async function initChart(panel, chartData) {
         dir = -1;
       }
     }
+    // If currently charging and the last direction was rising, push a
+    // virtual max at the last reading so the current charging zone renders.
+    if (isCharging && dir === 1 && allReadings.length > 0) {
+      const last = allReadings[allReadings.length - 1];
+      extrema.push({ type: "max", idx: allReadings.length - 1, t: last.t, v: last.v });
+    }
     // Pair consecutive min→max as charging periods (min rise of 10%)
     for (let i = 0; i < extrema.length - 1; i++) {
       if (extrema[i].type === "min" && extrema[i + 1].type === "max") {

@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass
 from enum import StrEnum
 
+from ..const import FLAT_SLOPE_THRESHOLD
 from .compress import compress as _sdt_compress
 from .curve_fit import extrapolate_to_threshold as _extrapolate
 from .curve_fit import fit_discharge_curve as _fit_curve
@@ -172,7 +173,7 @@ def predict_discharge(
         return _no_prediction(PredictionStatus.INSUFFICIENT_RANGE, len(readings))
 
     # SDT compress for fitting (preserves slope transitions, removes plateaus)
-    readings = _sdt_compress(readings)
+    readings = _sdt_compress(readings, step_size=step_size)
 
     # Convert timestamps to days relative to the first reading
     t0 = readings[0]["t"]
@@ -261,7 +262,16 @@ def _build_result_from_curve(
     # Intercept: value of the fitted curve at t=0
     intercept = fit.predict(0.0)
 
-    if slope > 0.01:
+    # For FLAT/CHARGING classification, use the overall (macro) slope
+    # rather than the instantaneous slope. Piecewise models return
+    # the slope of the *current segment*, which can be near-zero on a
+    # noisy plateau even when the macro trend is clearly discharging.
+    first_v = cleaned[0]["v"]
+    last_v = cleaned[-1]["v"]
+    duration_days = (cleaned[-1]["t"] - cleaned[0]["t"]) / 86400.0
+    overall_slope = (last_v - first_v) / duration_days if duration_days > 0 else 0.0
+
+    if overall_slope > 0.01:
         conf = _classify_confidence(r_squared, timespan_hours, n_cleaned)
         return PredictionResult(
             slope_per_day=round(slope, 4),
@@ -280,11 +290,15 @@ def _build_result_from_curve(
             t0=t0,
         )
 
-    if abs(slope) <= 0.02:
+    if abs(overall_slope) <= FLAT_SLOPE_THRESHOLD:
+        # Zero out positive slopes — a FLAT device shouldn't report
+        # a positive discharge rate (confusing in the UI).
+        flat_slope = 0.0 if slope > 0 else round(slope, 4)
+        flat_slope_per_hour = 0.0 if slope > 0 else slope_per_hour
         conf = _classify_confidence(r_squared, timespan_hours, n_cleaned)
         return PredictionResult(
-            slope_per_day=round(slope, 4),
-            slope_per_hour=slope_per_hour,
+            slope_per_day=flat_slope,
+            slope_per_hour=flat_slope_per_hour,
             intercept=round(intercept, 2),
             r_squared=round(r_squared, 4),
             confidence=conf,
@@ -429,11 +443,13 @@ def _predict_discharge_theil_sen(
             t0=t0,
         )
 
-    if abs(slope) <= 0.02:
+    if abs(slope) <= FLAT_SLOPE_THRESHOLD:
+        flat_slope = 0.0 if slope > 0 else round(slope, 4)
+        flat_slope_per_hour = 0.0 if slope > 0 else slope_per_hour
         conf = _classify_confidence(r_squared, timespan_hours, n_cleaned)
         return PredictionResult(
-            slope_per_day=round(slope, 4),
-            slope_per_hour=slope_per_hour,
+            slope_per_day=flat_slope,
+            slope_per_hour=flat_slope_per_hour,
             intercept=round(intercept, 2),
             r_squared=round(r_squared, 4),
             confidence=conf,
@@ -582,7 +598,7 @@ def predict_discharge_multisession(
     # Determine status from slope
     if median_slope > 0.01:
         status = PredictionStatus.CHARGING
-    elif abs(median_slope) <= 0.02:
+    elif abs(median_slope) <= FLAT_SLOPE_THRESHOLD:
         status = PredictionStatus.FLAT
     else:
         status = PredictionStatus.NORMAL
@@ -606,10 +622,16 @@ def predict_discharge_multisession(
     timespan_hours = (all_readings[-1]["t"] - all_readings[0]["t"]) / 3600
 
     if status == PredictionStatus.CHARGING or status == PredictionStatus.FLAT:
+        if status == PredictionStatus.FLAT and median_slope > 0:
+            report_slope = 0.0
+            report_slope_per_hour = 0.0
+        else:
+            report_slope = round(median_slope, 4)
+            report_slope_per_hour = slope_per_hour
         conf = _classify_confidence(r_squared, timespan_hours, total_points)
         return PredictionResult(
-            slope_per_day=round(median_slope, 4),
-            slope_per_hour=slope_per_hour,
+            slope_per_day=report_slope,
+            slope_per_hour=report_slope_per_hour,
             intercept=round(intercept, 2),
             r_squared=round(r_squared, 4),
             confidence=conf,
@@ -786,13 +808,15 @@ def _detect_regime_change(
     """Detect if the recent tail has a dramatically different slope.
 
     Catches acceleration (voltage cliff) and deceleration (power-save mode).
+    Also detects deceleration into a plateau: when the overall data is
+    clearly discharging but the tail has flattened out (e.g. TRADFRI
+    sensors sitting on a noisy plateau after a step drop).
     """
     if len(readings) < min_tail_points + 3:
         return None
 
-    if abs(overall_slope) < 0.01:
-        return None
-
+    # Compute the "head" slope (everything except the tail) to detect
+    # deceleration even when the overall slope is diluted by the plateau.
     now_t = readings[-1]["t"]
     cutoff_24h = now_t - 86400
     idx_24h = next(
@@ -806,9 +830,24 @@ def _detect_regime_change(
     if len(tail_readings) < min_tail_points:
         return None
 
-    tail_range = abs(tail_readings[0]["v"] - tail_readings[-1]["v"])
-    if tail_range < 3.0:
+    # Original gate: bail if overall slope is near-zero.
+    # But first, check if the HEAD (pre-tail) was clearly discharging
+    # even though the full dataset slope is diluted.
+    head_readings = readings[:tail_start + 1]  # overlap one point
+    if abs(overall_slope) < 0.01 and len(head_readings) >= min_tail_points:
+        head_t0 = head_readings[0]["t"]
+        head_x = [(r["t"] - head_t0) / 86400.0 for r in head_readings]
+        head_y = [r["v"] for r in head_readings]
+        head_slope, _, _ = _theil_sen(head_x, head_y)
+        # Head was clearly discharging — use it as the reference slope
+        if head_slope < -0.05:
+            overall_slope = head_slope
+        else:
+            return None
+    elif abs(overall_slope) < 0.01:
         return None
+
+    tail_range = abs(tail_readings[0]["v"] - tail_readings[-1]["v"])
 
     tail_t0 = tail_readings[0]["t"]
     tail_x = [(r["t"] - tail_t0) / 86400.0 for r in tail_readings]
@@ -818,13 +857,24 @@ def _detect_regime_change(
     abs_overall = abs(overall_slope)
     abs_tail = abs(tail_slope)
 
+    # Direction reversal (e.g. discharge→charge transition)
     if overall_slope * tail_slope < 0 and abs_tail > 0.1:
         return tail_readings, tail_x, tail_y
 
+    # Acceleration: tail is much steeper than overall (voltage cliff)
     if abs_overall > 0 and abs_tail / abs_overall >= change_ratio:
         return tail_readings, tail_x, tail_y
 
+    # Deceleration: tail is much flatter than overall (plateau after drop).
+    # Relaxed tail_range gate: noisy TRADFRI sensors oscillate ±2% on a
+    # plateau, so tail_range can be <3.0 even though the macro trend is real.
     if abs_tail > 0.05 and abs_overall / abs_tail >= change_ratio:
+        return tail_readings, tail_x, tail_y
+
+    # Deceleration into near-flat plateau: overall is clearly discharging
+    # but the tail is nearly flat (< FLAT threshold). This catches noisy
+    # plateaus where tail_range is tiny.
+    if abs_overall > 0.05 and abs_tail < 0.02 and tail_range < 3.0:
         return tail_readings, tail_x, tail_y
 
     return None

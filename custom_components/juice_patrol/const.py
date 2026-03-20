@@ -19,6 +19,7 @@ DEFAULT_SCAN_INTERVAL = 3600  # seconds (1 hour)
 # Prediction
 MIN_READINGS_FOR_PREDICTION = 3
 MIN_TIMESPAN_HOURS = 24
+FLAT_SLOPE_THRESHOLD = 0.02  # %/day — below this, classify as FLAT
 
 # Replacement detection — also mirrored in engine/analysis.py:_REPLACEMENT_LOW_MULTIPLIER
 REPLACEMENT_LOW_MULTIPLIER = 2  # "was reasonably low" = threshold × this

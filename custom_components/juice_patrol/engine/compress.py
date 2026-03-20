@@ -119,6 +119,7 @@ def compress(
     readings: list[dict[str, float]],
     epsilon: float = 2.0,
     min_points: int = 12,
+    step_size: float | None = None,
 ) -> list[dict[str, float]]:
     """Full compression pipeline: dedup then SDT with adaptive epsilon.
 
@@ -133,12 +134,23 @@ def compress(
         epsilon: Starting SDT tolerance in percentage points.
         min_points: Minimum output points. SDT will use a smaller epsilon
             if needed to preserve at least this many points.
+        step_size: If provided, cap epsilon at step_size * 0.4 so that
+            staircase sensors (e.g. Zigbee reporting in steps of 5%)
+            don't get compressed to fewer points than their actual
+            transitions. Without this, epsilon=2.0 swallows steps of
+            size 3-5 that are real discharge transitions.
 
     Returns:
         Compressed readings in the same format.
     """
     if len(readings) <= 2:
         return list(readings)
+
+    # For staircase sensors, reduce epsilon so transitions aren't swallowed.
+    # A step_size of 5 → epsilon capped at 2.0 (no change for fine sensors),
+    # but step_size of 3 → epsilon capped at 1.2, preserving each step.
+    if step_size is not None and step_size > 0:
+        epsilon = min(epsilon, step_size * 0.4)
 
     deduped = dedup_consecutive(readings)
 
