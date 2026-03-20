@@ -17,6 +17,7 @@ from ..const import (
     STORE_MINOR_VERSION,
     STORE_VERSION,
 )
+from ..engine.models import MAX_CYCLES_PER_DEVICE
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,6 +35,10 @@ class DeviceData:
     replacement_confirmed: bool = True  # False when jump detected but not confirmed
     source_entity: str = ""
     device_id: str | None = None
+    completed_cycles: list[dict] = field(default_factory=list)
+    # Each cycle: {"start_t": float, "end_t": float, "start_pct": float,
+    #              "end_pct": float, "duration_days": float,
+    #              "model": str, "params": dict}
 
     @property
     def last_replaced(self) -> float | None:
@@ -59,6 +64,7 @@ class DeviceData:
             replacement_confirmed=data.get("replacement_confirmed", True),
             source_entity=data.get("source_entity", entity_id),
             device_id=data.get("device_id"),
+            completed_cycles=data.get("completed_cycles", []),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -77,6 +83,8 @@ class DeviceData:
             result["battery_type"] = self.battery_type
         if self.is_rechargeable is not None:
             result["is_rechargeable"] = self.is_rechargeable
+        if self.completed_cycles:
+            result["completed_cycles"] = self.completed_cycles
         return result
 
 
@@ -86,6 +94,7 @@ class StoreData:
 
     version: int = STORE_MINOR_VERSION
     devices: dict[str, DeviceData] = field(default_factory=dict)
+    bootstrap_complete: bool = False
 
 
 class JuicePatrolStore:
@@ -105,6 +114,17 @@ class JuicePatrolStore:
     def devices(self) -> dict[str, DeviceData]:
         """Return the device data dict."""
         return self._data.devices
+
+    @property
+    def bootstrap_complete(self) -> bool:
+        """Return whether the cycle bootstrap has run."""
+        return self._data.bootstrap_complete
+
+    @bootstrap_complete.setter
+    def bootstrap_complete(self, value: bool) -> None:
+        """Set the bootstrap complete flag."""
+        self._data.bootstrap_complete = value
+        self._dirty = True
 
     async def async_load(self) -> None:
         """Load data from disk."""
@@ -144,6 +164,9 @@ class JuicePatrolStore:
                             dev_data["replacement_history"] = [lr]
                         else:
                             dev_data.setdefault("replacement_history", [])
+                    # v3 → v4: add completed_cycles
+                    if old_version < 4:
+                        dev_data.setdefault("completed_cycles", [])
                 self._dirty = True
 
             self._data = StoreData(
@@ -152,6 +175,7 @@ class JuicePatrolStore:
                     entity_id: DeviceData.from_dict(dev_data, entity_id)
                     for entity_id, dev_data in raw.get("devices", {}).items()
                 },
+                bootstrap_complete=raw.get("bootstrap_complete", False),
             )
             _LOGGER.info(
                 "Loaded store with %d devices", len(self._data.devices)
@@ -175,6 +199,7 @@ class JuicePatrolStore:
                 entity_id: dev.to_dict()
                 for entity_id, dev in self._data.devices.items()
             },
+            "bootstrap_complete": self._data.bootstrap_complete,
         }
         try:
             await self._store.async_save(data)
@@ -365,6 +390,34 @@ class JuicePatrolStore:
         if dev is None:
             return False
         dev.replacement_confirmed = confirmed
+        self._dirty = True
+        return True
+
+    def add_completed_cycle(
+        self, entity_id: str, cycle: dict,
+    ) -> bool:
+        """Append a completed cycle to a device's history.
+
+        Deduplicates by end_t (within 60s tolerance). Caps at
+        MAX_CYCLES_PER_DEVICE, evicting oldest.
+
+        Returns True if added, False if device not found or duplicate.
+        """
+        dev = self._data.devices.get(entity_id)
+        if dev is None:
+            return False
+
+        end_t = cycle.get("end_t")
+        if end_t is not None:
+            # Deduplicate: don't add if there's already a cycle ending near this time
+            for existing in dev.completed_cycles:
+                if abs(existing.get("end_t", 0) - end_t) < 60:
+                    return False
+
+        dev.completed_cycles.append(cycle)
+        # Cap at max, evict oldest
+        if len(dev.completed_cycles) > MAX_CYCLES_PER_DEVICE:
+            dev.completed_cycles = dev.completed_cycles[-MAX_CYCLES_PER_DEVICE:]
         self._dirty = True
         return True
 

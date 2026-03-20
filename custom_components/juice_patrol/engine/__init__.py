@@ -10,6 +10,8 @@ from .analysis import (
     analyze_battery,
     detect_replacement_jumps,
 )
+from .compress import compress, sdt_compress
+from .curve_fit import CurveFitResult, extrapolate_to_threshold, fit_discharge_curve
 from .predictions import (
     ChargePredictionResult,
     Confidence,
@@ -21,24 +23,34 @@ from .predictions import (
     predict_discharge,
     predict_discharge_multisession,
 )
-from .sessions import extract_discharge_sessions
+from .models import ClassPrior, DeviceClassModels
+from .sessions import CompletedCycle, extract_completed_cycles, extract_discharge_sessions
 from .utils import detect_step_size
 
 __all__ = [
     "AnalysisResult",
     "ChargePredictionResult",
     "Confidence",
+    "CurveFitResult",
     "DischargeAnomaly",
     "PredictionResult",
     "PredictionStatus",
     "Stability",
     "analyze_battery",
+    "ClassPrior",
+    "CompletedCycle",
+    "compress",
     "compute_reliability",
     "detect_replacement_jumps",
     "detect_step_size",
+    "DeviceClassModels",
     "extract_charging_segment",
+    "extract_completed_cycles",
     "extract_discharge_sessions",
+    "extrapolate_to_threshold",
+    "fit_discharge_curve",
     "predict_charge",
     "predict_discharge",
     "predict_discharge_multisession",
+    "sdt_compress",
 ]

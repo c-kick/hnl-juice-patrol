@@ -43,15 +43,19 @@ from ..discovery import (
 )
 from ..engine import (
     AnalysisResult,
+    DeviceClassModels,
     PredictionResult,
     PredictionStatus,
     analyze_battery,
     detect_replacement_jumps,
     extract_charging_segment,
+    extract_completed_cycles,
+    fit_discharge_curve,
     predict_charge,
     predict_discharge,
     predict_discharge_multisession,
 )
+from ..engine.compress import compress as sdt_compress
 from .battery_types import BatteryTypeResolver
 from .history import HistoryCache, async_get_readings
 from .store import JuicePatrolStore
@@ -180,6 +184,10 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._new_device_callbacks: list[
             Callable[[list[str]], None]
         ] = []
+        # Per-device-class model cache (populated from stored completed cycles)
+        self._class_models = DeviceClassModels()
+        # Background bootstrap task tracking
+        self._bootstrap_task: asyncio.Task | None = None
 
     def async_register_new_device_callback(
         self, cb: Callable[[list[str]], None]
@@ -212,12 +220,32 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Set up the coordinator: load store and run initial discovery."""
         await self.store.async_load()
         await self.type_resolver.async_load_library()
+        # Populate class models from stored completed cycles
+        self._load_class_models_from_store()
+
+    def _load_class_models_from_store(self) -> None:
+        """Populate DeviceClassModels from stored completed_cycles at startup."""
+        for entity_id, dev in self.store.devices.items():
+            if dev.completed_cycles:
+                self._class_models.load_cycles(
+                    entity_id, dev.battery_type, dev.completed_cycles,
+                )
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Periodic update: re-discover devices and save store."""
         await self._async_discover_and_subscribe()
         await self.store.async_save()
-        return await self._async_build_full_data()
+        result = await self._async_build_full_data()
+        # Launch retroactive bootstrap after first successful full build
+        if (
+            not self.store.bootstrap_complete
+            and self._bootstrap_task is None
+            and self.discovered
+        ):
+            self._bootstrap_task = self.hass.async_create_task(
+                self._async_bootstrap_completed_cycles()
+            )
+        return result
 
     async def _async_discover_and_subscribe(self) -> None:
         """Run discovery and subscribe to state changes for new entities."""
@@ -372,7 +400,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_known_levels[entity_id] = level
         battery.current_level = level
 
-        # Fire replacement event if detected
+        # Fire replacement event and record completed cycle if detected
         if replaced:
             self.hass.bus.async_fire(
                 EVENT_DEVICE_REPLACED,
@@ -385,6 +413,10 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             self._fired_low.discard(entity_id)
             self._fired_predicted_low.discard(entity_id)
+            # Schedule background cycle recording (needs async history read)
+            self.hass.async_create_task(
+                self._async_record_cycle_on_replacement(entity_id)
+            )
 
         # Only rebuild when the level actually changed (or replacement detected).
         # HA fires state_changed on attribute changes too — without this gate,
@@ -543,6 +575,14 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             and battery_state.lower() in ("charging",)
         )
 
+        # Look up class prior for this device (non-rechargeable only)
+        prior_battery_type = dev.battery_type if dev else None
+        class_prior = (
+            self._class_models.get_class_prior(prior_battery_type, entity_id)
+            if not is_rechargeable_hint
+            else None
+        )
+
         if is_rechargeable_hint and not is_charging and len(all_readings) >= 3:
             # Multi-session discharge analysis for rechargeable devices
             prediction = predict_discharge_multisession(
@@ -575,6 +615,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 half_life_days=None,
                 min_readings=MIN_READINGS_FOR_PREDICTION,
                 min_timespan_hours=min_span,
+                class_prior=class_prior,
             )
         # Sanity-check predictions against actual current level.
         # Copy before mutating to avoid corrupting shared state.
@@ -940,6 +981,60 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for entity_id, info in data.items():
             self._fire_events_for_entity(entity_id, info)
 
+    @staticmethod
+    def _generate_prediction_curve(
+        readings: list[dict[str, float]],
+        prediction: PredictionResult,
+        entity_data: dict[str, Any],
+    ) -> list[list[float]] | None:
+        """Generate curve points for the chart from the fitted model.
+
+        Re-fits the curve on the segment readings (fast — already compressed
+        by the prediction pipeline) and samples points from start to the
+        predicted empty timestamp or +30 days.
+
+        Returns [[timestamp_ms, value], ...] or None if fitting fails.
+        """
+        compressed = sdt_compress(readings)
+        if len(compressed) < 6:
+            return None
+
+        is_rechargeable = entity_data.get("is_rechargeable", False)
+        if is_rechargeable:
+            return None
+
+        fit = fit_discharge_curve(compressed)
+        if fit is None or fit.r_squared < 0.10:
+            return None
+
+        t0 = compressed[0]["t"]
+        now = time.time()
+        now_days = (now - t0) / 86400.0
+
+        # End point: predicted empty or +30 days
+        end_days = now_days + 30.0
+        if prediction.estimated_empty_timestamp is not None:
+            end_days = min(
+                (prediction.estimated_empty_timestamp - t0) / 86400.0,
+                now_days + 365.0,
+            )
+
+        # Sample ~50 points from start to end
+        start_days = 0.0
+        n_points = 50
+        step = (end_days - start_days) / max(n_points - 1, 1)
+        curve: list[list[float]] = []
+        for i in range(n_points):
+            d = start_days + i * step
+            v = fit.predict(d)
+            v = max(0.0, min(100.0, v))
+            ts_ms = (t0 + d * 86400.0) * 1000
+            curve.append([ts_ms, round(v, 2)])
+            if v <= 0:
+                break
+
+        return curve if len(curve) >= 2 else None
+
     async def async_get_entity_chart_data(
         self, entity_id: str
     ) -> dict[str, Any] | None:
@@ -1059,7 +1154,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Fallback: device reports charging but no live segment detected.
             # Use historical charge cycles to estimate time to full.
             is_charging_now = (
-                entity_data.get("charging_state", "").lower() == "charging"
+                (entity_data.get("charging_state") or "").lower() == "charging"
             )
             current_level = battery.current_level
             if (
@@ -1096,6 +1191,22 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 denied_replacements=dev.denied_replacements if dev else [],
             )
 
+        # Generate prediction curve points from the fitted model.
+        # The chart uses these to draw the actual model shape instead
+        # of a single straight line from slope + intercept.
+        prediction_curve: list[list[float]] | None = None
+        if (
+            prediction is not None
+            and prediction.status == PredictionStatus.NORMAL
+            and prediction.slope_per_day is not None
+            and readings
+        ):
+            prediction_curve = self._generate_prediction_curve(
+                readings, prediction, entity_data,
+            )
+        if prediction_curve:
+            pred_dict["prediction_curve"] = prediction_curve
+
         result = {
             "readings": readings,
             "all_readings": all_readings,
@@ -1122,11 +1233,196 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return result
 
+    # ------------------------------------------------------------------
+    # Completed-cycle detection (incremental + bootstrap)
+    # ------------------------------------------------------------------
+
+    async def _async_record_cycle_on_replacement(
+        self, entity_id: str,
+    ) -> None:
+        """Record a completed cycle when a replacement is detected (incremental path)."""
+        try:
+            all_readings = await async_get_readings(
+                self.hass, entity_id, since=None, cache=self._history_cache,
+            )
+            if len(all_readings) >= 3:
+                await self._async_try_record_completed_cycle(
+                    entity_id, all_readings,
+                )
+                await self.store.async_save()
+        except Exception:
+            _LOGGER.debug(
+                "Failed to record cycle for %s", entity_id, exc_info=True,
+            )
+
+    async def _async_try_record_completed_cycle(
+        self, entity_id: str, all_readings: list[dict[str, float]],
+    ) -> None:
+        """Check if a new completed cycle exists and record it.
+
+        Called after a replacement is detected. Cross-references discharge
+        sessions with all known replacement timestamps, fits the curve,
+        and stores the result.
+        """
+        dev = self.store.get_device(entity_id)
+        if dev is None or not dev.replacement_history:
+            return
+
+        cycles = extract_completed_cycles(
+            all_readings, dev.replacement_history,
+        )
+        if not cycles:
+            return
+
+        # Only process cycles not already stored (by end_t dedup)
+        stored_end_ts = {
+            c.get("end_t", 0) for c in dev.completed_cycles
+        }
+
+        for cycle in cycles:
+            # Skip if already stored (within 60s tolerance)
+            if any(abs(cycle.end_t - ts) < 60 for ts in stored_end_ts):
+                continue
+
+            # Fit the discharge curve to the cycle's readings
+            # Extract the readings for this cycle's time range
+            cycle_readings = [
+                r for r in all_readings
+                if cycle.start_t <= r["t"] <= cycle.end_t
+            ]
+            if len(cycle_readings) < 3:
+                continue
+
+            compressed = sdt_compress(cycle_readings)
+            fit = fit_discharge_curve(compressed)
+
+            cycle_dict: dict = {
+                "start_t": round(cycle.start_t),
+                "end_t": round(cycle.end_t),
+                "start_pct": round(cycle.start_pct, 1),
+                "end_pct": round(cycle.end_pct, 1),
+                "duration_days": round(cycle.duration_days, 2),
+            }
+            if fit is not None:
+                cycle_dict["model"] = fit.model_name
+                cycle_dict["params"] = {
+                    k: round(v, 6) for k, v in fit.params.items()
+                }
+            else:
+                cycle_dict["model"] = "none"
+                cycle_dict["params"] = {}
+
+            if self.store.add_completed_cycle(entity_id, cycle_dict):
+                self._class_models.update_from_cycle(
+                    entity_id,
+                    dev.battery_type,
+                    cycle_dict.get("model", "none"),
+                    cycle_dict.get("params", {}),
+                    cycle_dict["duration_days"],
+                )
+                _LOGGER.info(
+                    "Recorded completed cycle for %s: %.1f days, model=%s",
+                    entity_id,
+                    cycle_dict["duration_days"],
+                    cycle_dict.get("model", "none"),
+                )
+
+    async def _async_bootstrap_completed_cycles(self) -> None:
+        """One-time retroactive bootstrap: discover historical cycles.
+
+        Runs as a background task after setup — does NOT block integration.
+        Processes entities sequentially to avoid spiking CPU/memory on a Pi.
+        """
+        _LOGGER.info("Starting retroactive completed-cycle bootstrap")
+        count = 0
+        try:
+            for entity_id, battery in list(self.discovered.items()):
+                try:
+                    await self._async_bootstrap_entity(entity_id)
+                    count += 1
+                except Exception:
+                    _LOGGER.debug(
+                        "Bootstrap failed for %s", entity_id, exc_info=True,
+                    )
+                # Yield to event loop between entities
+                await asyncio.sleep(0)
+
+            self.store.bootstrap_complete = True
+            await self.store.async_save()
+            _LOGGER.info(
+                "Completed-cycle bootstrap finished: %d entities processed, "
+                "%d total cycles discovered",
+                count,
+                self._class_models.total_cycles,
+            )
+            # Trigger a refresh so predictions benefit immediately
+            await self.async_request_refresh()
+        except asyncio.CancelledError:
+            _LOGGER.debug("Bootstrap cancelled (shutdown)")
+        except Exception:
+            _LOGGER.warning("Bootstrap failed", exc_info=True)
+
+    async def _async_bootstrap_entity(self, entity_id: str) -> None:
+        """Bootstrap completed cycles for a single entity."""
+        dev = self.store.get_device(entity_id)
+        if dev is None:
+            return
+
+        # Skip rechargeable devices — they have cyclical charge/discharge,
+        # not replacement-terminated cycles
+        if dev.is_rechargeable is True:
+            return
+
+        # Pull full history
+        all_readings = await async_get_readings(
+            self.hass, entity_id, since=None, cache=self._history_cache,
+        )
+        if len(all_readings) < 3:
+            return
+
+        # Discover historical replacements from jump detection
+        threshold = dev.custom_threshold or self.low_threshold
+        suspected = detect_replacement_jumps(
+            all_readings,
+            low_threshold=threshold,
+            known_replacements=dev.replacement_history,
+            denied_replacements=dev.denied_replacements,
+        )
+
+        # Backfill discovered replacements into replacement_history
+        # (deduplicate with ±48h tolerance, do NOT fire events)
+        tolerance_s = 48 * 3600.0
+        for jump in suspected:
+            ts = jump.get("timestamp")
+            if ts is None:
+                continue
+            # Check if this timestamp is already known (within tolerance)
+            already_known = any(
+                abs(ts - existing) < tolerance_s
+                for existing in dev.replacement_history
+            )
+            if not already_known:
+                dev.replacement_history.append(ts)
+                dev.replacement_history.sort()
+                self.store.mark_dirty()
+
+        if not dev.replacement_history:
+            return
+
+        # Detect and record completed cycles
+        await self._async_try_record_completed_cycle(
+            entity_id, all_readings,
+        )
+
     async def async_shutdown(self) -> None:
         """Shut down the coordinator, save store, remove listeners."""
         if self._unsub_state_listener:
             self._unsub_state_listener()
             self._unsub_state_listener = None
+        # Cancel bootstrap if running
+        if self._bootstrap_task and not self._bootstrap_task.done():
+            self._bootstrap_task.cancel()
+            self._bootstrap_task = None
         # Cancel any pending rebuild tasks
         for task in self._pending_rebuilds.values():
             if not task.done():
