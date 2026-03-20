@@ -8,6 +8,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .models import ClassPrior
 
 
 # ---------------------------------------------------------------------------
@@ -239,8 +243,25 @@ class CurveFitResult:
         return 0.0
 
 
+def _prior_bounds(
+    median: float, iqr: float, default_lo: float, default_hi: float,
+) -> tuple[float, float]:
+    """Compute prior-informed bounds: median ± max(2*IQR, median*0.5).
+
+    Clamped to default bounds so parameters never go outside physical limits.
+    """
+    spread = max(2.0 * iqr, abs(median) * 0.5) if iqr > 0 else abs(median) * 0.5
+    lo = max(default_lo, median - spread)
+    hi = min(default_hi, median + spread)
+    if lo >= hi:
+        return default_lo, default_hi
+    return lo, hi
+
+
 def _fit_exponential(
     t: list[float], v: list[float],
+    prior_params: dict[str, float] | None = None,
+    prior_iqr: dict[str, float] | None = None,
 ) -> CurveFitResult | None:
     """Fit exponential decay: v(t) = a * exp(-b * t) + c."""
     if len(t) < 4:
@@ -252,10 +273,27 @@ def _fit_exponential(
     if duration <= 0:
         return None
 
+    # Default initial guesses
     a0 = max(start_v - end_v, 1.0)
-    # Initial guess for b: assume ~90% decay over the observed duration
     b0 = 2.3 / duration if duration > 0 else 0.01
     c0 = end_v
+
+    # Default bounds
+    bounds_a = (0.0, 200.0)
+    bounds_b = (1e-6, 10.0 / max(duration, 1.0))
+    bounds_c = (-10.0, max(end_v + 20.0, 50.0))
+
+    # Override with prior if available
+    if prior_params and prior_iqr:
+        if "a" in prior_params:
+            a0 = prior_params["a"]
+            bounds_a = _prior_bounds(a0, prior_iqr.get("a", 0), *bounds_a)
+        if "b" in prior_params:
+            b0 = prior_params["b"]
+            bounds_b = _prior_bounds(b0, prior_iqr.get("b", 0), *bounds_b)
+        if "c" in prior_params:
+            c0 = prior_params["c"]
+            bounds_c = _prior_bounds(c0, prior_iqr.get("c", 0), *bounds_c)
 
     def objective(params):
         a, b, c = params
@@ -265,11 +303,7 @@ def _fit_exponential(
             return 1e20
         return _rss(v, predicted)
 
-    bounds = [
-        (0.0, 200.0),
-        (1e-6, 10.0 / max(duration, 1.0)),
-        (-10.0, max(end_v + 20.0, 50.0)),
-    ]
+    bounds = [bounds_a, bounds_b, bounds_c]
 
     best_params, best_val = nelder_mead(
         objective, [a0, b0, c0], bounds=bounds, max_iter=2000,
@@ -292,6 +326,8 @@ def _fit_exponential(
 
 def _fit_weibull(
     t: list[float], v: list[float],
+    prior_params: dict[str, float] | None = None,
+    prior_iqr: dict[str, float] | None = None,
 ) -> CurveFitResult | None:
     """Fit Weibull: v(t) = scale * exp(-(t / λ)^k)."""
     if len(t) < 4:
@@ -302,9 +338,27 @@ def _fit_weibull(
     if duration <= 0:
         return None
 
+    # Default initial guesses
     scale0 = start_v
     lam0 = duration * 0.8
     k0 = 1.5
+
+    # Default bounds
+    bounds_scale = (max(start_v * 0.5, 10.0), min(start_v * 1.2, 150.0))
+    bounds_lam = (max(duration * 0.01, 0.1), duration * 5.0)
+    bounds_k = (0.3, 10.0)
+
+    # Override with prior if available
+    if prior_params and prior_iqr:
+        if "scale" in prior_params:
+            scale0 = prior_params["scale"]
+            bounds_scale = _prior_bounds(scale0, prior_iqr.get("scale", 0), *bounds_scale)
+        if "lambda" in prior_params:
+            lam0 = prior_params["lambda"]
+            bounds_lam = _prior_bounds(lam0, prior_iqr.get("lambda", 0), *bounds_lam)
+        if "k" in prior_params:
+            k0 = prior_params["k"]
+            bounds_k = _prior_bounds(k0, prior_iqr.get("k", 0), *bounds_k)
 
     def objective(params):
         scale, lam, k = params
@@ -316,11 +370,7 @@ def _fit_weibull(
             return 1e20
         return _rss(v, predicted)
 
-    bounds = [
-        (max(start_v * 0.5, 10.0), min(start_v * 1.2, 150.0)),
-        (max(duration * 0.01, 0.1), duration * 5.0),
-        (0.3, 10.0),
-    ]
+    bounds = [bounds_scale, bounds_lam, bounds_k]
 
     best_params, best_val = nelder_mead(
         objective, [scale0, lam0, k0], bounds=bounds, max_iter=2000,
@@ -539,11 +589,15 @@ def _fit_piecewise_3(
 
 def fit_discharge_curve(
     readings: list[dict[str, float]],
+    class_prior: ClassPrior | None = None,
 ) -> CurveFitResult | None:
     """Fit all model candidates and return the best by AICc.
 
     Args:
         readings: [{"t": unix_ts, "v": pct}], sorted by time, compressed.
+        class_prior: Optional prior from completed cycles of the same
+            device class. Used to inform initial guesses and tighten bounds
+            for exponential and Weibull models.
 
     Returns:
         Best CurveFitResult, or None if no model could be fitted.
@@ -556,13 +610,26 @@ def fit_discharge_curve(
     t = [(r["t"] - t0) / 86400.0 for r in readings]
     v = [r["v"] for r in readings]
 
+    # Extract prior params/iqr for the matching model type
+    exp_prior_params = None
+    exp_prior_iqr = None
+    weibull_prior_params = None
+    weibull_prior_iqr = None
+    if class_prior is not None:
+        if class_prior.model_name == "exponential":
+            exp_prior_params = class_prior.median_params
+            exp_prior_iqr = class_prior.iqr_params
+        elif class_prior.model_name == "weibull":
+            weibull_prior_params = class_prior.median_params
+            weibull_prior_iqr = class_prior.iqr_params
+
     candidates: list[CurveFitResult] = []
 
-    exp_fit = _fit_exponential(t, v)
+    exp_fit = _fit_exponential(t, v, exp_prior_params, exp_prior_iqr)
     if exp_fit is not None:
         candidates.append(exp_fit)
 
-    weibull_fit = _fit_weibull(t, v)
+    weibull_fit = _fit_weibull(t, v, weibull_prior_params, weibull_prior_iqr)
     if weibull_fit is not None:
         candidates.append(weibull_fit)
 
@@ -576,6 +643,23 @@ def fit_discharge_curve(
 
     if not candidates:
         return None
+
+    # When a class prior exists, give the prior's model type an AIC bonus.
+    # The prior encodes out-of-sample knowledge (how similar devices behaved
+    # through their full cycle) which AIC can't capture from in-sample fit
+    # alone. A modest bonus (equivalent to ~2 fewer parameters) tips the
+    # balance when the prior model fits nearly as well as piecewise.
+    if class_prior is not None and class_prior.cycle_count >= 2:
+        prior_model = class_prior.model_name
+        for c in candidates:
+            if c.model_name == prior_model and c.r_squared > 0.8:
+                # Bonus scales with evidence: log2(cycle_count) * 4.
+                # 2 cycles → 4, 3 cycles → 6.3, 5 cycles → 9.3, 10 → 13.3.
+                # This is equivalent to "saving" 1-3 parameters in AIC terms,
+                # reflecting that historical cycles provide real out-of-sample
+                # evidence that AIC alone cannot capture.
+                bonus = math.log2(class_prior.cycle_count) * 4.0
+                c.aic -= bonus
 
     # Select by AICc (lowest is best)
     candidates.sort(key=lambda c: c.aic)

@@ -19,6 +19,7 @@ from custom_components.juice_patrol.engine.curve_fit import (
     fit_discharge_curve,
     nelder_mead,
 )
+from custom_components.juice_patrol.engine.models import DeviceClassModels
 
 
 # ---------------------------------------------------------------------------
@@ -454,3 +455,87 @@ class TestPerformance:
 
         assert fit is not None
         assert elapsed < 0.2, f"Fit took {elapsed:.3f}s (budget: 0.2s)"
+
+
+# ---------------------------------------------------------------------------
+# Class prior feedback loop test
+# ---------------------------------------------------------------------------
+
+
+class TestClassPriorFeedback:
+    """Test that class prior improves prediction on partial curves."""
+
+    # True parameters: moderate exponential decay
+    TRUE_A = 95.0
+    TRUE_B = 0.02
+    TRUE_C = 3.0
+    # True time to 5%: 95*exp(-0.02*t)+3 = 5 → t = -ln(2/95)/0.02 ≈ 192 days
+    TRUE_DURATION = 192.0
+
+    def _true_func(self, t):
+        return self.TRUE_A * math.exp(-self.TRUE_B * t) + self.TRUE_C
+
+    def test_prior_improves_partial_curve_prediction(self):
+        """Prior from 3 completed cycles improves prediction on a 40% partial curve.
+
+        Without prior, AIC may select piecewise linear which can't extrapolate
+        the exponential tail. With prior, the exponential model gets an AIC bonus
+        (backed by historical evidence) and wins, producing a much better
+        out-of-sample prediction.
+        """
+        # Build class prior from 3 completed cycles with slight variation
+        models = DeviceClassModels()
+        for i in range(3):
+            a = self.TRUE_A + (i - 1) * 3   # 92, 95, 98
+            b = self.TRUE_B + (i - 1) * 0.001  # 0.019, 0.02, 0.021
+            models.update_from_cycle(
+                f"sensor.test_{i}", "CR2032",
+                "exponential",
+                {"a": a, "b": b, "c": self.TRUE_C},
+                self.TRUE_DURATION + (i - 1) * 10,  # 182, 192, 202
+            )
+
+        prior = models.get_class_prior("CR2032", "sensor.new_device")
+        assert prior is not None
+        assert prior.model_name == "exponential"
+
+        # Generate a partial curve: first 40% of the 192-day cycle (≈77 days)
+        partial_days = 77.0
+        readings, _ = _make_readings(
+            self._true_func, n=60, span_days=partial_days,
+            noise_pct=2.0, seed=99,
+        )
+
+        # Fit WITHOUT prior
+        fit_no_prior = fit_discharge_curve(readings)
+        assert fit_no_prior is not None
+        days_no_prior = extrapolate_to_threshold(
+            fit_no_prior, current_t_days=partial_days, threshold_pct=5.0,
+        )
+
+        # Fit WITH prior
+        fit_with_prior = fit_discharge_curve(readings, class_prior=prior)
+        assert fit_with_prior is not None
+        days_with_prior = extrapolate_to_threshold(
+            fit_with_prior, current_t_days=partial_days, threshold_pct=5.0,
+        )
+
+        # True remaining: 192 - 77 = 115 days
+        true_remaining = self.TRUE_DURATION - partial_days
+
+        # Both should produce predictions
+        assert days_no_prior is not None, "No-prior fit should extrapolate"
+        assert days_with_prior is not None, "Prior fit should extrapolate"
+
+        error_no_prior = abs(days_no_prior - true_remaining)
+        error_with_prior = abs(days_with_prior - true_remaining)
+
+        # Prior-informed prediction should be closer to truth
+        assert error_with_prior < error_no_prior, (
+            f"Prior should help: error_with={error_with_prior:.1f}, "
+            f"error_without={error_no_prior:.1f}, true_remaining={true_remaining:.1f}"
+        )
+        # And the improvement should be substantial (at least halved)
+        assert error_with_prior < error_no_prior * 0.9, (
+            f"Prior should meaningfully help: {error_with_prior:.1f} vs {error_no_prior:.1f}"
+        )

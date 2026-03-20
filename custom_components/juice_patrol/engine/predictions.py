@@ -16,6 +16,7 @@ from enum import StrEnum
 from .compress import compress as _sdt_compress
 from .curve_fit import extrapolate_to_threshold as _extrapolate
 from .curve_fit import fit_discharge_curve as _fit_curve
+from .models import ClassPrior
 from .sessions import extract_discharge_sessions
 from .utils import detect_step_size as _detect_step_size, median as _median
 
@@ -123,6 +124,7 @@ def predict_discharge(
     half_life_days: float | None = None,
     min_readings: int = 3,
     min_timespan_hours: float = 24.0,
+    class_prior: ClassPrior | None = None,
     _depth: int = 0,
 ) -> PredictionResult:
     """Predict when a battery will reach the target level.
@@ -140,6 +142,7 @@ def predict_discharge(
         half_life_days: Exponential decay half-life for WLR weighting (fallback path).
         min_readings: Minimum readings required.
         min_timespan_hours: Minimum time span required (hours).
+        class_prior: Optional prior from completed cycles of the same device class.
 
     Returns:
         PredictionResult with prediction data and confidence.
@@ -188,6 +191,7 @@ def predict_discharge(
                 half_life_days=half_life_days,
                 min_readings=min(min_readings, 3),
                 min_timespan_hours=min(min_timespan_hours, 1.0),
+                class_prior=class_prior,
                 _depth=1,
             )
             # Reclassify confidence using the full dataset context.
@@ -227,7 +231,7 @@ def predict_discharge(
     # Try parametric curve fitting first (≥6 points)
     curve_fit = None
     if n_cleaned >= 6:
-        curve_fit = _fit_curve(cleaned)
+        curve_fit = _fit_curve(cleaned, class_prior=class_prior)
 
     if curve_fit is not None and curve_fit.r_squared > 0.10:
         # Parametric model succeeded — use it

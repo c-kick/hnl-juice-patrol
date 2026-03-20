@@ -575,6 +575,14 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             and battery_state.lower() in ("charging",)
         )
 
+        # Look up class prior for this device (non-rechargeable only)
+        prior_battery_type = dev.battery_type if dev else None
+        class_prior = (
+            self._class_models.get_class_prior(prior_battery_type, entity_id)
+            if not is_rechargeable_hint
+            else None
+        )
+
         if is_rechargeable_hint and not is_charging and len(all_readings) >= 3:
             # Multi-session discharge analysis for rechargeable devices
             prediction = predict_discharge_multisession(
@@ -607,6 +615,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 half_life_days=None,
                 min_readings=MIN_READINGS_FOR_PREDICTION,
                 min_timespan_hours=min_span,
+                class_prior=class_prior,
             )
         # Sanity-check predictions against actual current level.
         # Copy before mutating to avoid corrupting shared state.
