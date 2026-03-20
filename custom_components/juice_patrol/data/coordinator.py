@@ -1091,7 +1091,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Fallback: device reports charging but no live segment detected.
             # Use historical charge cycles to estimate time to full.
             is_charging_now = (
-                entity_data.get("charging_state", "").lower() == "charging"
+                (entity_data.get("charging_state") or "").lower() == "charging"
             )
             current_level = battery.current_level
             if (
