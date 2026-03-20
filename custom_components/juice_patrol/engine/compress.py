@@ -118,12 +118,21 @@ def sdt_compress(
 def compress(
     readings: list[dict[str, float]],
     epsilon: float = 2.0,
+    min_points: int = 12,
 ) -> list[dict[str, float]]:
-    """Full compression pipeline: dedup then SDT.
+    """Full compression pipeline: dedup then SDT with adaptive epsilon.
+
+    If SDT with the initial epsilon compresses below min_points, retries
+    with progressively smaller epsilon until min_points is reached or
+    epsilon drops below 0.1. This prevents smooth continuous declines
+    (e.g. Inkbird temperature sensors draining ~5%/day) from being
+    over-compressed to just 2-4 points.
 
     Args:
         readings: [{"t": unix_ts, "v": pct}], sorted by time.
-        epsilon: SDT tolerance in percentage points.
+        epsilon: Starting SDT tolerance in percentage points.
+        min_points: Minimum output points. SDT will use a smaller epsilon
+            if needed to preserve at least this many points.
 
     Returns:
         Compressed readings in the same format.
@@ -132,4 +141,14 @@ def compress(
         return list(readings)
 
     deduped = dedup_consecutive(readings)
-    return sdt_compress(deduped, epsilon=epsilon)
+
+    if len(deduped) <= min_points:
+        return deduped
+
+    result = sdt_compress(deduped, epsilon=epsilon)
+    # Adaptive: if over-compressed, retry with smaller epsilon
+    while len(result) < min_points and epsilon > 0.1:
+        epsilon *= 0.5
+        result = sdt_compress(deduped, epsilon=epsilon)
+
+    return result

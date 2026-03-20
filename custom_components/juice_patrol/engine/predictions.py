@@ -215,7 +215,26 @@ def predict_discharge(
                 )
             return result
 
-    # Reject outliers using residual-based method
+    n_points = len(readings)
+    now = time.time()
+    now_days = (now - t0) / 86400.0
+
+    # --- Fallback chain: parametric → Theil-Sen → insufficient ---
+    # Try parametric curve fitting BEFORE outlier rejection. Parametric
+    # models (exponential, Weibull, piecewise) handle non-linearity
+    # natively — outlier rejection is designed for linear Theil-Sen and
+    # would incorrectly discard steep transitions that are signal.
+    curve_fit = None
+    if n_points >= 6:
+        curve_fit = _fit_curve(readings, class_prior=class_prior)
+
+    if curve_fit is not None and curve_fit.r_squared > 0.10:
+        return _build_result_from_curve(
+            curve_fit, readings, t0, now, now_days, target_level,
+            timespan_hours, n_points,
+        )
+
+    # Theil-Sen fallback: reject outliers first (linear model is sensitive)
     cleaned, x, y = _reject_by_residual(readings, x, y)
     if len(cleaned) < min_readings:
         cleaned = readings
@@ -223,27 +242,9 @@ def predict_discharge(
         x = [(r["t"] - t0) / 86400.0 for r in cleaned]
         y = [r["v"] for r in cleaned]
 
-    n_cleaned = len(cleaned)
-    now = time.time()
-    now_days = (now - t0) / 86400.0
-
-    # --- Fallback chain: parametric → Theil-Sen → insufficient ---
-    # Try parametric curve fitting first (≥6 points)
-    curve_fit = None
-    if n_cleaned >= 6:
-        curve_fit = _fit_curve(cleaned, class_prior=class_prior)
-
-    if curve_fit is not None and curve_fit.r_squared > 0.10:
-        # Parametric model succeeded — use it
-        return _build_result_from_curve(
-            curve_fit, cleaned, t0, now, now_days, target_level,
-            timespan_hours, n_cleaned,
-        )
-
-    # Theil-Sen fallback (works for ≥3 points)
     return _predict_discharge_theil_sen(
         cleaned, x, y, t0, now, now_days, target_level,
-        half_life_days, timespan_hours, n_cleaned,
+        half_life_days, timespan_hours, len(cleaned),
     )
 
 
