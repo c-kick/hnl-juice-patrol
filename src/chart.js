@@ -71,18 +71,25 @@ export async function initChart(panel, chartData) {
     chartData.prediction?.status === "charging";
   const hasChargePred = chargePred && chargePred.estimated_full_timestamp;
 
-  const fitted = [];
-  if (pred.slope_per_day != null && pred.intercept != null && t0 != null) {
+  let fitted = [];
+  if (pred.prediction_curve && pred.prediction_curve.length >= 2) {
+    // Use pre-computed curve points from the parametric model.
+    // These follow the actual fitted shape (exponential, Weibull,
+    // piecewise linear) instead of a single straight line.
+    const shouldProject = !isCharging && pred.status === "normal";
+    const nowMs = Date.now();
+    for (const [tMs, v] of pred.prediction_curve) {
+      if (!shouldProject && tMs > nowMs) break;
+      fitted.push([tMs, Math.max(0, Math.min(100, v))]);
+    }
+  } else if (pred.slope_per_day != null && pred.intercept != null && t0 != null) {
+    // Fallback: linear formula (Theil-Sen path, or no curve data)
     const fittedY = (t) => {
       const days = (t - t0) / 86400;
       return pred.slope_per_day * days + pred.intercept;
     };
     const startT = readings[0].t;
     const nowT = Date.now() / 1000;
-    // Truncate discharge line at now when:
-    // - charging, or
-    // - no real discharge prediction (flat, noisy, insufficient_data, etc.)
-    // Only project into the future when status is "normal" with an empty date.
     const shouldProject = !isCharging && pred.status === "normal";
     const endT = shouldProject
       ? (pred.estimated_empty_timestamp
@@ -344,35 +351,51 @@ export async function initChart(panel, chartData) {
   // (status "normal" means the engine produced an estimated_empty_timestamp).
   const hasActivePrediction = pred.status === "normal" && pred.estimated_empty_timestamp != null;
 
+  // Find threshold crossing time from the curve or linear formula
   let crossingMs = null;
-  if (
-    hasActivePrediction &&
-    pred.slope_per_day != null && pred.slope_per_day < 0 &&
-    pred.intercept != null && t0 != null && !isCharging
-  ) {
-    const crossingT = t0 + ((threshold - pred.intercept) / pred.slope_per_day) * 86400;
-    if (crossingT * 1000 > Date.now()) {
-      crossingMs = crossingT * 1000;
+  if (hasActivePrediction && !isCharging) {
+    if (pred.prediction_curve && pred.prediction_curve.length >= 2) {
+      // Find crossing in the pre-computed curve points
+      for (let i = 1; i < pred.prediction_curve.length; i++) {
+        const [prevT, prevV] = pred.prediction_curve[i - 1];
+        const [curT, curV] = pred.prediction_curve[i];
+        if (prevV >= threshold && curV < threshold) {
+          // Linear interpolation for sub-step accuracy
+          const frac = (prevV - threshold) / (prevV - curV);
+          crossingMs = prevT + frac * (curT - prevT);
+          if (crossingMs <= Date.now()) crossingMs = null;
+          break;
+        }
+      }
+    } else if (
+      pred.slope_per_day != null && pred.slope_per_day < 0 &&
+      pred.intercept != null && t0 != null
+    ) {
+      const crossingT = t0 + ((threshold - pred.intercept) / pred.slope_per_day) * 86400;
+      if (crossingT * 1000 > Date.now()) {
+        crossingMs = crossingT * 1000;
+      }
     }
   }
 
-  // Ensure discharge line extends to both the crossing point and the empty date
-  if (fitted.length > 0 && pred.slope_per_day != null && pred.intercept != null && t0 != null) {
-    const fittedY = (t) => {
-      const days = (t / 1000 - t0) / 86400;
-      return pred.slope_per_day * days + pred.intercept;
-    };
-    const emptyMs = pred.estimated_empty_timestamp
-      ? pred.estimated_empty_timestamp * 1000
-      : null;
-    const lastMs = fitted[fitted.length - 1][0];
-    // Add crossing point if it's between existing points
-    if (crossingMs && crossingMs > lastMs - 1 && crossingMs < (emptyMs || Infinity)) {
-      fitted.push([crossingMs, Math.max(0, Math.min(100, fittedY(crossingMs)))]);
-    }
-    // Extend to predicted empty if not already there
-    if (emptyMs && emptyMs > lastMs + 1) {
-      fitted.push([emptyMs, Math.max(0, fittedY(emptyMs))]);
+  // Ensure discharge line extends to the empty date (only for linear fallback;
+  // prediction_curve already includes the full extrapolation)
+  if (fitted.length > 0 && !pred.prediction_curve) {
+    if (pred.slope_per_day != null && pred.intercept != null && t0 != null) {
+      const fittedY = (t) => {
+        const days = (t / 1000 - t0) / 86400;
+        return pred.slope_per_day * days + pred.intercept;
+      };
+      const emptyMs = pred.estimated_empty_timestamp
+        ? pred.estimated_empty_timestamp * 1000
+        : null;
+      const lastMs = fitted[fitted.length - 1][0];
+      if (crossingMs && crossingMs > lastMs - 1 && crossingMs < (emptyMs || Infinity)) {
+        fitted.push([crossingMs, Math.max(0, Math.min(100, fittedY(crossingMs)))]);
+      }
+      if (emptyMs && emptyMs > lastMs + 1) {
+        fitted.push([emptyMs, Math.max(0, fittedY(emptyMs))]);
+      }
     }
   }
 

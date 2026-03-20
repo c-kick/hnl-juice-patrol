@@ -981,6 +981,60 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for entity_id, info in data.items():
             self._fire_events_for_entity(entity_id, info)
 
+    @staticmethod
+    def _generate_prediction_curve(
+        readings: list[dict[str, float]],
+        prediction: PredictionResult,
+        entity_data: dict[str, Any],
+    ) -> list[list[float]] | None:
+        """Generate curve points for the chart from the fitted model.
+
+        Re-fits the curve on the segment readings (fast — already compressed
+        by the prediction pipeline) and samples points from start to the
+        predicted empty timestamp or +30 days.
+
+        Returns [[timestamp_ms, value], ...] or None if fitting fails.
+        """
+        compressed = sdt_compress(readings)
+        if len(compressed) < 6:
+            return None
+
+        is_rechargeable = entity_data.get("is_rechargeable", False)
+        if is_rechargeable:
+            return None
+
+        fit = fit_discharge_curve(compressed)
+        if fit is None or fit.r_squared < 0.10:
+            return None
+
+        t0 = compressed[0]["t"]
+        now = time.time()
+        now_days = (now - t0) / 86400.0
+
+        # End point: predicted empty or +30 days
+        end_days = now_days + 30.0
+        if prediction.estimated_empty_timestamp is not None:
+            end_days = min(
+                (prediction.estimated_empty_timestamp - t0) / 86400.0,
+                now_days + 365.0,
+            )
+
+        # Sample ~50 points from start to end
+        start_days = 0.0
+        n_points = 50
+        step = (end_days - start_days) / max(n_points - 1, 1)
+        curve: list[list[float]] = []
+        for i in range(n_points):
+            d = start_days + i * step
+            v = fit.predict(d)
+            v = max(0.0, min(100.0, v))
+            ts_ms = (t0 + d * 86400.0) * 1000
+            curve.append([ts_ms, round(v, 2)])
+            if v <= 0:
+                break
+
+        return curve if len(curve) >= 2 else None
+
     async def async_get_entity_chart_data(
         self, entity_id: str
     ) -> dict[str, Any] | None:
@@ -1136,6 +1190,22 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 known_replacements=dev.replacement_history if dev else [],
                 denied_replacements=dev.denied_replacements if dev else [],
             )
+
+        # Generate prediction curve points from the fitted model.
+        # The chart uses these to draw the actual model shape instead
+        # of a single straight line from slope + intercept.
+        prediction_curve: list[list[float]] | None = None
+        if (
+            prediction is not None
+            and prediction.status == PredictionStatus.NORMAL
+            and prediction.slope_per_day is not None
+            and readings
+        ):
+            prediction_curve = self._generate_prediction_curve(
+                readings, prediction, entity_data,
+            )
+        if prediction_curve:
+            pred_dict["prediction_curve"] = prediction_curve
 
         result = {
             "readings": readings,
