@@ -1,8 +1,4 @@
 # Juice Patrol
-
-[![HACS Validation](https://github.com/c-kick/juice-patrol/actions/workflows/validate.yml/badge.svg)](https://github.com/c-kick/juice-patrol/actions/workflows/validate.yml)
-[![Hassfest](https://github.com/c-kick/juice-patrol/actions/workflows/hassfest.yml/badge.svg)](https://github.com/c-kick/juice-patrol/actions/workflows/hassfest.yml)
-
 **Predictive Battery Monitoring for Home Assistant**
 
 > **Warning:** This project is in early alpha. Expect breaking changes, incomplete features, and rough edges. Use at your own risk.
