@@ -173,6 +173,7 @@ def predict_discharge(
         return _no_prediction(PredictionStatus.INSUFFICIENT_RANGE, len(readings))
 
     # SDT compress for fitting (preserves slope transitions, removes plateaus)
+    full_readings = readings
     readings = _sdt_compress(readings, step_size=step_size)
 
     # Convert timestamps to days relative to the first reading
@@ -183,7 +184,7 @@ def predict_discharge(
     # Regime-change detection (BEFORE outlier rejection, at depth 0 only).
     if _depth == 0:
         pre_ts_slope, _, _ = _theil_sen(x, y)
-        tail_result = _detect_regime_change(readings, x, y, pre_ts_slope)
+        tail_result = _detect_regime_change(readings, x, y, pre_ts_slope, step_size=step_size)
         if tail_result is not None:
             tail_readings, _, _ = tail_result
             result = predict_discharge(
@@ -231,7 +232,7 @@ def predict_discharge(
 
     if curve_fit is not None and curve_fit.r_squared > 0.10:
         return _build_result_from_curve(
-            curve_fit, readings, t0, now, now_days, target_level,
+            curve_fit, readings, full_readings, t0, now, now_days, target_level,
             timespan_hours, n_points,
         )
 
@@ -250,7 +251,7 @@ def predict_discharge(
 
 
 def _build_result_from_curve(
-    fit, cleaned, t0, now, now_days, target_level,
+    fit, cleaned, full_readings, t0, now, now_days, target_level,
     timespan_hours, n_cleaned,
 ) -> PredictionResult:
     """Build PredictionResult from a successful CurveFitResult."""
@@ -266,9 +267,9 @@ def _build_result_from_curve(
     # rather than the instantaneous slope. Piecewise models return
     # the slope of the *current segment*, which can be near-zero on a
     # noisy plateau even when the macro trend is clearly discharging.
-    first_v = cleaned[0]["v"]
-    last_v = cleaned[-1]["v"]
-    duration_days = (cleaned[-1]["t"] - cleaned[0]["t"]) / 86400.0
+    first_v = full_readings[0]["v"]
+    last_v = full_readings[-1]["v"]
+    duration_days = (full_readings[-1]["t"] - full_readings[0]["t"]) / 86400.0
     overall_slope = (last_v - first_v) / duration_days if duration_days > 0 else 0.0
 
     if overall_slope > 0.01:
@@ -804,6 +805,7 @@ def _detect_regime_change(
     overall_slope: float,
     min_tail_points: int = 5,
     change_ratio: float = 3.0,
+    step_size: float = 1.0,
 ) -> tuple[list[dict[str, float]], list[float], list[float]] | None:
     """Detect if the recent tail has a dramatically different slope.
 
@@ -834,6 +836,7 @@ def _detect_regime_change(
     # But first, check if the HEAD (pre-tail) was clearly discharging
     # even though the full dataset slope is diluted.
     head_readings = readings[:tail_start + 1]  # overlap one point
+    reference_slope = overall_slope
     if abs(overall_slope) < 0.01 and len(head_readings) >= min_tail_points:
         head_t0 = head_readings[0]["t"]
         head_x = [(r["t"] - head_t0) / 86400.0 for r in head_readings]
@@ -841,7 +844,7 @@ def _detect_regime_change(
         head_slope, _, _ = _theil_sen(head_x, head_y)
         # Head was clearly discharging — use it as the reference slope
         if head_slope < -0.05:
-            overall_slope = head_slope
+            reference_slope = head_slope  # use for ratio checks only
         else:
             return None
     elif abs(overall_slope) < 0.01:
@@ -849,12 +852,15 @@ def _detect_regime_change(
 
     tail_range = abs(tail_readings[0]["v"] - tail_readings[-1]["v"])
 
+    if tail_range < max(step_size, 3.0):
+        return None
+
     tail_t0 = tail_readings[0]["t"]
     tail_x = [(r["t"] - tail_t0) / 86400.0 for r in tail_readings]
     tail_y = [r["v"] for r in tail_readings]
     tail_slope, _, _ = _theil_sen(tail_x, tail_y)
 
-    abs_overall = abs(overall_slope)
+    abs_overall = abs(reference_slope)
     abs_tail = abs(tail_slope)
 
     # Direction reversal (e.g. discharge→charge transition)
@@ -869,12 +875,6 @@ def _detect_regime_change(
     # Relaxed tail_range gate: noisy TRADFRI sensors oscillate ±2% on a
     # plateau, so tail_range can be <3.0 even though the macro trend is real.
     if abs_tail > 0.05 and abs_overall / abs_tail >= change_ratio:
-        return tail_readings, tail_x, tail_y
-
-    # Deceleration into near-flat plateau: overall is clearly discharging
-    # but the tail is nearly flat (< FLAT threshold). This catches noisy
-    # plateaus where tail_range is tiny.
-    if abs_overall > 0.05 and abs_tail < 0.02 and tail_range < 3.0:
         return tail_readings, tail_x, tail_y
 
     return None
