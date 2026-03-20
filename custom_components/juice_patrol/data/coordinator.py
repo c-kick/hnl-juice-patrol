@@ -1012,6 +1012,11 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         now = time.time()
         now_days = (now - t0) / 86400.0
 
+        # Reject fits that predict an increase at t=now for non-rechargeable
+        # devices — this means the model is fitting noise, not discharge.
+        if fit.slope_at(now_days) > 0.0:
+            return None
+
         # End point: predicted empty or +30 days
         end_days = now_days + 30.0
         if prediction.estimated_empty_timestamp is not None:
@@ -1025,10 +1030,16 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         n_points = 50
         step = (end_days - start_days) / max(n_points - 1, 1)
         curve: list[list[float]] = []
+        prev_v = 200.0  # track previous value for monotonic enforcement
         for i in range(n_points):
             d = start_days + i * step
             v = fit.predict(d)
             v = max(0.0, min(100.0, v))
+            # Non-rechargeable: enforce monotonic decrease. If the curve
+            # starts going up (e.g. exponential floor rebound), flatten it.
+            if v > prev_v:
+                v = prev_v
+            prev_v = v
             ts_ms = (t0 + d * 86400.0) * 1000
             curve.append([ts_ms, round(v, 2)])
             if v <= 0:
