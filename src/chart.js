@@ -111,7 +111,10 @@ export async function initChart(panel, chartData) {
   }
 
   // ── Compute auto tMin/tMax (smart default) ──
-  const autoTMin = observed[0]?.[0] || Date.now();
+  // Zoom to the current session (discharge or charge cycle), not the full history.
+  const sessionStartMs = readings[0].t * 1000;
+  const historyStartMs = observed[0]?.[0] || Date.now();
+  const autoTMin = sessionStartMs < historyStartMs ? historyStartMs : sessionStartMs;
   const nowMs = Date.now();
   let autoTMax;
   if (isCharging && chargePred && chargePred.segment_start_timestamp != null) {
