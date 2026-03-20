@@ -71,8 +71,17 @@ export async function initChart(panel, chartData) {
     chartData.prediction?.status === "charging";
   const hasChargePred = chargePred && chargePred.estimated_full_timestamp;
 
+  // Only build a prediction line when the engine produced a real prediction.
+  // Statuses like idle, flat, single_level, noisy, insufficient_data, etc.
+  // should NOT show a prediction/fit line — even the historical portion.
+  const noLineStatuses = new Set([
+    "idle", "flat", "single_level", "insufficient_data", "insufficient_range",
+    "noisy", "charging",
+  ]);
+  const showPredictionLine = !noLineStatuses.has(pred.status);
+
   let fitted = [];
-  if (pred.prediction_curve && pred.prediction_curve.length >= 2) {
+  if (showPredictionLine && pred.prediction_curve && pred.prediction_curve.length >= 2) {
     // Use pre-computed curve points from the parametric model.
     // These follow the actual fitted shape (exponential, Weibull,
     // piecewise linear) instead of a single straight line.
@@ -82,7 +91,7 @@ export async function initChart(panel, chartData) {
       if (!shouldProject && tMs > nowMs) break;
       fitted.push([tMs, Math.max(0, Math.min(100, v))]);
     }
-  } else if (pred.slope_per_day != null && pred.intercept != null && t0 != null) {
+  } else if (showPredictionLine && pred.slope_per_day != null && pred.intercept != null && t0 != null) {
     // Fallback: linear formula (Theil-Sen path, or no curve data)
     const fittedY = (t) => {
       const days = (t - t0) / 86400;
@@ -435,21 +444,37 @@ export async function initChart(panel, chartData) {
   const replacementHistory = chartData.replacement_history || [];
   if (replacementHistory.length > 0) {
     const colorReplacement = rc("--success-color", "#4caf50");
+    // Sort timestamps to detect crowding between consecutive labels
+    const sortedTs = replacementHistory.map((t) => t * 1000).sort((a, b) => a - b);
+    const xRange = (tMax || sortedTs[sortedTs.length - 1]) - (tMin || sortedTs[0]);
+    const crowdThreshold = xRange * 0.05; // 5% of x-axis range
+
     for (let i = 0; i < replacementHistory.length; i++) {
       const ts = replacementHistory[i] * 1000;
       const dateLabel = new Date(ts).toLocaleDateString(undefined, {
         day: "numeric", month: "short",
       });
+      // Stagger label height when consecutive replacements are close together
+      const sortIdx = sortedTs.indexOf(ts);
+      const prevTs = sortIdx > 0 ? sortedTs[sortIdx - 1] : null;
+      const isCrowded = prevTs != null && (ts - prevTs) < crowdThreshold;
+      // Alternate between top (100) and lower (85) for crowded labels
+      const labelY = isCrowded ? 85 : 100;
+
+      const label = _markerLabel(`Replaced ${dateLabel}`, colorReplacement);
+      // Position label to the right of the point to avoid y-axis overlap
+      label.position = "right";
+
       series.push({
         name: i === 0 ? "Replaced" : `Replaced ${i + 1}`,
         type: "line",
         data: [
           { value: [ts, 0], symbol: "none", symbolSize: 0 },
           {
-            value: [ts, 100],
+            value: [ts, labelY],
             symbol: "diamond",
             symbolSize: 6,
-            label: _markerLabel(`Replaced ${dateLabel}`, colorReplacement),
+            label,
           },
         ],
         lineStyle: { width: 1, type: "dashed", color: colorReplacement },
@@ -468,6 +493,8 @@ export async function initChart(panel, chartData) {
       const dateLabel = new Date(ts).toLocaleDateString(undefined, {
         day: "numeric", month: "short",
       });
+      const suspLabel = _markerLabel(`Replaced? ${dateLabel}`, colorSuspected);
+      suspLabel.position = "right";
       series.push({
         name: i === 0 ? "Suspected" : `Suspected ${i + 1}`,
         type: "line",
@@ -477,7 +504,7 @@ export async function initChart(panel, chartData) {
             value: [ts, 100],
             symbol: "diamond",
             symbolSize: 6,
-            label: _markerLabel(`Replaced? ${dateLabel}`, colorSuspected),
+            label: suspLabel,
           },
         ],
         lineStyle: { width: 1, type: "dotted", color: colorSuspected },

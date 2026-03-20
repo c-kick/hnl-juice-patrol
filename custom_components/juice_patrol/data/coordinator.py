@@ -607,6 +607,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             estimated_empty_timestamp=None,
                             estimated_days_remaining=None,
                             estimated_hours_remaining=None,
+                            r_squared=None,
                         )
         else:
             prediction = predict_discharge(
