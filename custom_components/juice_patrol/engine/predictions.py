@@ -1,7 +1,7 @@
 """Prediction math for Juice Patrol.
 
-Implements Theil-Sen robust regression with weighted linear regression fallback.
-Covers both discharge and charge predictions.
+Parametric curve fitting (exponential, Weibull, piecewise linear) with
+Theil-Sen robust regression as fallback. SDT compression preprocessing.
 No external dependencies (pure Python).
 """
 
@@ -13,6 +13,9 @@ import time
 from dataclasses import dataclass
 from enum import StrEnum
 
+from .compress import compress as _sdt_compress
+from .curve_fit import extrapolate_to_threshold as _extrapolate
+from .curve_fit import fit_discharge_curve as _fit_curve
 from .sessions import extract_discharge_sessions
 from .utils import detect_step_size as _detect_step_size, median as _median
 
@@ -109,6 +112,11 @@ def _validate_and_sort_readings(
     return readings
 
 
+# ---------------------------------------------------------------------------
+# Main discharge prediction — parametric fitting with Theil-Sen fallback
+# ---------------------------------------------------------------------------
+
+
 def predict_discharge(
     readings: list[dict[str, float]],
     target_level: float = 0.0,
@@ -119,20 +127,25 @@ def predict_discharge(
 ) -> PredictionResult:
     """Predict when a battery will reach the target level.
 
+    Pipeline:
+    1. Validate & sort, SDT compress
+    2. Early gating (insufficient data, single level, insufficient range)
+    3. Regime-change detection (at depth 0)
+    4. Parametric curve fit (≥6 points) → Theil-Sen fallback (<6 points)
+    5. Status classification, confidence, extrapolation
+
     Args:
         readings: List of {"t": timestamp, "v": level} dicts.
         target_level: Battery level to predict reaching (%, default 0 = empty).
-        half_life_days: Exponential decay half-life for weighting.
-            None = auto-compute from drain characteristics.
+        half_life_days: Exponential decay half-life for WLR weighting (fallback path).
         min_readings: Minimum readings required.
         min_timespan_hours: Minimum time span required (hours).
 
     Returns:
         PredictionResult with prediction data and confidence.
     """
-    # Validate and sort input, then subsample for performance (Pi 3/4 safety)
+    # Validate and sort (but do NOT compress yet — need raw counts for gating)
     readings = _validate_and_sort_readings(readings)
-    readings = _subsample_readings(readings)
 
     if len(readings) < min_readings:
         return _no_prediction(PredictionStatus.INSUFFICIENT_DATA, len(readings))
@@ -143,7 +156,7 @@ def predict_discharge(
     if timespan_hours < min_timespan_hours:
         return _no_prediction(PredictionStatus.INSUFFICIENT_DATA, len(readings))
 
-    # Early gating: single-level or insufficient range
+    # Early gating: single-level or insufficient range (on raw data)
     values = [r["v"] for r in readings]
     unique_values = set(round(v, 1) for v in values)
     value_range = max(values) - min(values)
@@ -155,12 +168,8 @@ def predict_discharge(
     if value_range <= step_size:
         return _no_prediction(PredictionStatus.INSUFFICIENT_RANGE, len(readings))
 
-    # Compress staircase data: devices that report in discrete steps (e.g.
-    # 100% for months, then 65%, then 61%) produce thousands of flat readings
-    # that drown out the actual transitions in Theil-Sen's median slope.
-    # Compress each plateau to its boundary readings (first + last) so the
-    # transitions carry proportional weight.
-    readings = _compress_plateaus(readings, unique_values)
+    # SDT compress for fitting (preserves slope transitions, removes plateaus)
+    readings = _sdt_compress(readings)
 
     # Convert timestamps to days relative to the first reading
     t0 = readings[0]["t"]
@@ -168,10 +177,6 @@ def predict_discharge(
     y = [r["v"] for r in readings]
 
     # Regime-change detection (BEFORE outlier rejection, at depth 0 only).
-    # Must run on the unfiltered data because outlier rejection would remove
-    # the steep tail readings — they look like outliers relative to the slow
-    # trend, but they ARE the signal we want to capture.
-    # Limited to depth 0 to prevent cascading recursion on multi-phase data.
     if _depth == 0:
         pre_ts_slope, _, _ = _theil_sen(x, y)
         tail_result = _detect_regime_change(readings, x, y, pre_ts_slope)
@@ -186,10 +191,6 @@ def predict_discharge(
                 _depth=1,
             )
             # Reclassify confidence using the full dataset context.
-            # The tail prediction is backed by the full history — the
-            # regime-change detector analyzed all of it and deliberately
-            # chose the tail.  Using only the tail's narrow timespan for
-            # confidence would mislead users who can see months of data.
             from dataclasses import replace as _replace
             full_conf = _classify_confidence(
                 result.r_squared or 0.0,
@@ -210,19 +211,173 @@ def predict_discharge(
                 )
             return result
 
-    # Reject outliers using residual-based method (time-aware).
-    # _reject_by_residual runs its own Theil-Sen fit to compute residuals.
-    # We re-fit below on the cleaned data — the double Theil-Sen is intentional:
-    # the first fit is on noisy data (to identify outliers), the second on
-    # cleaned data (to produce the actual prediction).
+    # Reject outliers using residual-based method
     cleaned, x, y = _reject_by_residual(readings, x, y)
     if len(cleaned) < min_readings:
-        # Rejection was too aggressive — fall back to unfiltered readings
         cleaned = readings
         t0 = cleaned[0]["t"]
         x = [(r["t"] - t0) / 86400.0 for r in cleaned]
         y = [r["v"] for r in cleaned]
 
+    n_cleaned = len(cleaned)
+    now = time.time()
+    now_days = (now - t0) / 86400.0
+
+    # --- Fallback chain: parametric → Theil-Sen → insufficient ---
+    # Try parametric curve fitting first (≥6 points)
+    curve_fit = None
+    if n_cleaned >= 6:
+        curve_fit = _fit_curve(cleaned)
+
+    if curve_fit is not None and curve_fit.r_squared > 0.10:
+        # Parametric model succeeded — use it
+        return _build_result_from_curve(
+            curve_fit, cleaned, t0, now, now_days, target_level,
+            timespan_hours, n_cleaned,
+        )
+
+    # Theil-Sen fallback (works for ≥3 points)
+    return _predict_discharge_theil_sen(
+        cleaned, x, y, t0, now, now_days, target_level,
+        half_life_days, timespan_hours, n_cleaned,
+    )
+
+
+def _build_result_from_curve(
+    fit, cleaned, t0, now, now_days, target_level,
+    timespan_hours, n_cleaned,
+) -> PredictionResult:
+    """Build PredictionResult from a successful CurveFitResult."""
+    # Compute instantaneous slope at t=now as %/day
+    slope = fit.slope_at(now_days)
+    slope_per_hour = round(slope / 24.0, 4)
+    r_squared = fit.r_squared
+
+    # Intercept: value of the fitted curve at t=0
+    intercept = fit.predict(0.0)
+
+    if slope > 0.01:
+        conf = _classify_confidence(r_squared, timespan_hours, n_cleaned)
+        return PredictionResult(
+            slope_per_day=round(slope, 4),
+            slope_per_hour=slope_per_hour,
+            intercept=round(intercept, 2),
+            r_squared=round(r_squared, 4),
+            confidence=conf,
+            estimated_empty_timestamp=None,
+            estimated_days_remaining=None,
+            estimated_hours_remaining=None,
+            data_points_used=n_cleaned,
+            status=PredictionStatus.CHARGING,
+            reliability=compute_reliability(
+                n_cleaned, timespan_hours, r_squared, conf, days_remaining=None,
+            ),
+            t0=t0,
+        )
+
+    if abs(slope) <= 0.02:
+        conf = _classify_confidence(r_squared, timespan_hours, n_cleaned)
+        return PredictionResult(
+            slope_per_day=round(slope, 4),
+            slope_per_hour=slope_per_hour,
+            intercept=round(intercept, 2),
+            r_squared=round(r_squared, 4),
+            confidence=conf,
+            estimated_empty_timestamp=None,
+            estimated_days_remaining=None,
+            estimated_hours_remaining=None,
+            data_points_used=n_cleaned,
+            status=PredictionStatus.FLAT,
+            reliability=compute_reliability(
+                n_cleaned, timespan_hours, r_squared, conf, days_remaining=None,
+            ),
+            t0=t0,
+        )
+
+    if r_squared < 0.10:
+        conf = _classify_confidence(r_squared, timespan_hours, n_cleaned)
+        return PredictionResult(
+            slope_per_day=None,
+            slope_per_hour=None,
+            intercept=round(intercept, 2),
+            r_squared=round(r_squared, 4),
+            confidence=conf,
+            estimated_empty_timestamp=None,
+            estimated_days_remaining=None,
+            estimated_hours_remaining=None,
+            data_points_used=n_cleaned,
+            status=PredictionStatus.NOISY,
+            reliability=compute_reliability(
+                n_cleaned, timespan_hours, r_squared, conf, days_remaining=None,
+            ),
+            t0=t0,
+        )
+
+    # Extrapolate to target using the fitted curve
+    days_remaining_val = _extrapolate(
+        fit, current_t_days=now_days, threshold_pct=target_level,
+    )
+
+    if days_remaining_val is None:
+        # Curve doesn't reach target (e.g. exponential with floor above target)
+        # Fall back to linear extrapolation from the current slope
+        current_val = fit.predict(now_days)
+        if slope < -0.001:
+            days_remaining_val = (target_level - current_val) / slope
+            if days_remaining_val < 0:
+                days_remaining_val = 0.0
+        else:
+            days_remaining_val = None
+
+    if days_remaining_val is not None:
+        if days_remaining_val < 0:
+            days_remaining_val = 0.0
+        hours_remaining = round(days_remaining_val * 24.0, 1)
+        estimated_empty_timestamp = now + (days_remaining_val * 86400.0)
+        conf = _classify_confidence(r_squared, timespan_hours, n_cleaned)
+        return PredictionResult(
+            slope_per_day=round(slope, 4),
+            slope_per_hour=slope_per_hour,
+            intercept=round(intercept, 2),
+            r_squared=round(r_squared, 4),
+            confidence=conf,
+            estimated_empty_timestamp=round(estimated_empty_timestamp, 0),
+            estimated_days_remaining=round(days_remaining_val, 1),
+            estimated_hours_remaining=hours_remaining,
+            data_points_used=n_cleaned,
+            status=PredictionStatus.NORMAL,
+            reliability=compute_reliability(
+                n_cleaned, timespan_hours, r_squared, conf,
+                days_remaining=days_remaining_val,
+            ),
+            t0=t0,
+        )
+
+    # Can't extrapolate — return with slope but no prediction
+    conf = _classify_confidence(r_squared, timespan_hours, n_cleaned)
+    return PredictionResult(
+        slope_per_day=round(slope, 4),
+        slope_per_hour=slope_per_hour,
+        intercept=round(intercept, 2),
+        r_squared=round(r_squared, 4),
+        confidence=conf,
+        estimated_empty_timestamp=None,
+        estimated_days_remaining=None,
+        estimated_hours_remaining=None,
+        data_points_used=n_cleaned,
+        status=PredictionStatus.NORMAL,
+        reliability=compute_reliability(
+            n_cleaned, timespan_hours, r_squared, conf, days_remaining=None,
+        ),
+        t0=t0,
+    )
+
+
+def _predict_discharge_theil_sen(
+    cleaned, x, y, t0, now, now_days, target_level,
+    half_life_days, timespan_hours, n_cleaned,
+) -> PredictionResult:
+    """Theil-Sen fallback path (< 6 points or parametric fit failed)."""
     # Auto-compute half-life from drain characteristics if not specified
     if half_life_days is None:
         half_life_days = _adaptive_half_life(cleaned)
@@ -239,7 +394,6 @@ def predict_discharge(
     wlr_slope, wlr_intercept, wlr_r2 = _weighted_linear_regression(x, y, weights)
 
     # Model selection: use Theil-Sen by default.
-    # Prefer WLR only when it clearly fits better AND agrees with Theil-Sen.
     slope, intercept, r_squared = ts_slope, ts_intercept, ts_r2
     if (
         wlr_r2 > ts_r2 + 0.1
@@ -251,17 +405,7 @@ def predict_discharge(
 
     slope_per_hour = round(slope / 24.0, 4)
 
-    # Interpret the slope.
-    # t0 is stable through outlier rejection: x values were computed relative
-    # to t0 before filtering, so removing points doesn't shift the coordinate
-    # system. now_days and days_to_threshold share the same origin.
-    now = time.time()
-    now_days = (now - t0) / 86400.0
-
-    n_cleaned = len(cleaned)
-
     if slope > 0.01:
-        # Battery is charging or increasing — no empty prediction
         conf = _classify_confidence(r_squared, timespan_hours, n_cleaned)
         return PredictionResult(
             slope_per_day=round(slope, 4),
@@ -275,14 +419,12 @@ def predict_discharge(
             data_points_used=n_cleaned,
             status=PredictionStatus.CHARGING,
             reliability=compute_reliability(
-                n_cleaned, timespan_hours, r_squared, conf,
-                days_remaining=None,
+                n_cleaned, timespan_hours, r_squared, conf, days_remaining=None,
             ),
             t0=t0,
         )
 
     if abs(slope) <= 0.02:
-        # Extremely flat — effectively no drain
         conf = _classify_confidence(r_squared, timespan_hours, n_cleaned)
         return PredictionResult(
             slope_per_day=round(slope, 4),
@@ -296,14 +438,11 @@ def predict_discharge(
             data_points_used=n_cleaned,
             status=PredictionStatus.FLAT,
             reliability=compute_reliability(
-                n_cleaned, timespan_hours, r_squared, conf,
-                days_remaining=None,
+                n_cleaned, timespan_hours, r_squared, conf, days_remaining=None,
             ),
             t0=t0,
         )
 
-    # R² gate: if the model explains < 10% of variance, the slope
-    # is indistinguishable from noise — suppress rate and prediction.
     if r_squared < 0.10:
         conf = _classify_confidence(r_squared, timespan_hours, n_cleaned)
         return PredictionResult(
@@ -318,19 +457,16 @@ def predict_discharge(
             data_points_used=n_cleaned,
             status=PredictionStatus.NOISY,
             reliability=compute_reliability(
-                n_cleaned, timespan_hours, r_squared, conf,
-                days_remaining=None,
+                n_cleaned, timespan_hours, r_squared, conf, days_remaining=None,
             ),
             t0=t0,
         )
 
     # Predict when level hits target
-    # y = slope * x + intercept → x = (target - intercept) / slope
     days_to_threshold = (target_level - intercept) / slope
     days_remaining = days_to_threshold - now_days
 
     if days_remaining < 0:
-        # Already below threshold according to the model
         days_remaining = 0.0
 
     hours_remaining = round(days_remaining * 24.0, 1)
@@ -356,6 +492,11 @@ def predict_discharge(
     )
 
 
+# ---------------------------------------------------------------------------
+# Multi-session prediction (rechargeable devices)
+# ---------------------------------------------------------------------------
+
+
 def predict_discharge_multisession(
     all_readings: list[dict[str, float]],
     current_level: float,
@@ -364,9 +505,9 @@ def predict_discharge_multisession(
 ) -> PredictionResult:
     """Predict discharge for rechargeable devices using multi-session analysis.
 
-    Instead of fitting a single regression line to sawtooth data, this
-    extracts individual discharge sessions and computes the median slope
-    across all sessions.
+    Extracts individual discharge sessions and fits parametric curves to each.
+    Uses median of per-session predicted durations for the aggregate prediction.
+    Falls back to Theil-Sen slopes when sessions are too short for curve fitting.
 
     Args:
         all_readings: Full reading history (sawtooth), sorted by time.
@@ -386,17 +527,43 @@ def predict_discharge_multisession(
             session_count=len(sessions),
         )
 
-    # Compute Theil-Sen slope for each session (cache r² for single-session path)
-    session_results: list[tuple[float, float]] = []  # (slope, r_squared)
-    for session in sessions:
-        t0 = session[0]["t"]
-        x = [(r["t"] - t0) / 86400.0 for r in session]
-        y = [r["v"] for r in session]
-        slope, _, r_sq = _theil_sen(x, y)
-        if slope != 0:
-            session_results.append((slope, r_sq))
+    # Fit each session: try parametric first, fall back to Theil-Sen slope
+    session_slopes: list[float] = []
+    session_durations: list[float] = []  # predicted total duration per session
+    session_r2s: list[float] = []
 
-    session_slopes = [s for s, _ in session_results]
+    for session in sessions:
+        compressed = _sdt_compress(session)
+        t0_s = compressed[0]["t"]
+        x = [(r["t"] - t0_s) / 86400.0 for r in compressed]
+        y = [r["v"] for r in compressed]
+
+        fit = None
+        if len(compressed) >= 6:
+            fit = _fit_curve(compressed)
+
+        if fit is not None and fit.r_squared > 0.10:
+            # Use curve fit: compute duration to target from session start
+            duration = _extrapolate(fit, current_t_days=0.0, threshold_pct=target_level)
+            if duration is not None and duration > 0:
+                session_durations.append(duration)
+            # Instantaneous slope at end of session for slope aggregate
+            slope = fit.slope_at(x[-1])
+            if slope != 0:
+                session_slopes.append(slope)
+            session_r2s.append(fit.r_squared)
+        else:
+            # Theil-Sen fallback
+            slope, _, r_sq = _theil_sen(x, y)
+            if slope != 0:
+                session_slopes.append(slope)
+                # Estimate duration from linear slope
+                if slope < 0:
+                    start_v = y[0]
+                    linear_duration = (target_level - start_v) / slope
+                    if linear_duration > 0:
+                        session_durations.append(linear_duration)
+            session_r2s.append(r_sq)
 
     if not session_slopes:
         return _no_prediction(
@@ -417,27 +584,20 @@ def predict_discharge_multisession(
 
     # Calibrate intercept to current level at now
     now = time.time()
-    # intercept = current_level - slope * 0  (at t=now, days_offset=0)
-    # For chart formula: y = slope * ((t - t0) / 86400) + intercept
-    # We set t0 = now, so intercept = current_level
     intercept = current_level
 
-    # Compute R² across all session points (how consistent the slopes are)
-    # Use coefficient of variation of slopes as a proxy
-    if len(session_slopes) >= 2:
+    # Compute R²: use median of per-session R²s or CV-based score
+    if len(session_r2s) >= 2 and len(session_slopes) >= 2:
         mean_slope = sum(session_slopes) / len(session_slopes)
         if mean_slope != 0:
             variance = sum((s - mean_slope) ** 2 for s in session_slopes) / len(session_slopes)
             cv = (variance ** 0.5) / abs(mean_slope)
-            # Map CV to R²-like score: CV=0 → R²=1.0, CV=1 → R²=0.0
             r_squared = max(0.0, min(1.0, 1.0 - cv))
         else:
             r_squared = 0.0
     else:
-        # Single session — reuse the cached R² from the loop
-        r_squared = session_results[0][1] if session_results else 0.0
+        r_squared = session_r2s[0] if session_r2s else 0.0
 
-    # Compute total timespan across all readings for confidence
     timespan_hours = (all_readings[-1]["t"] - all_readings[0]["t"]) / 3600
 
     if status == PredictionStatus.CHARGING or status == PredictionStatus.FLAT:
@@ -454,16 +614,13 @@ def predict_discharge_multisession(
             data_points_used=total_points,
             status=status,
             reliability=compute_reliability(
-                total_points, timespan_hours, r_squared, conf,
-                days_remaining=None,
+                total_points, timespan_hours, r_squared, conf, days_remaining=None,
             ),
             session_count=len(sessions),
             t0=now,
         )
 
-    # Predict time to target
     if median_slope >= 0:
-        # Not draining — can't predict empty
         conf = _classify_confidence(r_squared, timespan_hours, total_points)
         return PredictionResult(
             slope_per_day=round(median_slope, 4),
@@ -481,8 +638,17 @@ def predict_discharge_multisession(
             t0=now,
         )
 
-    # slope is negative (discharging): days = (target - current) / slope
-    days_remaining = (target_level - current_level) / median_slope
+    # Use median of per-session predicted durations if available,
+    # otherwise fall back to linear slope extrapolation
+    if session_durations:
+        median_duration = _median(session_durations)
+        # How far into the "average" cycle are we? Estimate from current level.
+        # Assume cycle starts near 100%.
+        frac_remaining = (current_level - target_level) / max(100.0 - target_level, 1.0)
+        days_remaining = median_duration * max(0.0, frac_remaining)
+    else:
+        days_remaining = (target_level - current_level) / median_slope
+
     if days_remaining < 0:
         days_remaining = 0.0
 
@@ -508,6 +674,11 @@ def predict_discharge_multisession(
         session_count=len(sessions),
         t0=now,
     )
+
+
+# ---------------------------------------------------------------------------
+# Theil-Sen and WLR (kept as fallback estimators)
+# ---------------------------------------------------------------------------
 
 
 def _weighted_linear_regression(
@@ -556,13 +727,6 @@ def _theil_sen(
     Computes the median of all pairwise slopes. O(n^2) for exact,
     falls back to random sampling for large datasets.
 
-    Args:
-        x: Independent variable (days since first reading).
-        y: Dependent variable (battery level %).
-        max_pairs: Maximum number of pairs to evaluate. If the total
-                   number of pairs exceeds this, use random sampling
-                   for O(n) performance.
-
     Returns:
         (slope, intercept, r_squared)
     """
@@ -570,7 +734,6 @@ def _theil_sen(
     total_pairs = n * (n - 1) // 2
 
     if total_pairs <= max_pairs:
-        # Exact: enumerate all pairs
         slopes = []
         for i in range(n):
             for j in range(i + 1, n):
@@ -578,8 +741,7 @@ def _theil_sen(
                 if dx != 0:
                     slopes.append((y[j] - y[i]) / dx)
     else:
-        # Sampled: random pairs for large datasets (Pi 3/4 safety)
-        rng = random.Random(42)  # deterministic seed for reproducibility
+        rng = random.Random(42)
         slopes = []
         for _ in range(max_pairs):
             i, j = sorted(rng.sample(range(n), 2))
@@ -603,6 +765,11 @@ def _theil_sen(
     return slope, intercept, r_squared
 
 
+# ---------------------------------------------------------------------------
+# Regime-change detection
+# ---------------------------------------------------------------------------
+
+
 def _detect_regime_change(
     readings: list[dict[str, float]],
     x: list[float],
@@ -613,37 +780,14 @@ def _detect_regime_change(
 ) -> tuple[list[dict[str, float]], list[float], list[float]] | None:
     """Detect if the recent tail has a dramatically different slope.
 
-    Catches two scenarios:
-    - **Acceleration:** battery drains slowly then hits a voltage cliff and
-      drops steeply.  Theil-Sen's median is dominated by the slow period.
-    - **Deceleration:** battery was draining fast then stabilised (e.g. device
-      entered power-save mode).  Theil-Sen's median overestimates the drain.
-
-    Checks whether the last 24 hours of readings (or the last 20% of readings,
-    whichever gives more points, min 5) have a slope whose magnitude differs
-    by ≥ change_ratio from the overall slope.  If so, returns the tail readings
-    for re-prediction.
-
-    Args:
-        readings: Pre-rejection readings (sorted by time).
-        x: Time values (days relative to t0).
-        y: Level values.
-        overall_slope: Slope from the full-data Theil-Sen fit.
-        min_tail_points: Minimum readings required in the tail.
-        change_ratio: How many times steeper/shallower the tail must be.
-
-    Returns:
-        (tail_readings, tail_x, tail_y) if regime change detected, else None.
+    Catches acceleration (voltage cliff) and deceleration (power-save mode).
     """
     if len(readings) < min_tail_points + 3:
-        # Need enough readings for both a tail and a meaningful "before"
         return None
 
     if abs(overall_slope) < 0.01:
-        # Overall trend is flat — regime change detection not useful
         return None
 
-    # Determine tail cutoff: last 24 hours or last 20% of readings
     now_t = readings[-1]["t"]
     cutoff_24h = now_t - 86400
     idx_24h = next(
@@ -651,44 +795,39 @@ def _detect_regime_change(
         len(readings),
     )
     idx_20pct = max(0, len(readings) - max(min_tail_points, len(readings) // 5))
-    # Use whichever gives more tail points (but stay within the data)
     tail_start = min(idx_24h, idx_20pct)
 
     tail_readings = readings[tail_start:]
     if len(tail_readings) < min_tail_points:
         return None
 
-    # Need meaningful range in the tail — at least 3% change
     tail_range = abs(tail_readings[0]["v"] - tail_readings[-1]["v"])
     if tail_range < 3.0:
         return None
 
-    # Compute Theil-Sen slope on the tail
     tail_t0 = tail_readings[0]["t"]
     tail_x = [(r["t"] - tail_t0) / 86400.0 for r in tail_readings]
     tail_y = [r["v"] for r in tail_readings]
     tail_slope, _, _ = _theil_sen(tail_x, tail_y)
 
-    # Check if the ratio between tail and overall slope magnitude
-    # exceeds the threshold — in either direction:
-    # - ratio >> 1: acceleration (tail is steeper)
-    # - ratio << 1: deceleration (tail is shallower / opposite sign)
     abs_overall = abs(overall_slope)
     abs_tail = abs(tail_slope)
 
-    # Sign flip (e.g. was draining, now charging) is always a regime change
     if overall_slope * tail_slope < 0 and abs_tail > 0.1:
         return tail_readings, tail_x, tail_y
 
-    # Acceleration: tail is much steeper
     if abs_overall > 0 and abs_tail / abs_overall >= change_ratio:
         return tail_readings, tail_x, tail_y
 
-    # Deceleration: tail is much shallower (but tail must have meaningful slope)
     if abs_tail > 0.05 and abs_overall / abs_tail >= change_ratio:
         return tail_readings, tail_x, tail_y
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _adaptive_half_life(
@@ -696,13 +835,6 @@ def _adaptive_half_life(
     default: float = 14.0,
 ) -> float:
     """Calculate an appropriate half-life based on observed drain characteristics.
-
-    Slower drain -> longer memory window to capture the true trend.
-    Faster drain -> shorter window to stay responsive.
-
-    Assumes readings are sorted by time (oldest first). This is guaranteed
-    by predict_discharge(), which receives sorted data from the coordinator,
-    and _reject_by_residual() / _subsample_readings() both preserve order.
 
     Returns half-life in days.
     """
@@ -714,23 +846,15 @@ def _adaptive_half_life(
         return default
 
     value_range = readings[0]["v"] - readings[-1]["v"]
-    # Note: value_range can be negative if battery is charging or
-    # readings aren't monotonically decreasing. Handle gracefully.
 
     if value_range < 0:
-        # Charging or increasing — no meaningful drain to base half-life on
         return default
 
     if value_range <= 2:
-        # Essentially flat — use a long window to maximize signal extraction
         return max(timespan_days * 0.5, 30.0)
 
-    # Derive from observed drain rate:
-    # half-life ~ time it takes to drain 20 percentage points
     days_per_percent = timespan_days / value_range
     half_life = days_per_percent * 20
-    # Clamp: minimum 7 days (don't over-react), maximum 180 days
-    # (don't weight ancient data equally)
     return min(max(half_life, 7.0), 180.0)
 
 
@@ -740,22 +864,7 @@ def _reject_by_residual(
     y: list[float],
     threshold_mad: float = 3.0,
 ) -> tuple[list[dict[str, float]], list[float], list[float]]:
-    """Reject outliers based on Theil-Sen regression residuals.
-
-    Fits a robust line, computes residuals, then rejects points
-    whose residual exceeds threshold_mad x MAD (median absolute
-    deviation). This correctly handles the natural spread of a
-    draining battery while catching genuine sensor glitches.
-
-    Args:
-        readings: Original reading dicts.
-        x: Time values (days).
-        y: Level values (%).
-        threshold_mad: MAD multiplier for rejection threshold.
-
-    Returns:
-        (filtered_readings, filtered_x, filtered_y)
-    """
+    """Reject outliers based on Theil-Sen regression residuals."""
     if len(readings) < 5:
         return readings, x, y
 
@@ -766,10 +875,7 @@ def _reject_by_residual(
     mad = _median(abs_devs)
 
     if mad == 0:
-        # Most residuals are identical (e.g. perfect linear data with
-        # a few outliers). Any point deviating from the median residual
-        # by more than a small epsilon is an outlier.
-        epsilon = 1.0  # 1 percentage point tolerance
+        epsilon = 1.0
         filtered = [
             (r, xi, yi) for r, xi, yi, res in zip(readings, x, y, residuals)
             if abs(res - med_res) <= epsilon
@@ -788,7 +894,6 @@ def _reject_by_residual(
     ]
 
     if len(filtered) < 3:
-        # Too aggressive — fall back to unfiltered
         return readings, x, y
 
     return (
@@ -798,124 +903,10 @@ def _reject_by_residual(
     )
 
 
-def _compress_plateaus(
-    readings: list[dict[str, float]],
-    unique_values: set[float],
-    max_unique_ratio: float = 0.05,
-) -> list[dict[str, float]]:
-    """Compress staircase discharge data by collapsing plateaus.
-
-    Devices with coarse reporting (e.g. Zigbee door sensors) discharge in
-    discrete jumps: 100% for months, then 65% for weeks, then 61%.  This
-    produces thousands of identical readings per plateau.  Theil-Sen computes
-    the median of all pairwise slopes — when >95% of pairs are within a
-    single flat plateau, the median slope is ≈ 0, masking a real 39% drop.
-
-    Fix: for staircase data (few unique values relative to reading count),
-    compress each plateau to its first and last reading.  The timing of
-    transitions is preserved, and they now dominate the slope calculation.
-
-    Args:
-        readings: Subsampled readings (sorted by time).
-        unique_values: Set of unique rounded values (already computed).
-        max_unique_ratio: Trigger compression when unique/total ≤ this ratio.
-
-    Returns:
-        Compressed readings, or original if not a staircase pattern.
-    """
-    if len(readings) < 20:
-        return readings
-
-    # Only compress if the data looks like a staircase: very few unique
-    # values compared to the number of readings.
-    if len(unique_values) > max(3, len(readings) * max_unique_ratio):
-        return readings
-
-    compressed: list[dict[str, float]] = []
-    i = 0
-    while i < len(readings):
-        val = round(readings[i]["v"], 1)
-        j = i + 1
-        while j < len(readings) and round(readings[j]["v"], 1) == val:
-            j += 1
-        # Keep first and last of each plateau
-        compressed.append(readings[i])
-        if j - 1 > i:
-            compressed.append(readings[j - 1])
-        i = j
-
-    return compressed
-
-
-def _subsample_readings(
-    readings: list[dict[str, float]],
-    max_points: int = 500,
-) -> list[dict[str, float]]:
-    """Subsample readings for performance while preserving signal.
-
-    Strategy:
-    - Always keep the first and last readings (defines the full span).
-    - Always keep readings where a level transition occurred (the signal).
-    - Fill remaining budget with evenly-spaced samples from the rest.
-
-    This ensures that devices with coarse reporting granularity (where
-    transitions are the only useful data) don't lose any signal, while
-    high-frequency reporters get thinned to a manageable size.
-
-    Args:
-        readings: Full reading list, sorted by time.
-        max_points: Target maximum number of readings to keep.
-
-    Returns:
-        Subsampled reading list, sorted by time.
-    """
-    if len(readings) <= max_points:
-        return readings
-
-    # Always keep: first, last, and all transition points
-    transitions = {0, len(readings) - 1}
-    for i in range(1, len(readings)):
-        if round(readings[i]["v"], 1) != round(readings[i - 1]["v"], 1):
-            transitions.add(i)
-            transitions.add(i - 1)  # keep the reading before the transition
-
-    # If transitions exceed budget, subsample transitions themselves
-    # to prevent unbounded output on noisy sensors.
-    if len(transitions) >= max_points:
-        indices = sorted(transitions)
-        if len(indices) > max_points * 2:
-            # Too many transitions — keep first, last, and evenly-spaced sample
-            step = max(1, len(indices) // max_points)
-            kept = set(indices[::step])
-            kept.add(indices[0])
-            kept.add(indices[-1])
-            indices = sorted(kept)
-        return [readings[i] for i in indices]
-
-    # Fill remaining budget with evenly-spaced samples
-    remaining_budget = max_points - len(transitions)
-    non_transition_indices = [
-        i for i in range(len(readings)) if i not in transitions
-    ]
-
-    if non_transition_indices and remaining_budget > 0:
-        step = max(1, len(non_transition_indices) // remaining_budget)
-        sampled = set(non_transition_indices[::step])
-    else:
-        sampled = set()
-
-    all_indices = sorted(transitions | sampled)
-    return [readings[i] for i in all_indices]
-
-
 def _classify_confidence(
     r_squared: float, timespan_hours: float, data_points: int = 10,
 ) -> Confidence:
-    """Classify prediction confidence.
-
-    Considers R-squared, timespan, AND data point count.
-    A 3-point prediction with high R-squared should not be HIGH confidence.
-    """
+    """Classify prediction confidence."""
     timespan_days = timespan_hours / 24.0
 
     if r_squared > 0.8 and timespan_days >= 7 and data_points >= 10:
@@ -934,19 +925,9 @@ def compute_reliability(
     confidence: Confidence,
     days_remaining: float | None = None,
 ) -> int:
-    """Compute a 0-100 reliability score for a prediction.
-
-    Scoring:
-    - Data span: 0-25 points (0 for <1 day, 25 for >=30 days, linear)
-    - Data density: 0-15 points (readings/day: 0 for <1/day, 15 for >=4/day)
-    - R-squared: 0-50 points (linear from 0 to 1)
-    - Consistency bonus: 10 points if R² > 0.7 AND span >= 7 days
-    - Extrapolation ratio penalty: 0 to -20 points when predicting
-      far beyond the observed timespan
-    """
+    """Compute a 0-100 reliability score for a prediction."""
     timespan_days = timespan_hours / 24.0
 
-    # Data span score (0-25)
     if timespan_days < 1:
         span_score = 0.0
     elif timespan_days >= 30:
@@ -954,7 +935,6 @@ def compute_reliability(
     else:
         span_score = (timespan_days / 30.0) * 25.0
 
-    # Data density score (0-15)
     if timespan_days > 0:
         readings_per_day = data_points / timespan_days
     else:
@@ -966,21 +946,17 @@ def compute_reliability(
     else:
         density_score = ((readings_per_day - 1) / 3.0) * 15.0
 
-    # R-squared score (0-50)
     r2 = r_squared if r_squared is not None else 0.0
     r2_score = max(0.0, min(1.0, r2)) * 50.0
 
-    # Consistency bonus (0 or 10): well-fit model with sufficient time span
     consistency_bonus = 10.0 if r2 > 0.7 and timespan_days >= 7 else 0.0
 
-    # Extrapolation ratio penalty (0 to -20)
     extrap_penalty = 0.0
     if days_remaining is not None and timespan_days > 0:
         ratio = days_remaining / timespan_days
         if ratio > 5:
             extrap_penalty = -20.0
         elif ratio > 2:
-            # Linear ramp from 0 at ratio=2 to -20 at ratio=5
             extrap_penalty = -20.0 * ((ratio - 2.0) / 3.0)
 
     return round(max(0, min(100,
@@ -994,41 +970,28 @@ def _prediction_stability_score(
 ) -> float:
     """Compute prediction stability from historical empty estimates.
 
-    Measures how much the predicted EMPTY BY timestamp has been shifting
-    between successive prediction runs. Stable predictions that converge
-    on the same date are far more trustworthy than ones that swing wildly.
-
-    This function scores only — it will be wired into compute_reliability()
-    when the coordinator persistence layer stores prediction_history.
-
-    Args:
-        history: List of {"computed_at": timestamp, "empty_ts": timestamp|None}
-                 dicts, ordered chronologically (oldest first).
-
-    Returns:
-        A score from 0.0 (wildly unstable) to 10.0 (rock solid).
+    Returns a score from 0.0 (wildly unstable) to 10.0 (rock solid).
     """
     timestamps = [
         h["empty_ts"] for h in history
         if h.get("empty_ts") is not None
     ]
     if len(timestamps) < 3:
-        return 0.0  # Not enough history to assess stability
+        return 0.0
 
-    # Convert to days for interpretable scale
     days = [ts / 86400 for ts in timestamps]
     diffs = [abs(days[i] - days[i - 1]) for i in range(1, len(days))]
     avg_shift = sum(diffs) / len(diffs)
 
     if avg_shift < 1:
-        return 10.0  # Predictions barely move — very stable
+        return 10.0
     if avg_shift < 3:
         return 7.0
     if avg_shift < 7:
         return 4.0
     if avg_shift < 14:
         return 2.0
-    return 0.0  # Predictions are all over the place
+    return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -1077,22 +1040,11 @@ def extract_charging_segment(
     """Extract the current charging segment from the tail of the readings.
 
     Walks backwards from the last reading, collecting contiguous readings
-    where the level is generally rising. Small dips (within noise_tolerance)
-    are tolerated; larger dips or extended flat runs terminate the search.
-
-    Args:
-        readings: Full history, sorted by time (oldest first).
-        min_rise: Minimum total rise (%) to qualify as a charging segment.
-        noise_tolerance: Max allowed dip (%) during a charging run.
-        max_flat_run: Max consecutive non-rising readings before termination.
-
-    Returns:
-        The charging segment (oldest-first) or None if not charging.
+    where the level is generally rising.
     """
     if len(readings) < 3:
         return None
 
-    # Walk backwards
     segment_indices = [len(readings) - 1]
     peak = readings[-1]["v"]
     flat_count = 0
@@ -1102,11 +1054,9 @@ def extract_charging_segment(
         v_next = readings[i + 1]["v"]
 
         if v > v_next + noise_tolerance:
-            # Significant dip going backward = we went past the charge start
             break
 
         if v >= v_next:
-            # Non-rising (going backward means this was a rise going forward)
             flat_count += 1
             if flat_count > max_flat_run:
                 break
@@ -1119,7 +1069,6 @@ def extract_charging_segment(
     segment_indices.reverse()
     segment = [readings[i] for i in segment_indices]
 
-    # Check total rise
     total_rise = segment[-1]["v"] - segment[0]["v"]
     if total_rise < min_rise or len(segment) < 3:
         return None
@@ -1135,14 +1084,7 @@ def predict_charge(
 ) -> ChargePredictionResult:
     """Predict when a charging battery will reach the target level.
 
-    Args:
-        readings: Charging segment ({"t": timestamp, "v": level}), oldest first.
-        target_level: Level to predict reaching (default 100%).
-        min_readings: Minimum readings required.
-        min_timespan_hours: Minimum time span required (hours).
-
-    Returns:
-        ChargePredictionResult with charge prediction data.
+    Uses SDT compression then Theil-Sen (charge is fast and linear).
     """
     if len(readings) < min_readings:
         return _no_charge_prediction(PredictionStatus.INSUFFICIENT_DATA, len(readings))
@@ -1151,6 +1093,9 @@ def predict_charge(
     timespan_hours = (max(times) - min(times)) / 3600
     if timespan_hours < min_timespan_hours:
         return _no_charge_prediction(PredictionStatus.INSUFFICIENT_DATA, len(readings))
+
+    # SDT compression preprocessing (after gating on raw count)
+    readings = _sdt_compress(readings)
 
     # Convert to hours relative to first reading
     t0 = readings[0]["t"]
@@ -1161,7 +1106,6 @@ def predict_charge(
     slope, intercept, r_squared = _theil_sen(x, y)
 
     if slope <= 0.5:
-        # Not meaningfully charging (< 0.5 %/hour)
         return ChargePredictionResult(
             slope_per_hour=round(slope, 4),
             intercept=round(intercept, 2),
@@ -1174,7 +1118,6 @@ def predict_charge(
             reliability=None,
         )
 
-    # R² gate
     if r_squared < 0.10:
         conf = _classify_confidence(r_squared, timespan_hours, len(readings))
         return ChargePredictionResult(
@@ -1189,8 +1132,6 @@ def predict_charge(
             reliability=None,
         )
 
-    # Predict when level hits target
-    # y = slope * x + intercept → x = (target - intercept) / slope
     hours_to_target = (target_level - intercept) / slope
     now = time.time()
     now_hours = (now - t0) / 3600.0
@@ -1199,7 +1140,6 @@ def predict_charge(
     if hours_remaining < 0:
         hours_remaining = 0.0
 
-    # Cap implausible predictions (> 48h to full)
     if hours_remaining > 48:
         return ChargePredictionResult(
             slope_per_hour=round(slope, 4),
