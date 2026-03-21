@@ -93,7 +93,11 @@ export function formatRate(dev) {
   if (isFastDischarge(dev)) {
     return dev.dischargeRateHour !== null ? dev.dischargeRateHour + "%/h" : "\u2014";
   }
-  return dev.dischargeRate !== null ? dev.dischargeRate + "%/d" : "\u2014";
+  if (dev.dischargeRate === null) return "\u2014";
+  const r = dev.dischargeRate;
+  if (r < 0.01) return r.toFixed(4) + "%/d";
+  if (r < 1) return r.toFixed(2) + "%/d";
+  return r.toFixed(1) + "%/d";
 }
 
 export function formatTimeRemaining(dev) {
@@ -101,16 +105,20 @@ export function formatTimeRemaining(dev) {
     if (dev.hoursRemaining < 1) return Math.round(dev.hoursRemaining * 60) + "m";
     return dev.hoursRemaining + "h";
   }
-  return dev.daysRemaining !== null ? dev.daysRemaining + "d" : "\u2014";
+  if (dev.daysRemaining === null) return "\u2014";
+  if (dev.daysRemaining > 3650) return "> 10y";
+  return dev.daysRemaining + "d";
 }
 
 export function formatDate(isoString, includeTime = false) {
   if (!isoString) return "\u2014";
   try {
     const d = new Date(isoString);
+    // Suppress dates more than 10 years in the future
+    if (d.getTime() - Date.now() > 3650 * 86400 * 1000) return "\u2014";
+    const now = new Date();
+    const sameYear = d.getFullYear() === now.getFullYear();
     if (includeTime) {
-      const now = new Date();
-      const sameYear = d.getFullYear() === now.getFullYear();
       const dateOpts = sameYear
         ? { month: "short", day: "numeric" }
         : { month: "short", day: "numeric", year: "numeric" };
@@ -123,7 +131,7 @@ export function formatDate(isoString, includeTime = false) {
     return d.toLocaleDateString(undefined, {
       month: "short",
       day: "numeric",
-      year: "numeric",
+      year: sameYear ? undefined : "numeric",
     });
   } catch {
     return "\u2014";

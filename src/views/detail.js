@@ -123,7 +123,7 @@ function renderDetailMeta(panel, dev) {
         <div class="detail-meta-item">
           <div class="detail-meta-label">Data Points</div>
           <div class="detail-meta-value">
-            ${pred.data_points_used ?? (cd?.readings?.length ?? "\u2014")}${cd?.session_count ? html` <span style="color:var(--secondary-text-color); font-size:0.85em">(${cd.session_count} session${cd.session_count !== 1 ? "s" : ""})</span>` : nothing}
+            ${pred.data_points_used > 0 ? pred.data_points_used : (cd?.readings?.length ?? "\u2014")}${cd?.session_count ? html` <span style="color:var(--secondary-text-color); font-size:0.85em">(${cd.session_count} session${cd.session_count !== 1 ? "s" : ""})</span>` : nothing}
           </div>
         </div>
         ${cd?.charge_prediction?.estimated_full_timestamp

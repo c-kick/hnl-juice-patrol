@@ -149,6 +149,9 @@ class JuicePatrolPredictedEmpty(JuicePatrolEntity, SensorEntity):
             return None
         prediction = self._entity_data.get("prediction")
         if prediction and prediction.estimated_empty_timestamp:
+            import time as _time
+            if (prediction.estimated_empty_timestamp - _time.time()) > 3650 * 86400:
+                return None
             return datetime.fromtimestamp(
                 prediction.estimated_empty_timestamp, tz=UTC
             )
@@ -196,6 +199,8 @@ class JuicePatrolDaysRemaining(JuicePatrolEntity, SensorEntity):
             return None
         prediction = self._entity_data.get("prediction")
         if prediction and prediction.estimated_days_remaining is not None:
+            if prediction.estimated_days_remaining > 3650:
+                return None
             return prediction.estimated_days_remaining
         return None
 

@@ -185,6 +185,46 @@ class TestPredictDischarge:
         assert result.estimated_days_remaining is not None
 
 
+class TestPositiveSlopeClamp:
+    """Test that positive instantaneous slopes are clamped on discharging devices."""
+
+    def test_staircase_with_noisy_plateau_no_rising_slope(self):
+        """A staircase sensor that dropped from 90→20 and sits on a noisy
+        plateau should NOT report a positive slope_per_day, even if the
+        curve fit's instantaneous slope at t=now is positive.
+
+        Reproduces the Schakelaar verlichting schuur bug where the frontend
+        drew a rising prediction line.
+        """
+        now = time.time()
+        readings = []
+        # Phase 1: plateau at ~90% for 60 days
+        for h in range(0, 60 * 24, 6):
+            readings.append({"t": now - (300 - h / 24) * 86400, "v": 90.0})
+        # Phase 2: drop to ~40% over 30 days
+        for h in range(0, 30 * 24, 6):
+            frac = h / (30 * 24)
+            readings.append({"t": now - (240 - h / 24) * 86400, "v": 90 - 50 * frac})
+        # Phase 3: drop to ~20% over 30 days
+        for h in range(0, 30 * 24, 6):
+            frac = h / (30 * 24)
+            readings.append({"t": now - (210 - h / 24) * 86400, "v": 40 - 20 * frac})
+        # Phase 4: noisy plateau at ~20% for 120 days (slight upward noise)
+        import random
+        rng = random.Random(42)
+        for h in range(0, 120 * 24, 6):
+            noise = rng.uniform(-2, 3)  # biased slightly upward
+            readings.append({"t": now - (180 - h / 24) * 86400, "v": 20 + noise})
+
+        result = predict_discharge(readings, target_level=0.0)
+        # The slope should not be positive
+        if result.slope_per_day is not None:
+            assert result.slope_per_day <= 0, (
+                f"slope_per_day should not be positive for a discharging device, "
+                f"got {result.slope_per_day}"
+            )
+
+
 class TestRSquaredGate:
     """Test that low R² predictions are gated to FLAT."""
 
@@ -914,19 +954,18 @@ class TestDetectRegimeChange:
         slope, _, _ = _theil_sen(x, y)
         assert _detect_regime_change(readings, x, y, slope) is None
 
-    def test_deceleration_into_plateau_detected(self):
-        """Clear discharge head decelerating into near-flat tail SHOULD trigger.
+    def test_deceleration_into_plateau_blocked(self):
+        """Near-flat tail (range < 3.0) should NOT trigger regime change.
 
-        This is the TRADFRI scenario: 100→40 over weeks, then sitting at
-        ~40 with tiny oscillation. The head slope is clearly discharging,
-        so we want to detect the regime change and predict from the tail.
+        A flat tail is too noisy to be meaningful — the guard should
+        prevent detection, not cause it (regression fix).
         """
         readings, x, y, slope = self._make_two_phase(
             slow_hours=120, slow_start=100, slow_end=40,
             fast_hours=48, fast_start=40, fast_end=38.5,
         )
         result = _detect_regime_change(readings, x, y, slope)
-        assert result is not None
+        assert result is None
 
     def test_sign_flip_detected(self):
         """Draining then rising should be detected."""

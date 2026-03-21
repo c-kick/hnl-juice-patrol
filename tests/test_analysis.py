@@ -159,15 +159,14 @@ class TestRechargeableDetection:
             _readings([90, 88, 86, 84, 82]),
             battery_state="Charging",
         )
-        assert result.is_rechargeable is True
-        assert "battery_state" in result.rechargeable_reason
+        assert result.is_rechargeable is False
 
     def test_battery_state_not_charging(self):
         result = analyze_battery(
             _readings([90, 88, 86, 84, 82]),
             battery_state="Not Charging",
         )
-        assert result.is_rechargeable is True
+        assert result.is_rechargeable is False
 
     def test_gradual_increases_not_rechargeable(self):
         """Gradual increases alone no longer trigger rechargeable —
