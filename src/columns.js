@@ -84,7 +84,7 @@ export function buildColumns(panel) {
       sortable: true,
       type: "numeric",
       minWidth: "70px",
-      maxWidth: "100px",
+      maxWidth: "120px",
       template: (dev) => html`<span style=${STYLE_SECONDARY}>${formatRate(dev)}</span>`,
     },
     daysRemaining: {
@@ -96,18 +96,18 @@ export function buildColumns(panel) {
       template: (dev) => html`<span style=${STYLE_SECONDARY}>${formatTimeRemaining(dev)}</span>`,
     },
     reliability: {
-      title: "Rel",
+      title: "Reliability",
       sortable: true,
       type: "numeric",
       minWidth: "45px",
-      maxWidth: "60px",
+      maxWidth: "85px",
       template: (dev) => renderReliabilityBadge(dev),
     },
     predictedEmpty: {
       title: "Empty by",
       sortable: true,
       minWidth: "80px",
-      maxWidth: "110px",
+      maxWidth: "140px",
       template: (dev) => html`<span style=${STYLE_SECONDARY}>${dev.predictedEmpty
         ? formatDate(dev.predictedEmpty, isFastDischarge(dev))
         : "\u2014"}</span>`,

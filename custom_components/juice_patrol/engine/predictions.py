@@ -333,6 +333,15 @@ def _build_result_from_curve(
             t0=t0,
         )
 
+    # If the overall trend is clearly discharging but the instantaneous
+    # slope is positive (e.g. piecewise model on a noisy plateau at the
+    # bottom of a discharge curve), clamp slope_per_day to the overall
+    # slope.  This prevents the frontend from drawing a rising prediction
+    # line when the device is clearly draining.
+    if overall_slope < -FLAT_SLOPE_THRESHOLD and slope > 0:
+        slope = overall_slope
+        slope_per_hour = round(slope / 24.0, 4)
+
     # Extrapolate to target using the fitted curve
     days_remaining_val = _extrapolate(
         fit, current_t_days=now_days, threshold_pct=target_level,

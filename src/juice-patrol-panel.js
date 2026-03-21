@@ -166,6 +166,7 @@ class JuicePatrolPanel extends LitElement {
       document.removeEventListener("visibilitychange", this._visibilityHandler);
       this._visibilityHandler = null;
     }
+    this._detachScrollTracker();
   }
 
   firstUpdated() {
@@ -231,6 +232,13 @@ class JuicePatrolPanel extends LitElement {
       if (this._activeView === "detail" && this._detailEntity &&
           !this._entityMap.get(this._detailEntity)) {
         this._closeDetail();
+      }
+    }
+    if (changed.has("_activeView")) {
+      if (this._activeView === "devices") {
+        this._attachScrollTracker();
+      } else {
+        this._detachScrollTracker();
       }
     }
   }
@@ -339,7 +347,7 @@ class JuicePatrolPanel extends LitElement {
       if (entityId.includes("_discharge_rate")) {
         const val = parseFloat(state.state);
         dev.dischargeRate = isNaN(val) ? null : val;
-        dev.dischargeRateHour = attrs.rate_per_hour ?? null;
+        dev.dischargeRateHour = attrs.discharge_rate_hour ?? null;
         dev.level = attrs.level != null ? parseFloat(attrs.level) : null;
         dev.batteryType = attrs.battery_type || null;
         dev.batteryTypeSource = attrs.battery_type_source || null;
@@ -772,7 +780,10 @@ class JuicePatrolPanel extends LitElement {
       });
       this._chartLastLevel = data?.level ?? null;
       const predTs = data?.prediction?.estimated_empty_timestamp;
-      this._chartLastPredictedEmpty = predTs ? predTs * 1000 : null; // to ms
+      // Cap to match sensor suppression: >10yr predictions are treated as null
+      const predMs = predTs ? predTs * 1000 : null;
+      this._chartLastPredictedEmpty =
+        predMs && (predMs - Date.now()) < 3650 * 86400 * 1000 ? predMs : null;
       this._chartData = data;
       this._chartStale = false;
     } catch (e) {
@@ -808,6 +819,8 @@ class JuicePatrolPanel extends LitElement {
   // ── Navigation ──
 
   _openDetail(entityId) {
+    // Save scroll position to current history entry before pushing detail
+    this._saveScrollPosition();
     this._detailEntity = entityId;
     this._chartData = null;
     this._chartEl = null;
@@ -820,6 +833,75 @@ class JuicePatrolPanel extends LitElement {
 
   _closeDetail() {
     history.back();
+  }
+
+  /** Find the .scroller element inside the data table's shadow DOM. */
+  _getScroller() {
+    const dt = this.shadowRoot?.querySelector("hass-tabs-subpage-data-table");
+    const haDataTable = dt?.shadowRoot?.querySelector("ha-data-table");
+    return haDataTable?.shadowRoot?.querySelector(".scroller") || null;
+  }
+
+  /** Save current scroll position into history.state. */
+  _saveScrollPosition() {
+    const scroller = this._getScroller();
+    if (scroller) {
+      const state = { ...(history.state || {}), scrollPosition: scroller.scrollTop };
+      history.replaceState(state, "");
+    }
+  }
+
+  /** Attach throttled scroll listener to save position as user scrolls. */
+  _attachScrollTracker() {
+    if (this._scrollTracker) return;
+    // The data table's shadow DOM chain may not be ready immediately.
+    // Poll briefly until the scroller element appears.
+    let attempts = 0;
+    const tryAttach = () => {
+      const scroller = this._getScroller();
+      if (!scroller) {
+        if (++attempts < 20) requestAnimationFrame(tryAttach);
+        return;
+      }
+      if (this._scrollTracker) return; // guard against race
+
+      let ticking = false;
+      this._scrollTracker = () => {
+        if (!ticking) {
+          ticking = true;
+          requestAnimationFrame(() => {
+            this._saveScrollPosition();
+            ticking = false;
+          });
+        }
+      };
+      scroller.addEventListener("scroll", this._scrollTracker, { passive: true });
+      this._scrollTrackerTarget = scroller;
+
+      // Restore scroll position from history.state once content is tall enough
+      const pos = history.state?.scrollPosition;
+      if (pos > 0) {
+        let restoreAttempts = 0;
+        const tryRestore = () => {
+          if (scroller.scrollHeight > scroller.clientHeight + pos) {
+            scroller.scrollTop = pos;
+          } else if (++restoreAttempts < 30) {
+            requestAnimationFrame(tryRestore);
+          }
+        };
+        requestAnimationFrame(tryRestore);
+      }
+    };
+    requestAnimationFrame(tryAttach);
+  }
+
+  /** Remove scroll listener. */
+  _detachScrollTracker() {
+    if (this._scrollTracker && this._scrollTrackerTarget) {
+      this._scrollTrackerTarget.removeEventListener("scroll", this._scrollTracker);
+      this._scrollTracker = null;
+      this._scrollTrackerTarget = null;
+    }
   }
 
   // ── Action handlers ──
@@ -923,9 +1005,17 @@ class JuicePatrolPanel extends LitElement {
 
   /** Count of active filters for badge display. */
   get _activeFilterCount() {
-    return Object.values(this._filters).filter((f) =>
-      Array.isArray(f.value) ? f.value.length : f.value
-    ).length;
+    const DEFAULT_STATUS = ["active", "low"];
+    return Object.entries(this._filters).filter(([group, f]) => {
+      if (!Array.isArray(f.value) || !f.value.length) return false;
+      if (
+        group === "status" &&
+        f.value.length === DEFAULT_STATUS.length &&
+        f.value.every((v) => DEFAULT_STATUS.includes(v))
+      )
+        return false;
+      return true;
+    }).length;
   }
 
   /** Column definitions for ha-data-table. */
