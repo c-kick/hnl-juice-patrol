@@ -93,6 +93,12 @@ function renderDetailMeta(panel, dev) {
           <div class="detail-meta-label">Battery Type</div>
           <div class="detail-meta-value">${dev.batteryType || "\u2014"}</div>
         </div>
+        ${cd?.chemistry
+          ? html`<div class="detail-meta-item">
+              <div class="detail-meta-label">Chemistry</div>
+              <div class="detail-meta-value">${cd.chemistry}</div>
+            </div>`
+          : nothing}
         <div class="detail-meta-item">
           <div class="detail-meta-label">Discharge Rate</div>
           <div class="detail-meta-value">${formatRate(dev)}</div>

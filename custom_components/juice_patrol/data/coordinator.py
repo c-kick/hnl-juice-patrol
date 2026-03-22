@@ -1287,6 +1287,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "battery_type": entity_data.get("battery_type"),
             "charging_state": entity_data.get("charging_state"),
             "session_count": entity_data.get("session_count"),
+            "chemistry": entity_data.get("chemistry"),
         }
 
         # Cache the result for short-lived reuse

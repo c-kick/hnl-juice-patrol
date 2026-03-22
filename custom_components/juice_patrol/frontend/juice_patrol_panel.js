@@ -946,6 +946,10 @@ const x=globalThis,w=e=>e,$=x.trustedTypes,S=$?$.createPolicy("lit-html",{create
           <div class="detail-meta-label">Battery Type</div>
           <div class="detail-meta-value">${t.batteryType||"—"}</div>
         </div>
+        ${a?.chemistry?U`<div class="detail-meta-item">
+              <div class="detail-meta-label">Chemistry</div>
+              <div class="detail-meta-value">${a.chemistry}</div>
+            </div>`:W}
         <div class="detail-meta-item">
           <div class="detail-meta-label">Discharge Rate</div>
           <div class="detail-meta-value">${_e(t)}</div>

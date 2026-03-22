@@ -582,6 +582,7 @@ def _build_result_from_curve(
             tail_cliff_ratio=tail_cliff_ratio,
         ),
         t0=t0,
+        chemistry=chemistry,
     )
 
 
