@@ -234,6 +234,14 @@ def predict_discharge(
     now = time.time()
     now_days = (now - t0) / 86400.0
 
+    # Calendar aging: estimate SoC lost while sensor was idle
+    idle_days = (now - readings[-1]["t"]) / 86400.0
+    cal_soc_lost = 0.0
+    if chemistry is not None:
+        adjusted_soc = _calendar_penalty(readings[-1]["v"], idle_days, chemistry)
+        if adjusted_soc < readings[-1]["v"]:
+            cal_soc_lost = readings[-1]["v"] - adjusted_soc
+
     # --- Fallback chain: parametric → Theil-Sen → insufficient ---
     # Try parametric curve fitting BEFORE outlier rejection. Parametric
     # models (exponential, Weibull, piecewise) handle non-linearity
@@ -250,6 +258,7 @@ def predict_discharge(
         return _build_result_from_curve(
             curve_fit, readings, full_readings, t0, now, now_days, target_level,
             timespan_hours, n_points, chemistry=chemistry, cliff_ratio=cr,
+            cal_soc_lost=cal_soc_lost,
         )
 
     # Theil-Sen fallback: reject outliers first (linear model is sensitive)
@@ -264,7 +273,7 @@ def predict_discharge(
         cleaned, x, y, t0, now, now_days, target_level,
         half_life_days, timespan_hours, len(cleaned),
         chemistry=chemistry, cliff_ratio=cr,
-        full_readings=full_readings,
+        full_readings=full_readings, cal_soc_lost=cal_soc_lost,
     )
 
 
@@ -273,6 +282,7 @@ def _build_result_from_curve(
     timespan_hours, n_cleaned,
     chemistry: str | None = None,
     cliff_ratio: float = 1.0,
+    cal_soc_lost: float = 0.0,
 ) -> PredictionResult:
     """Build PredictionResult from a successful CurveFitResult."""
     # Compute instantaneous slope at t=now as %/day
@@ -393,6 +403,9 @@ def _build_result_from_curve(
     if days_remaining_val is not None:
         if days_remaining_val < 0:
             days_remaining_val = 0.0
+        # Calendar aging penalty: reduce remaining days by SoC lost / |slope|
+        if cal_soc_lost > 0 and slope < -FLAT_SLOPE_THRESHOLD:
+            days_remaining_val = max(0.0, days_remaining_val - cal_soc_lost / abs(slope))
         hours_remaining = round(days_remaining_val * 24.0, 1)
         estimated_empty_timestamp = now + (days_remaining_val * 86400.0)
         conf = _classify_confidence(
@@ -448,6 +461,7 @@ def _predict_discharge_theil_sen(
     chemistry: str | None = None,
     cliff_ratio: float = 1.0,
     full_readings: list[dict[str, float]] | None = None,
+    cal_soc_lost: float = 0.0,
 ) -> PredictionResult:
     """Theil-Sen fallback path (< 6 points or parametric fit failed)."""
     # Auto-compute half-life from drain characteristics if not specified
@@ -556,6 +570,10 @@ def _predict_discharge_theil_sen(
 
     if days_remaining < 0:
         days_remaining = 0.0
+
+    # Calendar aging penalty: reduce remaining days by SoC lost / |slope|
+    if cal_soc_lost > 0 and slope < -FLAT_SLOPE_THRESHOLD:
+        days_remaining = max(0.0, days_remaining - cal_soc_lost / abs(slope))
 
     hours_remaining = round(days_remaining * 24.0, 1)
     estimated_empty_timestamp = now + (days_remaining * 86400.0)
@@ -1030,24 +1048,26 @@ _C_CAL: dict[str, float] = {
 
 
 def _calendar_penalty(
+    current_soc: float,
     idle_days: float,
     chemistry: str | None,
 ) -> float:
-    """Compute SoC penalty (%) from calendar aging during idle time.
+    """Return SoC adjusted for calendar aging during idle time.
 
-    Uses the simplified square-root model: penalty = c_cal × √(idle_days).
+    Uses the simplified square-root model: loss = c_cal × √(idle_days).
     Idle days are capped per chemistry class to avoid phantom penalties
     from radio-silent sensors.
 
-    Returns a non-negative value representing estimated SoC % lost.
+    Returns current_soc minus the estimated loss, clamped to >= 0.
     """
     if idle_days <= 0:
-        return 0.0
+        return current_soc
     chem = chemistry or "unknown"
     cap = _MAX_IDLE_DAYS_PRIMARY if chem in _PRIMARY_CHEMISTRIES else _MAX_IDLE_DAYS
     capped = min(idle_days, cap)
     c_cal = _C_CAL.get(chem, _C_CAL.get("NMC", 0.0005))
-    return c_cal * math.sqrt(capped) * 100.0  # convert fraction to %
+    loss = c_cal * math.sqrt(capped) * 100.0  # convert fraction to %
+    return max(0.0, current_soc - loss)
 
 
 # Chemistry-specific reliability multipliers.
