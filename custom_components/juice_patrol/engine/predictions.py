@@ -117,6 +117,37 @@ def _validate_and_sort_readings(
     return readings
 
 
+def _strip_trailing_dead(
+    readings: list[dict[str, float]],
+    dead_threshold: float = 1.0,
+) -> list[dict[str, float]]:
+    """Remove trailing readings where the battery is effectively dead.
+
+    Walks backwards from the end and strips readings with v ≤ dead_threshold.
+    Keeps at least 3 readings so downstream gating works normally.
+    If the entire series is at or below the threshold, returns it unchanged
+    (the battery was always "dead" from the engine's perspective).
+    """
+    if len(readings) <= 3:
+        return readings
+
+    # Find the last reading above the dead threshold
+    last_alive = len(readings) - 1
+    while last_alive >= 0 and readings[last_alive]["v"] <= dead_threshold:
+        last_alive -= 1
+
+    if last_alive < 0:
+        # Every reading is at/below threshold — return unchanged
+        return readings
+
+    # Keep up to last_alive (inclusive), but ensure at least 3 readings
+    trimmed = readings[: last_alive + 1]
+    if len(trimmed) < 3:
+        return readings
+
+    return trimmed
+
+
 # ---------------------------------------------------------------------------
 # Main discharge prediction — parametric fitting with Theil-Sen fallback
 # ---------------------------------------------------------------------------
@@ -157,6 +188,20 @@ def predict_discharge(
     """
     # Validate and sort (but do NOT compress yet — need raw counts for gating)
     readings = _validate_and_sort_readings(readings)
+
+    # Strip trailing "dead battery" readings (≤1%) before fitting.
+    # Post-death 0% readings add no signal and flatten the fitted slope,
+    # causing the prediction to overshoot by weeks/months.
+    # The normal pipeline then curve-fits the actual discharge, producing
+    # a proper prediction line that shows users the system predicted correctly.
+    n_before_strip = len(readings)
+    readings = _strip_trailing_dead(readings, dead_threshold=1.0)
+    # When dead readings were stripped, the battery died around the last
+    # surviving reading.  Use its timestamp for estimated_empty_timestamp
+    # instead of "now + 0 days" (which would be the present, not when it died).
+    dead_at_ts: float | None = (
+        readings[-1]["t"] if len(readings) < n_before_strip and readings else None
+    )
 
     if len(readings) < min_readings:
         return _no_prediction(PredictionStatus.INSUFFICIENT_DATA, len(readings), chemistry=chemistry)
@@ -268,28 +313,43 @@ def predict_discharge(
         )
 
     if curve_fit is not None and curve_fit.r_squared > 0.10:
-        return _build_result_from_curve(
+        result = _build_result_from_curve(
             curve_fit, readings, full_readings, t0, now, now_days, target_level,
             timespan_hours, n_points, chemistry=chemistry, soc_split_ratio=cr,
             cal_soc_lost=cal_soc_lost, use_tail_slope=use_tail_slope,
             tail_cliff_ratio=tcr,
         )
+    else:
+        # Theil-Sen fallback: reject outliers first (linear model is sensitive)
+        cleaned, x, y = _reject_by_residual(readings, x, y)
+        if len(cleaned) < min_readings:
+            cleaned = readings
+            t0 = cleaned[0]["t"]
+            x = [(r["t"] - t0) / 86400.0 for r in cleaned]
+            y = [r["v"] for r in cleaned]
 
-    # Theil-Sen fallback: reject outliers first (linear model is sensitive)
-    cleaned, x, y = _reject_by_residual(readings, x, y)
-    if len(cleaned) < min_readings:
-        cleaned = readings
-        t0 = cleaned[0]["t"]
-        x = [(r["t"] - t0) / 86400.0 for r in cleaned]
-        y = [r["v"] for r in cleaned]
+        result = _predict_discharge_theil_sen(
+            cleaned, x, y, t0, now, now_days, target_level,
+            half_life_days, timespan_hours, len(cleaned),
+            chemistry=chemistry, soc_split_ratio=cr,
+            full_readings=full_readings, cal_soc_lost=cal_soc_lost,
+            use_tail_slope=use_tail_slope, tail_cliff_ratio=tcr,
+        )
 
-    return _predict_discharge_theil_sen(
-        cleaned, x, y, t0, now, now_days, target_level,
-        half_life_days, timespan_hours, len(cleaned),
-        chemistry=chemistry, soc_split_ratio=cr,
-        full_readings=full_readings, cal_soc_lost=cal_soc_lost,
-        use_tail_slope=use_tail_slope, tail_cliff_ratio=tcr,
-    )
+    # Post-death override: when dead readings were stripped, the battery is
+    # dead regardless of what the curve fit predicts.  Keep the fitted slope
+    # and R² (they produce the prediction curve on the chart) but override
+    # days remaining and timestamp to reflect reality.
+    if dead_at_ts is not None:
+        from dataclasses import replace as _dc_replace
+        result = _dc_replace(
+            result,
+            estimated_empty_timestamp=round(dead_at_ts, 0),
+            estimated_days_remaining=0.0,
+            estimated_hours_remaining=0.0,
+        )
+
+    return result
 
 
 def _build_result_from_curve(

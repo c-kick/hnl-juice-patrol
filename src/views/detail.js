@@ -61,8 +61,13 @@ function renderDetailMeta(panel, dev) {
   const chargePred = cd?.charge_prediction;
   const isHistoryBased = chargePred?.status === "history-based";
 
+  // Detect depleted battery: chart data says 0 days remaining with normal status
+  const isDepleted = pred.status === "normal"
+    && pred.estimated_days_remaining != null
+    && pred.estimated_days_remaining <= 0;
+
   const statusTexts = {
-    normal: "Normal discharge",
+    normal: isDepleted ? "Depleted" : "Normal discharge",
     charging: "Currently charging",
     flat: "Flat \u2014 no significant discharge detected",
     idle: "Idle \u2014 not currently discharging",
@@ -140,6 +145,13 @@ function renderDetailMeta(panel, dev) {
                 ${formatDate(dev.predictedEmpty, isFastDischarge(dev))}
               </div>
             </div>`
+          : isDepleted && pred.estimated_empty_timestamp
+          ? html`<div class="detail-meta-item">
+              <div class="detail-meta-label">Reached Empty</div>
+              <div class="detail-meta-value">
+                ${formatDate(pred.estimated_empty_timestamp * 1000, true)}
+              </div>
+            </div>`
           : nothing}
         ${dev.lastCalculated
           ? html`<div class="detail-meta-item">
@@ -150,7 +162,15 @@ function renderDetailMeta(panel, dev) {
             </div>`
           : nothing}
       </div>
-      ${!dev.predictedEmpty && pred.status && pred.status !== "normal"
+      ${isDepleted
+        ? html`<div class="detail-reason">
+            <ha-icon icon="mdi:battery-alert-variant-outline" style="--mdc-icon-size:18px; color:var(--error-color); flex-shrink:0"></ha-icon>
+            <div>
+              <strong>Battery depleted</strong>
+              <div class="detail-reason-text">This battery has reached 0% and needs replacement.</div>
+            </div>
+          </div>`
+        : !dev.predictedEmpty && pred.status && pred.status !== "normal"
         && !(pred.status === "charging" && cd?.charge_prediction?.segment_start_timestamp != null && !isHistoryBased)
         ? html`<div class="detail-reason">
             <ha-icon icon="mdi:information-outline" style="--mdc-icon-size:18px; color:var(--secondary-text-color); flex-shrink:0"></ha-icon>

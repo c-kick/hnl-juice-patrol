@@ -316,7 +316,11 @@ class JuicePatrolPanel extends LitElement {
     // the battery dies in 2 days, not when it has 2 years left.
     if (this._activeView === "detail" && this._detailEntity && !this._chartLoading && this._chartData) {
       const dev = this._getDevice(this._detailEntity);
-      if (dev) {
+      // Skip stale-detection for offline devices: the entity sensor suppresses
+      // its state when stale (returns "unknown"), but the chart WS data still
+      // carries the last prediction timestamp.  Comparing null (entity) against
+      // non-null (chart) creates an infinite stale → refresh → stale loop.
+      if (dev && !dev.isStale) {
         const newPredTs = dev.predictedEmpty ? new Date(dev.predictedEmpty).getTime() : null;
         const oldPredTs = this._chartLastPredictedEmpty;
         if (this._isPredictionSignificantlyChanged(oldPredTs, newPredTs)) {
