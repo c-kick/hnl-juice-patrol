@@ -83,10 +83,8 @@ _CHEMISTRY_MAP: dict[str, str] = {
     "fr03": "lithium_primary",
     "cr123": "lithium_primary",
     "cr17345": "lithium_primary",
-    # Generic CR prefix catch-all for any CR battery not explicitly listed
-    # above (e.g. CR2, CR1/3N, CR-V3).  Must come after specific CRxxxx
-    # entries so those match first.
-    "cr": "lithium_primary",
+    # Generic CR prefix catch-all removed — handled by _cr_prefix_match()
+    # below to avoid false positives on words containing "cr" (e.g. "micro").
     "c battery": "alkaline",
     "d battery": "alkaline",
     "9v": "alkaline",
@@ -122,6 +120,12 @@ def chemistry_from_battery_type(battery_type: str | None) -> str:
     for key, chem in _CHEMISTRY_MAP.items():
         if key in normalised:
             return chem
+    # CR prefix catch-all: matches "cr2", "cr-v3", "cr 1/3n" etc. but not
+    # words that merely contain "cr" (e.g. "micro", "secret").
+    # Requires "cr" at start of string or after a space/separator.
+    import re
+    if re.search(r"(?:^|[\s\-×])cr[\d\-/\s]", normalised):
+        return "lithium_primary"
     return "unknown"
 
 
