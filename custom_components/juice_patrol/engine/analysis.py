@@ -45,18 +45,30 @@ _REPLACEMENT_LOW_MULTIPLIER = 2
 _CHEMISTRY_MAP: dict[str, str] = {
     "lifepo4": "LFP",
     "lfp": "LFP",
+    # "li-ion aa" / "li-ion aaa" must precede "li-ion" so explicit
+    # lithium-primary AA/AAA overrides are matched first.
+    "li-ion aa": "lithium_primary",
+    "li-ion aaa": "lithium_primary",
     "li-ion": "NMC",
     "lithium-ion": "NMC",
     "lithium ion": "NMC",
     "lipo": "NMC",
     "li-po": "NMC",
     "lithium polymer": "NMC",
+    # "nimh aa"/"nimh aaa" before generic "nimh" so rechargeable AA/AAA
+    # form factors are explicitly caught as NiMH.
+    "nimh aa": "NiMH",
+    "nimh aaa": "NiMH",
     "nimh": "NiMH",
     "ni-mh": "NiMH",
     "nickel metal hydride": "NiMH",
     "lco": "LCO",
     "lithium cobalt": "LCO",
-    # Primary chemistries — form-factor substrings
+    # Primary chemistries — form-factor substrings.
+    # coin_cell is a behavioural subtype of lithium_primary — both have
+    # extremely flat discharge curves with an abrupt cliff.  The next
+    # branch will consolidate these into lithium_primary with
+    # coin_cell-specific priors for plateau detection and cliff thresholds.
     "cr2032": "coin_cell",
     "cr2025": "coin_cell",
     "cr2016": "coin_cell",
@@ -71,6 +83,10 @@ _CHEMISTRY_MAP: dict[str, str] = {
     "fr03": "lithium_primary",
     "cr123": "lithium_primary",
     "cr17345": "lithium_primary",
+    # Generic CR prefix catch-all for any CR battery not explicitly listed
+    # above (e.g. CR2, CR1/3N, CR-V3).  Must come after specific CRxxxx
+    # entries so those match first.
+    "cr": "lithium_primary",
     "c battery": "alkaline",
     "d battery": "alkaline",
     "9v": "alkaline",
