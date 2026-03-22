@@ -789,6 +789,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "knee_risk": knee,
             "cycle_count": cycle_count,
             "chemistry": chemistry,
+            "chemistry_override": chemistry_override,
         }
 
     def _get_battery_state(self, entity_id: str, device_id: str | None) -> str | None:

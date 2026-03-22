@@ -126,6 +126,14 @@ export function showBatteryTypeDialog(panel, entityId, currentType) {
   let rechargeable = dev?.isRechargeable || false;
   let rechargeableChanged = false;
 
+  // TODO(chemistry-override): rebuild frontend bundle with `npm run build`
+  // after merging this branch — the bundled juice_patrol_panel.js does not
+  // include these changes yet.
+  const chemistryPresets = ["alkaline", "lithium_primary", "NMC", "NiMH"];
+  const chemistryLabels = { alkaline: "Alkaline", lithium_primary: "Lithium", NMC: "Li-ion", NiMH: "NiMH" };
+  let chemistryOverride = dev?.chemistryOverride || null;
+  let chemistryChanged = false;
+
   const dialog = document.createElement("ha-dialog");
   dialog.open = true;
   dialog.headerTitle = "Set battery type";
@@ -178,6 +186,27 @@ export function showBatteryTypeDialog(panel, entityId, currentType) {
         <ha-icon icon="mdi:power-plug-battery" style="--mdc-icon-size:16px"></ha-icon>
         Rechargeable battery
       </label>
+      <ha-expansion-panel outlined style="margin: 8px 0">
+        <span slot="header">Advanced</span>
+        <div style="padding: 8px 0">
+          <div style="font-size:0.9em; font-weight:500; margin-bottom:6px">Chemistry override</div>
+          <div class="jp-dialog-presets jp-chem-presets">
+            ${chemistryPresets.map((c) => {
+              const active = chemistryOverride === c;
+              return \`<button class="jp-preset jp-chem-chip\${active ? " active" : ""}"
+                data-chem="\${c}">\${chemistryLabels[c]}</button>\`;
+            }).join("")}
+          </div>
+          <div style="font-size:0.8em; color:var(--secondary-text-color); margin-top:6px">
+            Changes the prediction model used for this device. Leave unset to use
+            the default for this battery type.
+          </div>
+          <div class="jp-chem-warning" style="display:${chemistryOverride ? "block" : "none"};
+            font-size:0.8em; color:var(--warning-color, #ff9800); margin-top:4px">
+            Overriding chemistry will affect prediction accuracy if incorrect.
+          </div>
+        </div>
+      </ha-expansion-panel>
       <div class="jp-dialog-actions">
         <ha-button variant="neutral" class="jp-dialog-clear">Clear</ha-button>
         <ha-button variant="neutral" class="jp-dialog-cancel">Cancel</ha-button>
@@ -196,13 +225,23 @@ export function showBatteryTypeDialog(panel, entityId, currentType) {
       });
     });
 
-    body.querySelectorAll(".jp-preset:not([disabled])").forEach((btn) => {
+    body.querySelectorAll(".jp-preset[data-type]:not([disabled])").forEach((btn) => {
       btn.addEventListener("click", () => {
         const t = btn.dataset.type;
         lockedType = t;
         badges.push(t);
         const input = body.querySelector(".jp-dialog-input");
         if (input) input.value = "";
+        renderDialog();
+      });
+    });
+
+    // Chemistry override chips — toggle on/off
+    body.querySelectorAll(".jp-chem-chip").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const c = btn.dataset.chem;
+        chemistryOverride = chemistryOverride === c ? null : c;
+        chemistryChanged = true;
         renderDialog();
       });
     });
@@ -295,6 +334,17 @@ export function showBatteryTypeDialog(panel, entityId, currentType) {
         }
         if (typeChanged) {
           await panel._saveBatteryType(entityId, val);
+        }
+        if (chemistryChanged) {
+          try {
+            await panel._hass.callWS({
+              type: "juice_patrol/set_chemistry_override",
+              entity_id: entityId,
+              chemistry: chemistryOverride,
+            });
+          } catch (e) {
+            showToast(panel, "Failed to update chemistry override");
+          }
         }
       });
 

@@ -366,6 +366,8 @@ class JuicePatrolPanel extends LitElement {
           isRechargeable: false,
           rechargeableReason: null,
           chargingState: null,
+          chemistry: null,
+          chemistryOverride: null,
           anomaly: null,
           dropSize: null,
           stability: null,
@@ -397,6 +399,8 @@ class JuicePatrolPanel extends LitElement {
         dev.isRechargeable = attrs.is_rechargeable ?? false;
         dev.rechargeableReason = attrs.rechargeable_reason ?? null;
         dev.chargingState = attrs.charging_state ?? null;
+        dev.chemistry = attrs.chemistry ?? null;
+        dev.chemistryOverride = attrs.chemistry_override ?? null;
         dev.anomaly = attrs.discharge_anomaly ?? null;
         dev.dropSize = attrs.drop_size ?? null;
         dev.stability = attrs.stability ?? null;
