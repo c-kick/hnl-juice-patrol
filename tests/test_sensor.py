@@ -21,8 +21,11 @@ from custom_components.juice_patrol.engine.predictions import (
 from custom_components.juice_patrol.sensor import (
     JuicePatrolDaysRemaining,
     JuicePatrolDischargeRate,
+    JuicePatrolKneeRisk,
     JuicePatrolLowestBattery,
     JuicePatrolPredictedEmpty,
+    JuicePatrolSoH,
+    JuicePatrolSoHCycling,
     async_setup_entry,
 )
 
@@ -118,13 +121,16 @@ class TestAsyncSetupEntry:
 
         await async_setup_entry(MagicMock(), entry, capture_add)
 
-        # 3 per-device (discharge_rate, predicted_empty, days_remaining) + 1 summary
-        assert len(added) == 4
+        # 6 per-device + 1 summary
+        assert len(added) == 7
         types = {type(e) for e in added}
         assert types == {
             JuicePatrolDischargeRate,
             JuicePatrolPredictedEmpty,
             JuicePatrolDaysRemaining,
+            JuicePatrolSoH,
+            JuicePatrolSoHCycling,
+            JuicePatrolKneeRisk,
             JuicePatrolLowestBattery,
         }
 
@@ -168,8 +174,8 @@ class TestAsyncSetupEntry:
         mock_coordinator.data = {SOURCE_ENTITY: _make_device_info()}
         callback([SOURCE_ENTITY])
 
-        # Should now have 1 summary + 3 per-device = 4
-        assert len(added) == 4
+        # Should now have 1 summary + 6 per-device = 7
+        assert len(added) == 7
 
     @pytest.mark.asyncio
     async def test_callback_skips_already_known_devices(
@@ -186,7 +192,7 @@ class TestAsyncSetupEntry:
             added.extend(entities)
 
         await async_setup_entry(MagicMock(), entry, capture_add)
-        assert len(added) == 4  # 3 per-device + 1 summary
+        assert len(added) == 7  # 6 per-device + 1 summary
 
         # Call the callback again with the same entity
         callback = (
@@ -195,7 +201,7 @@ class TestAsyncSetupEntry:
         callback([SOURCE_ENTITY])
 
         # No new entities should be added
-        assert len(added) == 4
+        assert len(added) == 7
 
 
 class TestDischargeRate:
