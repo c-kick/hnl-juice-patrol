@@ -45,6 +45,15 @@
       "days_remaining": {
         "name": "Dagen resterend"
       },
+      "soh": {
+        "name": "Gezondheidsstatus"
+      },
+      "soh_cycling": {
+        "name": "Cyclusgezondheid"
+      },
+      "knee_risk": {
+        "name": "Kniepuntrisico"
+      },
       "lowest_battery": {
         "name": "Laagste batterij"
       }

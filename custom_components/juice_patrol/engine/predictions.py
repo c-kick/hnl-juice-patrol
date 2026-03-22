@@ -127,6 +127,7 @@ def predict_discharge(
     min_timespan_hours: float = 24.0,
     class_prior: ClassPrior | None = None,
     _depth: int = 0,
+    chemistry: str | None = None,
 ) -> PredictionResult:
     """Predict when a battery will reach the target level.
 
@@ -144,6 +145,9 @@ def predict_discharge(
         min_readings: Minimum readings required.
         min_timespan_hours: Minimum time span required (hours).
         class_prior: Optional prior from completed cycles of the same device class.
+        chemistry: Optional chemistry string (e.g. "coin_cell", "NMC") from
+            chemistry_from_battery_type(). Influences model selection,
+            confidence caps, and reliability scoring.
 
     Returns:
         PredictionResult with prediction data and confidence.
@@ -172,6 +176,9 @@ def predict_discharge(
     if value_range <= step_size:
         return _no_prediction(PredictionStatus.INSUFFICIENT_RANGE, len(readings))
 
+    # Compute cliff ratio on raw readings before compression
+    cr = _cliff_ratio(readings)
+
     # SDT compress for fitting (preserves slope transitions, removes plateaus)
     full_readings = readings
     readings = _sdt_compress(readings, step_size=step_size)
@@ -195,6 +202,7 @@ def predict_discharge(
                 min_timespan_hours=min(min_timespan_hours, 1.0),
                 class_prior=class_prior,
                 _depth=1,
+                chemistry=chemistry,
             )
             # Reclassify confidence using the full dataset context.
             from dataclasses import replace as _replace
@@ -202,6 +210,9 @@ def predict_discharge(
                 result.r_squared or 0.0,
                 timespan_hours,
                 len(readings),
+                chemistry=chemistry,
+                cliff_ratio=cr,
+                readings=full_readings,
             )
             if full_conf != result.confidence:
                 result = _replace(
@@ -213,6 +224,8 @@ def predict_discharge(
                         result.r_squared,
                         full_conf,
                         days_remaining=result.estimated_days_remaining,
+                        chemistry=chemistry,
+                        cliff_ratio=cr,
                     ),
                 )
             return result
@@ -228,12 +241,15 @@ def predict_discharge(
     # would incorrectly discard steep transitions that are signal.
     curve_fit = None
     if n_points >= 6:
-        curve_fit = _fit_curve(readings, class_prior=class_prior)
+        curve_fit = _fit_curve(
+            readings, class_prior=class_prior,
+            candidates=_candidate_models(chemistry),
+        )
 
     if curve_fit is not None and curve_fit.r_squared > 0.10:
         return _build_result_from_curve(
             curve_fit, readings, full_readings, t0, now, now_days, target_level,
-            timespan_hours, n_points,
+            timespan_hours, n_points, chemistry=chemistry, cliff_ratio=cr,
         )
 
     # Theil-Sen fallback: reject outliers first (linear model is sensitive)
@@ -247,12 +263,16 @@ def predict_discharge(
     return _predict_discharge_theil_sen(
         cleaned, x, y, t0, now, now_days, target_level,
         half_life_days, timespan_hours, len(cleaned),
+        chemistry=chemistry, cliff_ratio=cr,
+        full_readings=full_readings,
     )
 
 
 def _build_result_from_curve(
     fit, cleaned, full_readings, t0, now, now_days, target_level,
     timespan_hours, n_cleaned,
+    chemistry: str | None = None,
+    cliff_ratio: float = 1.0,
 ) -> PredictionResult:
     """Build PredictionResult from a successful CurveFitResult."""
     # Compute instantaneous slope at t=now as %/day
@@ -273,7 +293,10 @@ def _build_result_from_curve(
     overall_slope = (last_v - first_v) / duration_days if duration_days > 0 else 0.0
 
     if overall_slope > 0.01:
-        conf = _classify_confidence(r_squared, timespan_hours, n_cleaned)
+        conf = _classify_confidence(
+            r_squared, timespan_hours, n_cleaned,
+            chemistry=chemistry, cliff_ratio=cliff_ratio, readings=full_readings,
+        )
         return PredictionResult(
             slope_per_day=round(slope, 4),
             slope_per_hour=slope_per_hour,
@@ -287,6 +310,7 @@ def _build_result_from_curve(
             status=PredictionStatus.CHARGING,
             reliability=compute_reliability(
                 n_cleaned, timespan_hours, r_squared, conf, days_remaining=None,
+                chemistry=chemistry, cliff_ratio=cliff_ratio,
             ),
             t0=t0,
         )
@@ -296,7 +320,10 @@ def _build_result_from_curve(
         # a positive discharge rate (confusing in the UI).
         flat_slope = 0.0 if slope > 0 else round(slope, 4)
         flat_slope_per_hour = 0.0 if slope > 0 else slope_per_hour
-        conf = _classify_confidence(r_squared, timespan_hours, n_cleaned)
+        conf = _classify_confidence(
+            r_squared, timespan_hours, n_cleaned,
+            chemistry=chemistry, cliff_ratio=cliff_ratio, readings=full_readings,
+        )
         return PredictionResult(
             slope_per_day=flat_slope,
             slope_per_hour=flat_slope_per_hour,
@@ -310,12 +337,16 @@ def _build_result_from_curve(
             status=PredictionStatus.FLAT,
             reliability=compute_reliability(
                 n_cleaned, timespan_hours, r_squared, conf, days_remaining=None,
+                chemistry=chemistry, cliff_ratio=cliff_ratio,
             ),
             t0=t0,
         )
 
     if r_squared < 0.10:
-        conf = _classify_confidence(r_squared, timespan_hours, n_cleaned)
+        conf = _classify_confidence(
+            r_squared, timespan_hours, n_cleaned,
+            chemistry=chemistry, cliff_ratio=cliff_ratio, readings=full_readings,
+        )
         return PredictionResult(
             slope_per_day=None,
             slope_per_hour=None,
@@ -329,6 +360,7 @@ def _build_result_from_curve(
             status=PredictionStatus.NOISY,
             reliability=compute_reliability(
                 n_cleaned, timespan_hours, r_squared, conf, days_remaining=None,
+                chemistry=chemistry, cliff_ratio=cliff_ratio,
             ),
             t0=t0,
         )
@@ -363,7 +395,10 @@ def _build_result_from_curve(
             days_remaining_val = 0.0
         hours_remaining = round(days_remaining_val * 24.0, 1)
         estimated_empty_timestamp = now + (days_remaining_val * 86400.0)
-        conf = _classify_confidence(r_squared, timespan_hours, n_cleaned)
+        conf = _classify_confidence(
+            r_squared, timespan_hours, n_cleaned,
+            chemistry=chemistry, cliff_ratio=cliff_ratio, readings=full_readings,
+        )
         return PredictionResult(
             slope_per_day=round(slope, 4),
             slope_per_hour=slope_per_hour,
@@ -378,12 +413,16 @@ def _build_result_from_curve(
             reliability=compute_reliability(
                 n_cleaned, timespan_hours, r_squared, conf,
                 days_remaining=days_remaining_val,
+                chemistry=chemistry, cliff_ratio=cliff_ratio,
             ),
             t0=t0,
         )
 
     # Can't extrapolate — return with slope but no prediction
-    conf = _classify_confidence(r_squared, timespan_hours, n_cleaned)
+    conf = _classify_confidence(
+        r_squared, timespan_hours, n_cleaned,
+        chemistry=chemistry, cliff_ratio=cliff_ratio, readings=full_readings,
+    )
     return PredictionResult(
         slope_per_day=round(slope, 4),
         slope_per_hour=slope_per_hour,
@@ -397,6 +436,7 @@ def _build_result_from_curve(
         status=PredictionStatus.NORMAL,
         reliability=compute_reliability(
             n_cleaned, timespan_hours, r_squared, conf, days_remaining=None,
+            chemistry=chemistry, cliff_ratio=cliff_ratio,
         ),
         t0=t0,
     )
@@ -405,6 +445,9 @@ def _build_result_from_curve(
 def _predict_discharge_theil_sen(
     cleaned, x, y, t0, now, now_days, target_level,
     half_life_days, timespan_hours, n_cleaned,
+    chemistry: str | None = None,
+    cliff_ratio: float = 1.0,
+    full_readings: list[dict[str, float]] | None = None,
 ) -> PredictionResult:
     """Theil-Sen fallback path (< 6 points or parametric fit failed)."""
     # Auto-compute half-life from drain characteristics if not specified
@@ -434,8 +477,13 @@ def _predict_discharge_theil_sen(
 
     slope_per_hour = round(slope / 24.0, 4)
 
+    _readings = full_readings or cleaned
+
     if slope > 0.01:
-        conf = _classify_confidence(r_squared, timespan_hours, n_cleaned)
+        conf = _classify_confidence(
+            r_squared, timespan_hours, n_cleaned,
+            chemistry=chemistry, cliff_ratio=cliff_ratio, readings=_readings,
+        )
         return PredictionResult(
             slope_per_day=round(slope, 4),
             slope_per_hour=slope_per_hour,
@@ -449,6 +497,7 @@ def _predict_discharge_theil_sen(
             status=PredictionStatus.CHARGING,
             reliability=compute_reliability(
                 n_cleaned, timespan_hours, r_squared, conf, days_remaining=None,
+                chemistry=chemistry, cliff_ratio=cliff_ratio,
             ),
             t0=t0,
         )
@@ -456,7 +505,10 @@ def _predict_discharge_theil_sen(
     if abs(slope) <= FLAT_SLOPE_THRESHOLD:
         flat_slope = 0.0 if slope > 0 else round(slope, 4)
         flat_slope_per_hour = 0.0 if slope > 0 else slope_per_hour
-        conf = _classify_confidence(r_squared, timespan_hours, n_cleaned)
+        conf = _classify_confidence(
+            r_squared, timespan_hours, n_cleaned,
+            chemistry=chemistry, cliff_ratio=cliff_ratio, readings=_readings,
+        )
         return PredictionResult(
             slope_per_day=flat_slope,
             slope_per_hour=flat_slope_per_hour,
@@ -470,12 +522,16 @@ def _predict_discharge_theil_sen(
             status=PredictionStatus.FLAT,
             reliability=compute_reliability(
                 n_cleaned, timespan_hours, r_squared, conf, days_remaining=None,
+                chemistry=chemistry, cliff_ratio=cliff_ratio,
             ),
             t0=t0,
         )
 
     if r_squared < 0.10:
-        conf = _classify_confidence(r_squared, timespan_hours, n_cleaned)
+        conf = _classify_confidence(
+            r_squared, timespan_hours, n_cleaned,
+            chemistry=chemistry, cliff_ratio=cliff_ratio, readings=_readings,
+        )
         return PredictionResult(
             slope_per_day=None,
             slope_per_hour=None,
@@ -489,6 +545,7 @@ def _predict_discharge_theil_sen(
             status=PredictionStatus.NOISY,
             reliability=compute_reliability(
                 n_cleaned, timespan_hours, r_squared, conf, days_remaining=None,
+                chemistry=chemistry, cliff_ratio=cliff_ratio,
             ),
             t0=t0,
         )
@@ -502,7 +559,10 @@ def _predict_discharge_theil_sen(
 
     hours_remaining = round(days_remaining * 24.0, 1)
     estimated_empty_timestamp = now + (days_remaining * 86400.0)
-    conf = _classify_confidence(r_squared, timespan_hours, n_cleaned)
+    conf = _classify_confidence(
+        r_squared, timespan_hours, n_cleaned,
+        chemistry=chemistry, cliff_ratio=cliff_ratio, readings=_readings,
+    )
 
     return PredictionResult(
         slope_per_day=round(slope, 4),
@@ -518,6 +578,7 @@ def _predict_discharge_theil_sen(
         reliability=compute_reliability(
             n_cleaned, timespan_hours, r_squared, conf,
             days_remaining=days_remaining,
+            chemistry=chemistry, cliff_ratio=cliff_ratio,
         ),
         t0=t0,
     )
@@ -922,51 +983,6 @@ def _adaptive_half_life(
     return min(max(half_life, 7.0), 180.0)
 
 
-def _reject_by_residual(
-    readings: list[dict[str, float]],
-    x: list[float],
-    y: list[float],
-    threshold_mad: float = 3.0,
-) -> tuple[list[dict[str, float]], list[float], list[float]]:
-    """Reject outliers based on Theil-Sen regression residuals."""
-    if len(readings) < 5:
-        return readings, x, y
-
-    slope, intercept, _ = _theil_sen(x, y)
-    residuals = [yi - (slope * xi + intercept) for xi, yi in zip(x, y)]
-    med_res = _median(residuals)
-    abs_devs = [abs(r - med_res) for r in residuals]
-    mad = _median(abs_devs)
-
-    if mad == 0:
-        epsilon = 1.0
-        filtered = [
-            (r, xi, yi) for r, xi, yi, res in zip(readings, x, y, residuals)
-            if abs(res - med_res) <= epsilon
-        ]
-        if len(filtered) < 3:
-            return readings, x, y
-        return (
-            [f[0] for f in filtered],
-            [f[1] for f in filtered],
-            [f[2] for f in filtered],
-        )
-
-    filtered = [
-        (r, xi, yi) for r, xi, yi, res in zip(readings, x, y, residuals)
-        if abs(res - med_res) <= threshold_mad * mad
-    ]
-
-    if len(filtered) < 3:
-        return readings, x, y
-
-    return (
-        [f[0] for f in filtered],
-        [f[1] for f in filtered],
-        [f[2] for f in filtered],
-    )
-
-
 # Primary (non-rechargeable) chemistries — used for idle-day caps
 _PRIMARY_CHEMISTRIES = frozenset({"alkaline", "lithium_primary", "coin_cell"})
 
@@ -1107,19 +1123,93 @@ def _stuck_near_cliff(
     return _median(tail) <= threshold_pct
 
 
+def _reject_by_residual(
+    readings: list[dict[str, float]],
+    x: list[float],
+    y: list[float],
+    threshold_mad: float = 3.0,
+) -> tuple[list[dict[str, float]], list[float], list[float]]:
+    """Reject outliers based on Theil-Sen regression residuals."""
+    if len(readings) < 5:
+        return readings, x, y
+
+    slope, intercept, _ = _theil_sen(x, y)
+    residuals = [yi - (slope * xi + intercept) for xi, yi in zip(x, y)]
+    med_res = _median(residuals)
+    abs_devs = [abs(r - med_res) for r in residuals]
+    mad = _median(abs_devs)
+
+    if mad == 0:
+        epsilon = 1.0
+        filtered = [
+            (r, xi, yi) for r, xi, yi, res in zip(readings, x, y, residuals)
+            if abs(res - med_res) <= epsilon
+        ]
+        if len(filtered) < 3:
+            return readings, x, y
+        return (
+            [f[0] for f in filtered],
+            [f[1] for f in filtered],
+            [f[2] for f in filtered],
+        )
+
+    filtered = [
+        (r, xi, yi) for r, xi, yi, res in zip(readings, x, y, residuals)
+        if abs(res - med_res) <= threshold_mad * mad
+    ]
+
+    if len(filtered) < 3:
+        return readings, x, y
+
+    return (
+        [f[0] for f in filtered],
+        [f[1] for f in filtered],
+        [f[2] for f in filtered],
+    )
+
+
 def _classify_confidence(
-    r_squared: float, timespan_hours: float, data_points: int = 10,
+    r_squared: float,
+    timespan_hours: float,
+    data_points: int = 10,
+    chemistry: str | None = None,
+    cliff_ratio: float = 1.0,
+    readings: list[dict[str, float]] | None = None,
 ) -> Confidence:
-    """Classify prediction confidence."""
+    """Classify prediction confidence.
+
+    Additional chemistry / cliff awareness:
+    - coin_cell and lithium_primary are capped at MEDIUM (staircase sensors
+      with 5-10% steps make HIGH unreliable).
+    - cliff_ratio > 2.5 forces LOW (rapid drain-rate change below the
+      split point makes the extrapolation unreliable).
+    - _stuck_near_cliff forces LOW (sensor stuck at a low plateau; the
+      next step is likely to zero).
+    """
     timespan_days = timespan_hours / 24.0
 
     if r_squared > 0.8 and timespan_days >= 7 and data_points >= 10:
-        return Confidence.HIGH
-    if r_squared > 0.3 and timespan_days >= 3 and data_points >= 5:
-        return Confidence.MEDIUM
-    if r_squared > 0.1:
-        return Confidence.LOW
-    return Confidence.INSUFFICIENT_DATA
+        level = Confidence.HIGH
+    elif r_squared > 0.3 and timespan_days >= 3 and data_points >= 5:
+        level = Confidence.MEDIUM
+    elif r_squared > 0.1:
+        level = Confidence.LOW
+    else:
+        return Confidence.INSUFFICIENT_DATA
+
+    # Cap coin_cell / lithium_primary at MEDIUM — coarse staircase readings
+    if chemistry in ("coin_cell", "lithium_primary") and level == Confidence.HIGH:
+        level = Confidence.MEDIUM
+
+    # Cliff ratio penalty
+    if cliff_ratio > 2.5 and level != Confidence.LOW:
+        level = Confidence.LOW
+
+    # Stuck-near-cliff penalty
+    if readings and _stuck_near_cliff(readings):
+        level = Confidence.LOW
+
+    return level
 
 
 def compute_reliability(
@@ -1128,6 +1218,8 @@ def compute_reliability(
     r_squared: float | None,
     confidence: Confidence,
     days_remaining: float | None = None,
+    chemistry: str | None = None,
+    cliff_ratio: float = 1.0,
 ) -> int:
     """Compute a 0-100 reliability score for a prediction."""
     timespan_days = timespan_hours / 24.0
@@ -1163,10 +1255,20 @@ def compute_reliability(
         elif ratio > 2:
             extrap_penalty = -20.0 * ((ratio - 2.0) / 3.0)
 
-    return round(max(0, min(100,
-        span_score + density_score + r2_score
-        + consistency_bonus + extrap_penalty
-    )))
+    raw = span_score + density_score + r2_score + consistency_bonus + extrap_penalty
+
+    # Chemistry multiplier
+    chem = chemistry or "unknown"
+    multiplier = _RELIABILITY_MULTIPLIERS.get(chem, 1.0)
+    raw *= multiplier
+
+    # Cliff penalty: high cliff_ratio means the extrapolation below the
+    # split point is unreliable. Scale: ratio 2.5→−10, 5.0→−20.
+    if cliff_ratio > 2.0:
+        cliff_penalty = min(20.0, (cliff_ratio - 2.0) * (20.0 / 3.0))
+        raw -= cliff_penalty
+
+    return round(max(0, min(100, raw)))
 
 
 def _prediction_stability_score(

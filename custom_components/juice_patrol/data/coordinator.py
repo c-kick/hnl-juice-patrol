@@ -45,17 +45,22 @@ from ..discovery import (
 )
 from ..engine import (
     AnalysisResult,
+    CompletedCycle,
     DeviceClassModels,
     PredictionResult,
     PredictionStatus,
     analyze_battery,
+    chemistry_from_battery_type,
+    damage_score,
     detect_replacement_jumps,
     extract_charging_segment,
     extract_completed_cycles,
     fit_discharge_curve,
+    knee_risk_score,
     predict_charge,
     predict_discharge,
     predict_discharge_multisession,
+    soh_from_cycles,
 )
 from ..engine.compress import compress as sdt_compress
 from .battery_types import BatteryTypeResolver
@@ -654,6 +659,29 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 entity_id, battery.device_id
             )
 
+        # Health metrics from completed cycles (rechargeable only)
+        soh: float | None = None
+        dmg: float | None = None
+        soh_cycling: float | None = None
+        knee: float | None = None
+        cycle_count = 0
+        if dev and is_rechargeable_hint and dev.completed_cycles:
+            cycles = [
+                c for c in (
+                    CompletedCycle.from_dict(d) for d in dev.completed_cycles
+                )
+                if c is not None
+            ]
+            cycle_count = len(cycles)
+            chemistry = chemistry_from_battery_type(battery_type)
+            soh = soh_from_cycles(cycles)
+            dmg = damage_score(cycles, chemistry)
+            soh_cycling = (
+                round(max(0.0, 1.0 - dmg) * 100, 1)
+                if dmg is not None else None
+            )
+            knee = knee_risk_score(cycles, chemistry)
+
         # If the device reports it's actively charging, override prediction status.
         # The mathematical slope may still be negative (e.g. recent charge didn't
         # exceed the 20% segment-split threshold), but the device knows best.
@@ -749,6 +777,11 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "last_calculated": now,
             "session_count": prediction.session_count,
             "replacement_history": dev.replacement_history if dev else [],
+            "soh": soh,
+            "damage_score": dmg,
+            "soh_cycling": soh_cycling,
+            "knee_risk": knee,
+            "cycle_count": cycle_count,
         }
 
     def _get_battery_state(self, entity_id: str, device_id: str | None) -> str | None:
@@ -1343,6 +1376,8 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     cycle_dict.get("model", "none"),
                     cycle_dict.get("params", {}),
                     cycle_dict["duration_days"],
+                    start_pct=cycle_dict["start_pct"],
+                    end_pct=cycle_dict["end_pct"],
                 )
                 _LOGGER.info(
                     "Recorded completed cycle for %s: %.1f days, model=%s",

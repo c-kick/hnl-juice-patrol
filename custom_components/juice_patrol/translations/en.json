@@ -45,6 +45,15 @@
       "days_remaining": {
         "name": "Days remaining"
       },
+      "soh": {
+        "name": "State of health"
+      },
+      "soh_cycling": {
+        "name": "Cycle health"
+      },
+      "knee_risk": {
+        "name": "Knee risk"
+      },
       "lowest_battery": {
         "name": "Lowest battery"
       }

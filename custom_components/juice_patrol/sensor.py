@@ -53,6 +53,15 @@ async def async_setup_entry(
             new_entities.append(
                 JuicePatrolDaysRemaining(coordinator, entity_id, slug, info)
             )
+            new_entities.append(
+                JuicePatrolSoH(coordinator, entity_id, slug, info)
+            )
+            new_entities.append(
+                JuicePatrolSoHCycling(coordinator, entity_id, slug, info)
+            )
+            new_entities.append(
+                JuicePatrolKneeRisk(coordinator, entity_id, slug, info)
+            )
         if new_entities:
             async_add_entities(new_entities)
 
@@ -216,6 +225,93 @@ class JuicePatrolDaysRemaining(JuicePatrolEntity, SensorEntity):
                 "hours_remaining": prediction.estimated_hours_remaining,
             }
         return {"source_entity": self._source_entity_id}
+
+
+class JuicePatrolSoH(JuicePatrolEntity, SensorEntity):
+    """State of Health sensor for a monitored device."""
+
+    _attr_translation_key = "soh"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_suggested_display_precision = 1
+    _attr_icon = "mdi:heart-pulse"
+
+    def __init__(
+        self,
+        coordinator: JuicePatrolCoordinator,
+        source_entity_id: str,
+        slug: str,
+        info: dict[str, Any],
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(
+            coordinator, source_entity_id, slug, info,
+            id_suffix="soh",
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        return self._entity_data.get("soh")
+
+
+class JuicePatrolSoHCycling(JuicePatrolEntity, SensorEntity):
+    """Cycle health sensor (SoH from Miner's rule damage)."""
+
+    _attr_translation_key = "soh_cycling"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_suggested_display_precision = 1
+    _attr_icon = "mdi:battery-heart"
+
+    def __init__(
+        self,
+        coordinator: JuicePatrolCoordinator,
+        source_entity_id: str,
+        slug: str,
+        info: dict[str, Any],
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(
+            coordinator, source_entity_id, slug, info,
+            id_suffix="soh_cycling",
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        return self._entity_data.get("soh_cycling")
+
+
+class JuicePatrolKneeRisk(JuicePatrolEntity, SensorEntity):
+    """Knee-point risk sensor for a monitored device."""
+
+    _attr_translation_key = "knee_risk"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_suggested_display_precision = 0
+    _attr_icon = "mdi:chart-bell-curve"
+
+    def __init__(
+        self,
+        coordinator: JuicePatrolCoordinator,
+        source_entity_id: str,
+        slug: str,
+        info: dict[str, Any],
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(
+            coordinator, source_entity_id, slug, info,
+            id_suffix="knee_risk",
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        raw = self._entity_data.get("knee_risk")
+        if raw is not None:
+            return round(raw * 100, 1)
+        return None
 
 
 class JuicePatrolLowestBattery(
