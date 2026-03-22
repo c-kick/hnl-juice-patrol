@@ -29,6 +29,7 @@ class ClassPrior:
     median_duration_days: float        # median total cycle duration
     iqr_duration_days: float           # IQR of cycle durations
     cycle_count: int                   # number of contributing cycles
+    duration_series: list[float]       # chronological durations for SoH trending
 
 
 def _iqr(values: list[float]) -> float:
@@ -107,6 +108,8 @@ class DeviceClassModels:
         model_name: str,
         params: dict[str, float],
         duration_days: float,
+        start_pct: float = 100.0,
+        end_pct: float = 0.0,
     ) -> dict:
         """Add a new completed cycle's fit to the class model.
 
@@ -129,6 +132,8 @@ class DeviceClassModels:
             "model": model_name,
             "params": {k: round(v, 6) for k, v in params.items()},
             "duration_days": round(duration_days, 2),
+            "start_pct": round(start_pct, 1),
+            "end_pct": round(end_pct, 1),
         }
         self._classes[key].cycles.append(cycle)
         return cycle
@@ -187,6 +192,7 @@ class DeviceClassModels:
             median_duration_days=_median(durations),
             iqr_duration_days=_iqr(durations),
             cycle_count=len(cycles),
+            duration_series=durations,
         )
 
     def get_class_key_for_entity(self, entity_id: str) -> str | None:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 
 class _State(Enum):
@@ -94,6 +95,24 @@ class CompletedCycle:
     end_pct: float       # Battery level at session end
     duration_days: float # Total duration in days
     replacement_t: float # Matched replacement timestamp
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> CompletedCycle | None:
+        """Reconstruct from a stored cycle dict.
+
+        Returns None if required fields are missing.
+        """
+        try:
+            return cls(
+                start_t=d["start_t"],
+                end_t=d["end_t"],
+                start_pct=d["start_pct"],
+                end_pct=d["end_pct"],
+                duration_days=d["duration_days"],
+                replacement_t=d.get("replacement_t", d["end_t"]),
+            )
+        except KeyError:
+            return None
 
 
 def extract_completed_cycles(

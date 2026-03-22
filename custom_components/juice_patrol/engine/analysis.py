@@ -11,7 +11,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from .sessions import CompletedCycle
 from .utils import detect_step_size as _detect_step_size
+from .utils import median as _median
 
 
 class Stability(StrEnum):
@@ -33,6 +35,192 @@ class DischargeAnomaly(StrEnum):
 
 # Replacement detection — mirrors const.REPLACEMENT_LOW_MULTIPLIER (engine/ cannot import HA deps)
 _REPLACEMENT_LOW_MULTIPLIER = 2
+
+# --- Chemistry mapping ---
+# Maps lowercase substrings from battery_type strings to chemistry enums.
+# Includes rechargeable chemistries and primary cell form factors
+# (alkaline, lithium_primary, coin_cell) for chemistry-aware reporting.
+# Order matters: longer/more-specific substrings must precede shorter ones
+# (e.g. "lithium aaa" before "aaa") so the first match wins.
+_CHEMISTRY_MAP: dict[str, str] = {
+    "lifepo4": "LFP",
+    "lfp": "LFP",
+    "li-ion": "NMC",
+    "lithium-ion": "NMC",
+    "lithium ion": "NMC",
+    "lipo": "NMC",
+    "li-po": "NMC",
+    "lithium polymer": "NMC",
+    "nimh": "NiMH",
+    "ni-mh": "NiMH",
+    "nickel metal hydride": "NiMH",
+    "lco": "LCO",
+    "lithium cobalt": "LCO",
+    # Primary chemistries — form-factor substrings
+    "cr2032": "coin_cell",
+    "cr2025": "coin_cell",
+    "cr2016": "coin_cell",
+    "cr2430": "coin_cell",
+    "cr2450": "coin_cell",
+    "cr1632": "coin_cell",
+    "cr1220": "coin_cell",
+    "lithium aaa": "lithium_primary",
+    "lithium aa": "lithium_primary",
+    "l91": "lithium_primary",
+    "fr6": "lithium_primary",
+    "fr03": "lithium_primary",
+    "cr123": "lithium_primary",
+    "cr17345": "lithium_primary",
+    "c battery": "alkaline",
+    "d battery": "alkaline",
+    "9v": "alkaline",
+    "pp3": "alkaline",
+    "aaa": "alkaline",
+    "aa": "alkaline",
+}
+
+# Miner's rule constants per chemistry (from CLAUDE.md domain knowledge).
+# N_fail(DoD) = a × (DoD / 100)^(-b)
+_MINER_PARAMS: dict[str, tuple[float, float]] = {
+    #            a       b
+    "LFP":    (2000.0, 1.0),
+    "NMC":    (1000.0, 1.2),
+    "NiMH":   (500.0,  1.5),
+    "LCO":    (500.0,  1.4),
+    "unknown": (1000.0, 1.2),  # default to NMC (most common rechargeable)
+}
+
+
+def chemistry_from_battery_type(battery_type: str | None) -> str:
+    """Map a battery_type product string to a chemistry for degradation models.
+
+    Returns one of "LFP", "NMC", "NiMH", "LCO", "alkaline",
+    "lithium_primary", "coin_cell", or "unknown".
+    """
+    if not battery_type:
+        return "unknown"
+    normalised = battery_type.lower().strip()
+    # Strip quantity prefix like "2× "
+    if "\u00d7" in normalised:
+        normalised = normalised.split("\u00d7", 1)[1].strip()
+    for key, chem in _CHEMISTRY_MAP.items():
+        if key in normalised:
+            return chem
+    return "unknown"
+
+
+def _filter_outlier_cycles(
+    cycles: list[CompletedCycle],
+    iqr_multiplier: float = 2.5,
+) -> list[CompletedCycle]:
+    """Remove cycles whose DoD-normalised duration is an outlier.
+
+    Uses Tukey fences (median ± iqr_multiplier × IQR) with a generous
+    multiplier to catch only extreme outliers — e.g. a reporting gap that
+    makes one cycle look 10× longer, or a false replacement that produces
+    a near-zero duration.
+
+    Returns the original list unchanged when:
+    - Fewer than 4 valid cycles (insufficient data to judge)
+    - Filtering would leave fewer than 3 cycles (noisy data > no data)
+    """
+    # Build (index, normalised_duration) pairs for valid cycles
+    pairs: list[tuple[int, float]] = []
+    for i, c in enumerate(cycles):
+        nd = _dod_normalised_duration(c)
+        if nd is not None:
+            pairs.append((i, nd))
+
+    if len(pairs) < 4:
+        return cycles
+
+    values = sorted(v for _, v in pairs)
+    n = len(values)
+    q1 = values[n // 4]
+    q3 = values[(3 * n) // 4]
+    iqr = q3 - q1
+
+    # With zero IQR (all identical durations), no outlier filtering is needed
+    if iqr <= 0:
+        return cycles
+
+    lower = q1 - iqr_multiplier * iqr
+    upper = q3 + iqr_multiplier * iqr
+
+    # Indices of cycles that pass the filter (or were skipped as invalid)
+    valid_indices = {i for i, _ in pairs}
+    keep_indices: set[int] = set()
+    for i, nd in pairs:
+        if lower <= nd <= upper:
+            keep_indices.add(i)
+    # Also keep cycles that weren't evaluated (shallow DoD etc.)
+    for i in range(len(cycles)):
+        if i not in valid_indices:
+            keep_indices.add(i)
+
+    if len(keep_indices) < 3:
+        return cycles
+
+    return [c for i, c in enumerate(cycles) if i in keep_indices]
+
+
+# damage_score is DoD-based, not duration-based — outlier durations don't
+# affect it, so _filter_outlier_cycles is NOT applied here.  Its robustness
+# comes from the DoD math and the 5% shallow-cycle gate.
+def damage_score(
+    cycles: list[CompletedCycle],
+    chemistry: str,
+) -> float | None:
+    """Compute cumulative Miner's rule damage from completed cycles.
+
+    D = Σ 1/N_fail(DoD_i) where N_fail(DoD) = a × (DoD/100)^(-b).
+    Skips cycles with DoD < 5% (noise / partial reads).
+
+    Args:
+        cycles: Completed discharge cycles with start_pct and end_pct.
+        chemistry: One of "LFP", "NMC", "NiMH", "LCO", "unknown".
+
+    Returns:
+        Cumulative damage D (0.0 = pristine, 1.0 = end of life),
+        or None if no valid cycles.
+    """
+    a, b = _MINER_PARAMS.get(chemistry, _MINER_PARAMS["unknown"])
+
+    d = 0.0
+    valid = 0
+    for c in cycles:
+        dod = c.start_pct - c.end_pct
+        if dod < 5:
+            continue
+        dod_frac = dod / 100.0
+        n_fail = a * dod_frac ** (-b)
+        d += 1.0 / n_fail
+        valid += 1
+
+    if valid < 1:
+        return None
+    return round(d, 6)
+
+
+def _dod_normalised_duration(
+    c: CompletedCycle,
+    min_duration_days: float = 1.0,
+) -> float | None:
+    """Duration per unit DoD — comparable across different discharge depths.
+
+    Returns duration_days / (DoD / 100), or None if:
+    - DoD is too shallow to be meaningful (≤ 5%)
+    - Duration is below min_duration_days (default 1.0 day).  Any IoT sensor
+      (door, motion, temperature) lasts weeks to months per charge; a cycle
+      shorter than 24 hours is almost certainly a false replacement trigger
+      from a network rejoin or device reboot, not a real discharge.
+    """
+    if c.duration_days < min_duration_days:
+        return None
+    dod = c.start_pct - c.end_pct
+    if dod <= 5:
+        return None
+    return c.duration_days / (dod / 100.0)
 
 
 @dataclass
@@ -459,3 +647,136 @@ def _detect_rechargeable(
         return is_rechargeable_override, "manual" if is_rechargeable_override else None
 
     return False, None
+
+
+# Chemistry-specific knee thresholds: d² value at which risk = 1.0.
+# More negative = stronger acceleration of fade.
+# NMC knees at 80–90% cap remaining; LFP rarely knees before 2000 cycles.
+_KNEE_THRESHOLDS: dict[str, float] = {
+    "NMC":     -0.03,
+    "LCO":     -0.03,
+    "NiMH":    -0.03,
+    "LFP":     -0.01,
+    "unknown": -0.01,  # conservative (LFP-like)
+}
+
+
+def knee_risk_score(
+    cycles: list[CompletedCycle],
+    chemistry: str,
+) -> float | None:
+    """Detect approaching knee-point from cross-cycle duration acceleration.
+
+    Computes d²(duration)/dN² over the most recent cycles.  A strongly
+    negative second derivative means fade is accelerating — the hallmark
+    of an approaching knee collapse.
+
+    Outlier cycles are filtered first, and a chemistry-aware noise floor
+    (30% of the knee threshold) suppresses false positives from devices
+    with slightly irregular cycle lengths — e.g. a reporting gap that
+    makes one cycle look 20% longer produces a Δ² spike that would
+    otherwise flicker the score between 0.01 and 0.0.
+
+    Returns a 0.0–1.0 risk score (1.0 = at or past knee), or None if
+    fewer than 5 cycles with usable DoD (> 5%) are available.
+    """
+    cycles = _filter_outlier_cycles(cycles)
+
+    # Build DoD-normalised duration series (comparable across different depths)
+    durations = [_dod_normalised_duration(c) for c in cycles]
+    valid = [d for d in durations if d is not None]
+
+    if len(valid) < 5:
+        return None
+
+    # First differences: Δ[i] = duration[i+1] − duration[i]
+    deltas = [valid[i + 1] - valid[i] for i in range(len(valid) - 1)]
+    # Second differences: Δ²[i] = Δ[i+1] − Δ[i]
+    d2 = [deltas[i + 1] - deltas[i] for i in range(len(deltas) - 1)]
+
+    if len(d2) < 3:
+        return None
+
+    # Instantaneous acceleration = mean of last 3 second differences
+    accel = sum(d2[-3:]) / 3.0
+
+    # Map to 0–1 using chemistry-specific threshold
+    threshold = _KNEE_THRESHOLDS.get(chemistry, _KNEE_THRESHOLDS["unknown"])
+
+    # Noise floor: 30% of the chemistry threshold.  Any |accel| below this
+    # is indistinguishable from sensor jitter and returns 0.0.
+    noise_floor = abs(threshold) * 0.3
+    if abs(accel) < noise_floor:
+        return 0.0
+
+    # threshold is negative; accel ≥ 0 → score 0, accel ≤ threshold → score 1
+    if accel >= 0:
+        return 0.0
+    score = accel / threshold  # both negative → positive ratio
+    return round(max(0.0, min(1.0, score)), 4)
+
+
+def soh_from_cycles(cycles: list[CompletedCycle]) -> float | None:
+    """Estimate State of Health from completed discharge cycles.
+
+    Uses duration as a proxy for capacity (Q). Normalises durations by
+    depth-of-discharge so cycles with different depths are comparable.
+    Reference capacity Q₀ is the median of the first 3 valid cycles.
+
+    Outlier cycles (spurious durations from reporting gaps or false
+    replacements) are filtered before computation.
+
+    Returns SoH as a float 0–100, or None if fewer than 3 usable cycles.
+    """
+    if len(cycles) < 3:
+        return None
+
+    cycles = _filter_outlier_cycles(cycles)
+    normed = [_dod_normalised_duration(c) for c in cycles]
+    valid = [(i, d) for i, d in enumerate(normed) if d is not None]
+
+    if len(valid) < 3:
+        return None
+
+    # Q₀ = median of first 3 valid normalised durations
+    first_three = sorted(d for _, d in valid[:3])
+    q0 = first_three[1]  # median of 3 = middle value
+    if q0 <= 0:
+        return None
+
+    # Current capacity proxy = last valid normalised duration
+    _, q_current = valid[-1]
+
+    soh = (q_current / q0) * 100.0
+    return round(max(0.0, min(100.0, soh)), 1)
+
+
+def duration_fade(
+    cycles: list[CompletedCycle],
+    index: int,
+    ref_count: int = 3,
+) -> float | None:
+    """Compute DoD-normalised duration fade ratio for cycle at index.
+
+    Returns cycle[index] normalised duration / median(first ref_count),
+    or None if not enough valid reference cycles.
+
+    A value of 1.0 means no fade; 0.8 means 20% capacity loss.
+    """
+    if len(cycles) < ref_count or index < 0 or index >= len(cycles):
+        return None
+
+    ref_normed = [_dod_normalised_duration(c) for c in cycles[:ref_count]]
+    ref_valid = [d for d in ref_normed if d is not None]
+    if len(ref_valid) < ref_count:
+        return None
+
+    q0 = _median(ref_valid)
+    if q0 <= 0:
+        return None
+
+    q_n = _dod_normalised_duration(cycles[index])
+    if q_n is None:
+        return None
+
+    return round(q_n / q0, 4)

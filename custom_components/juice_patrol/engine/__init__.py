@@ -8,7 +8,11 @@ from .analysis import (
     DischargeAnomaly,
     Stability,
     analyze_battery,
+    chemistry_from_battery_type,
+    damage_score,
     detect_replacement_jumps,
+    knee_risk_score,
+    soh_from_cycles,
 )
 from .compress import compress, sdt_compress
 from .curve_fit import CurveFitResult, extrapolate_to_threshold, fit_discharge_curve
@@ -37,8 +41,10 @@ __all__ = [
     "PredictionStatus",
     "Stability",
     "analyze_battery",
+    "chemistry_from_battery_type",
     "ClassPrior",
     "CompletedCycle",
+    "damage_score",
     "compress",
     "compute_reliability",
     "detect_replacement_jumps",
@@ -48,9 +54,11 @@ __all__ = [
     "extract_completed_cycles",
     "extract_discharge_sessions",
     "extrapolate_to_threshold",
+    "knee_risk_score",
     "fit_discharge_curve",
     "predict_charge",
     "predict_discharge",
     "predict_discharge_multisession",
     "sdt_compress",
+    "soh_from_cycles",
 ]
