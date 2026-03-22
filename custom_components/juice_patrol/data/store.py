@@ -39,6 +39,11 @@ class DeviceData:
     # Each cycle: {"start_t": float, "end_t": float, "start_pct": float,
     #              "end_pct": float, "duration_days": float,
     #              "model": str, "params": dict}
+    # Chemistry override — when set, takes precedence over auto-detected
+    # chemistry from battery_type.  Optional field with None default; no
+    # store migration required (existing records simply won't have the key
+    # and from_dict handles missing keys gracefully via .get()).
+    chemistry_override: str | None = None
 
     @property
     def last_replaced(self) -> float | None:
@@ -65,6 +70,7 @@ class DeviceData:
             source_entity=data.get("source_entity", entity_id),
             device_id=data.get("device_id"),
             completed_cycles=data.get("completed_cycles", []),
+            chemistry_override=data.get("chemistry_override"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -85,6 +91,8 @@ class DeviceData:
             result["is_rechargeable"] = self.is_rechargeable
         if self.completed_cycles:
             result["completed_cycles"] = self.completed_cycles
+        if self.chemistry_override is not None:
+            result["chemistry_override"] = self.chemistry_override
         return result
 
 
@@ -379,6 +387,17 @@ class JuicePatrolStore:
         if dev is None:
             return False
         dev.is_rechargeable = is_rechargeable
+        self._dirty = True
+        return True
+
+    def set_chemistry_override(
+        self, entity_id: str, chemistry: str | None
+    ) -> bool:
+        """Set chemistry override. None = use auto-detected. Returns False if not found."""
+        dev = self._data.devices.get(entity_id)
+        if dev is None:
+            return False
+        dev.chemistry_override = chemistry
         self._dirty = True
         return True
 
