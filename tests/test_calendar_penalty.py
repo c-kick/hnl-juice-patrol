@@ -61,17 +61,18 @@ class TestCalendarPenalty:
         at_cap = _calendar_penalty(80.0, float(_MAX_IDLE_DAYS), "NMC")
         assert abs(capped - at_cap) < 1e-6
 
-    def test_unknown_chemistry_defaults_to_nmc(self):
-        """Unknown chemistry uses NMC rate as default."""
-        unknown = _calendar_penalty(80.0, 100.0, "unknown")
-        nmc = _calendar_penalty(80.0, 100.0, "NMC")
-        assert abs(unknown - nmc) < 1e-6
+    def test_unknown_chemistry_uses_conservative_primary(self):
+        """Unknown chemistry uses most conservative primary c_cal (0.00105)."""
+        unknown = _calendar_penalty(80.0, 10.0, "unknown")
+        # c_cal=0.00105, idle_days=10 → loss = 0.00105 * sqrt(10) * 100 ≈ 0.332
+        expected = 80.0 - (0.00105 * 10.0**0.5 * 100.0)
+        assert abs(unknown - expected) < 0.01
 
-    def test_none_chemistry_defaults_to_nmc(self):
-        """None chemistry uses NMC rate as default."""
-        none_result = _calendar_penalty(80.0, 100.0, None)
-        nmc = _calendar_penalty(80.0, 100.0, "NMC")
-        assert abs(none_result - nmc) < 1e-6
+    def test_none_chemistry_defaults_to_unknown(self):
+        """None chemistry falls back to 'unknown' constant."""
+        none_result = _calendar_penalty(80.0, 10.0, None)
+        unknown_result = _calendar_penalty(80.0, 10.0, "unknown")
+        assert abs(none_result - unknown_result) < 1e-6
 
     def test_sqrt_scaling(self):
         """Loss scales with sqrt(idle_days)."""
