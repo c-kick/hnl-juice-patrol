@@ -9,11 +9,13 @@ VERSION = "0.1.0"
 CONF_LOW_THRESHOLD = "low_threshold"
 CONF_STALE_TIMEOUT = "stale_timeout"
 CONF_PREDICTION_HORIZON = "prediction_horizon"
+CONF_HISTORY_DAYS = "history_days"
 
 # Defaults
 DEFAULT_LOW_THRESHOLD = 20  # percent
 DEFAULT_STALE_TIMEOUT = 48  # hours
 DEFAULT_PREDICTION_HORIZON = 7  # days
+DEFAULT_HISTORY_DAYS = 1095  # 3 years
 DEFAULT_SCAN_INTERVAL = 3600  # seconds (1 hour)
 
 # Prediction
@@ -37,7 +39,7 @@ STORE_MINOR_VERSION = 4  # Internal data schema version (4: completed_cycles)
 
 # Recorder history
 HISTORY_CACHE_TTL = 1800  # 30 min cache for recorder queries
-HISTORY_DEFAULT_DAYS = 365  # how far back to query recorder
+HISTORY_DEFAULT_DAYS = DEFAULT_HISTORY_DAYS  # how far back to query recorder
 
 # Memory limits
 MAX_REPLACEMENT_HISTORY = 50  # max replacement timestamps per device

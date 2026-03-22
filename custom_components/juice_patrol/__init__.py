@@ -27,6 +27,8 @@ from .const import (
 from .data import JuicePatrolCoordinator
 from .panel import async_setup_panel
 
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
 _LOGGER = logging.getLogger(__name__)
 
 type JuicePatrolConfigEntry = ConfigEntry[JuicePatrolCoordinator]
@@ -108,6 +110,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ws_refresh,
         ws_recalculate,
         ws_get_shopping_list,
+        ws_get_dashboard_data,
         ws_get_entity_chart,
         ws_set_ignored,
         ws_get_ignored,
@@ -529,6 +532,34 @@ async def ws_get_shopping_list(hass, connection, msg):
         "groups": groups,
         "total_needed": total_needed,
     })
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): "juice_patrol/get_dashboard_data"}
+)
+@websocket_api.async_response
+async def ws_get_dashboard_data(hass, connection, msg):
+    """Return replacement history and first-seen data for all devices."""
+    coordinator = _ws_get_coordinator(hass, connection, msg["id"])
+    if not coordinator:
+        return
+
+    data = coordinator.data or {}
+    replacement_data = {}
+    for entity_id, info in data.items():
+        history = info.get("replacement_history", [])
+        # first_seen: earliest replacement timestamp, or last_reading_time as fallback
+        first_seen = None
+        if history:
+            first_seen = min(history)
+        if first_seen is None and info.get("last_reading_time"):
+            first_seen = info["last_reading_time"]
+        replacement_data[entity_id] = {
+            "replacement_history": history,
+            "first_seen": first_seen,
+        }
+
+    connection.send_result(msg["id"], {"replacement_data": replacement_data})
 
 
 @websocket_api.websocket_command(

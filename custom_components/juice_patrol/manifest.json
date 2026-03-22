@@ -3,11 +3,11 @@
   "name": "Juice Patrol",
   "codeowners": ["@c-kick"],
   "config_flow": true,
+  "dependencies": ["frontend", "http", "recorder"],
   "documentation": "https://github.com/c-kick/juice-patrol",
   "integration_type": "service",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/c-kick/juice-patrol/issues",
-  "dependencies": ["frontend", "http", "recorder"],
   "requirements": [],
   "version": "0.1.0"
 }

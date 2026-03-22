@@ -16,9 +16,11 @@ from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from ..const import (
+    CONF_HISTORY_DAYS,
     CONF_LOW_THRESHOLD,
     CONF_PREDICTION_HORIZON,
     CONF_STALE_TIMEOUT,
+    DEFAULT_HISTORY_DAYS,
     DEFAULT_LOW_THRESHOLD,
     DEFAULT_PREDICTION_HORIZON,
     DEFAULT_SCAN_INTERVAL,
@@ -214,6 +216,13 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Get the configured prediction alert horizon in days."""
         return self.config_entry.options.get(
             CONF_PREDICTION_HORIZON, DEFAULT_PREDICTION_HORIZON
+        )
+
+    @property
+    def history_days(self) -> int:
+        """Get the configured history lookback window in days."""
+        return self.config_entry.options.get(
+            CONF_HISTORY_DAYS, DEFAULT_HISTORY_DAYS
         )
 
     async def async_setup(self) -> None:
@@ -513,7 +522,8 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Build the data dict for a single entity (async — queries recorder)."""
         dev = self.store.get_device(entity_id)
         all_readings = await async_get_readings(
-            self.hass, entity_id, since=None, cache=self._history_cache
+            self.hass, entity_id, since=None, cache=self._history_cache,
+            history_days=self.history_days,
         )
 
         # Update last known level from readings
@@ -1071,7 +1081,8 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         dev = self.store.get_device(entity_id)
         all_readings = await async_get_readings(
-            self.hass, entity_id, since=None, cache=self._history_cache
+            self.hass, entity_id, since=None, cache=self._history_cache,
+            history_days=self.history_days,
         )
         readings = _extract_current_segment(all_readings)
 
@@ -1256,6 +1267,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             all_readings = await async_get_readings(
                 self.hass, entity_id, since=None, cache=self._history_cache,
+                history_days=self.history_days,
             )
             if len(all_readings) >= 3:
                 await self._async_try_record_completed_cycle(
@@ -1388,6 +1400,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Pull full history
         all_readings = await async_get_readings(
             self.hass, entity_id, since=None, cache=self._history_cache,
+            history_days=self.history_days,
         )
         if len(all_readings) < 3:
             return

@@ -107,12 +107,18 @@ export async function initChart(panel, chartData) {
     const startT = readings[0].t;
     const nowT = Date.now() / 1000;
     const shouldProject = !isCharging && pred.status === "normal";
-    // Don't project forward when the prediction is suppressed (>10yr) or absent
-    const hasReasonableTarget = pred.estimated_empty_timestamp &&
-      (pred.estimated_empty_timestamp - nowT) < 3650 * 86400;
-    const endT = shouldProject && hasReasonableTarget
-      ? Math.min(pred.estimated_empty_timestamp, nowT + 365 * 86400)
-      : nowT;
+    // Compute endT from the linear formula itself (when it reaches 0%).
+    // estimated_empty_timestamp may come from a parametric curve fit whose
+    // shape differs from the linear slope/intercept — using it here would
+    // stretch the visual line beyond where the linear formula reaches 0,
+    // causing the threshold crossing marker to misalign with the line.
+    let endT = nowT;
+    if (shouldProject && pred.slope_per_day < 0) {
+      const linearZeroT = t0 + ((0 - pred.intercept) / pred.slope_per_day) * 86400;
+      if (linearZeroT > nowT && (linearZeroT - nowT) < 3650 * 86400) {
+        endT = Math.min(linearZeroT, nowT + 365 * 86400);
+      }
+    }
     for (const t of [startT, nowT, ...(shouldProject ? [endT] : [])]) {
       fitted.push([t * 1000, Math.max(0, Math.min(100, fittedY(t)))]);
     }

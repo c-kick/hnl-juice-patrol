@@ -1,5 +1,5 @@
 import { LitElement, html, css, nothing } from "lit";
-import { ICON_BATTERY, ICON_SHOPPING } from "./constants.js";
+import { ICON_BATTERY, ICON_SHOPPING, ICON_DASHBOARD } from "./constants.js";
 import {
   formatLevel, displayLevel, wsErrorMessage, getBatteryIcon, getLevelColor,
   isActivelyCharging, isFastDischarge, predictionReason, predictionReasonDetail,
@@ -11,6 +11,7 @@ import { initChart } from "./chart.js";
 import { buildColumns } from "./columns.js";
 import { renderDetailView } from "./views/detail.js";
 import { renderShoppingList } from "./views/shopping.js";
+import { renderDashboard, initTimelineChart } from "./views/dashboard.js";
 import {
   showReplaceDialog, showReplaceRechargeableDialog,
   showConfirmDialog, showBatteryTypeDialog,
@@ -36,6 +37,8 @@ class JuicePatrolPanel extends LitElement {
       _ignoredEntities: { state: true },
       _chartRange: { state: true },
       _filters: { state: true },
+      _dashboardData: { state: true },
+      _dashboardLoading: { state: true },
     };
   }
 
@@ -64,6 +67,8 @@ class JuicePatrolPanel extends LitElement {
     this._ignoredEntities = null;
     this._chartRange = "auto";
     this._filters = { status: { value: ["active", "low"] } };
+    this._dashboardData = null;
+    this._dashboardLoading = false;
     this._sorting = { column: "level", direction: "asc" };
     this._flashCleanupTimer = null;
     this._refreshTimer = null;
@@ -140,6 +145,10 @@ class JuicePatrolPanel extends LitElement {
         if (this._activeView === "shopping") {
           this._loadShoppingList();
         }
+        if (this._activeView === "dashboard") {
+          if (!this._shoppingData) this._loadShoppingList();
+          this._loadDashboardData();
+        }
       }
     };
     document.addEventListener("visibilitychange", this._visibilityHandler);
@@ -194,6 +203,23 @@ class JuicePatrolPanel extends LitElement {
       this._activeView = "detail";
       return;
     }
+    // Dashboard path (also the default landing page)
+    if (path === this._basePath || path === `${this._basePath}/`
+        || path === `${this._basePath}/dashboard` || path === `${this._basePath}/dashboard/`) {
+      if (this._activeView === "detail") {
+        this._detailEntity = null;
+        this._chartData = null;
+        this._chartEl = null;
+        this._chartRetried = false;
+      }
+      if (this._activeView !== "dashboard") {
+        this._activeView = "dashboard";
+        if (!this._shoppingData) this._loadShoppingList();
+        this._loadDashboardData();
+      }
+      this._entities = this._entityList;
+      return;
+    }
     // Shopping list path
     if (path === `${this._basePath}/shopping` || path === `${this._basePath}/shopping/`) {
       if (this._activeView === "detail") {
@@ -209,7 +235,7 @@ class JuicePatrolPanel extends LitElement {
       this._entities = this._entityList;
       return;
     }
-    // Any other path → devices view
+    // Devices view (explicit path or fallback for unknown paths)
     if (this._activeView === "detail") {
       this._detailEntity = null;
       this._chartData = null;
@@ -223,6 +249,20 @@ class JuicePatrolPanel extends LitElement {
   updated(changed) {
     if ((changed.has("_chartData") || changed.has("_chartRange")) && this._chartData) {
       requestAnimationFrame(() => initChart(this, this._chartData));
+    }
+    // Init fleet/type charts when dashboard is active
+    if (this._activeView === "dashboard" && this._fleetData &&
+        (changed.has("_entities") || changed.has("_activeView"))) {
+      // Always reinit when the view changed (DOM containers are fresh).
+      // For data-only updates, hash to avoid unnecessary redraws.
+      const viewChanged = changed.has("_activeView");
+      const fleetHash = JSON.stringify(this._fleetData) + JSON.stringify(
+        (this._healthByTypeData || []).map(t => ({ type: t.type, n: t.devices.length, b: t.buckets }))
+      );
+      if (viewChanged || fleetHash !== this._lastFleetHash) {
+        this._lastFleetHash = fleetHash;
+        requestAnimationFrame(() => initTimelineChart(this));
+      }
     }
     if (changed.has("_entities")) {
       if (!this._highlightApplied && this._highlightEntity) {
@@ -439,7 +479,10 @@ class JuicePatrolPanel extends LitElement {
     const statusValues = this._filters.status?.value || [];
     const predValues = this._filters.prediction?.value || [];
     const batteryValues = this._filters.battery?.value || [];
-    if (statusValues.length === 0 && predValues.length === 0 && batteryValues.length === 0) return this._entities;
+    const typeValues = this._filters.batteryType?.value || [];
+    const levelRange = this._filters.levelRange?.value;
+    const hasLevelRange = levelRange && (levelRange.min != null || levelRange.max != null);
+    if (statusValues.length === 0 && predValues.length === 0 && batteryValues.length === 0 && typeValues.length === 0 && !hasLevelRange) return this._entities;
     return this._entities.filter((d) => {
       if (statusValues.length > 0 && !statusValues.includes(d._statusFilter)) return false;
       if (predValues.length > 0 && !predValues.includes(d.predictionStatus || "")) return false;
@@ -447,8 +490,44 @@ class JuicePatrolPanel extends LitElement {
         const type = d.isRechargeable ? "rechargeable" : "disposable";
         if (!batteryValues.includes(type)) return false;
       }
+      if (typeValues.length > 0) {
+        const normType = d.isRechargeable
+          ? "Rechargeable"
+          : (() => {
+              const m = d.batteryType?.match(/^(?:\d+\s*[×x]\s*)?(.+)$/i);
+              return m ? m[1].trim() : (d.batteryType || "Unknown");
+            })();
+        if (!typeValues.includes(normType)) return false;
+      }
+      if (hasLevelRange) {
+        if (d.level == null) return false;
+        const lvl = Math.ceil(d.level);
+        if (levelRange.min != null && lvl < levelRange.min) return false;
+        if (levelRange.max != null && lvl > levelRange.max) return false;
+      }
       return true;
     });
+  }
+
+  /**
+   * Navigate to Devices tab with a battery type filter pre-applied.
+   * Called from the dashboard's "Health by Battery Type" section.
+   */
+  _navigateToDevicesWithTypeFilter(typeName) {
+    this._filters = { batteryType: { value: [typeName] } };
+    window.history.pushState(null, "", `${this._basePath}/devices`);
+    this._syncViewFromUrl();
+  }
+
+  /**
+   * Navigate to Devices tab with a level range filter pre-applied.
+   * Called from the dashboard's Fleet Composition chart.
+   */
+  _navigateToDevicesWithLevelFilter(min, max, extraFilters) {
+    const filters = { levelRange: { value: { min, max } }, ...extraFilters };
+    this._filters = filters;
+    window.history.pushState(null, "", `${this._basePath}/devices`);
+    this._syncViewFromUrl();
   }
 
   /**
@@ -692,6 +771,11 @@ class JuicePatrolPanel extends LitElement {
       // Reload view-specific data after refresh completes
       if (this._activeView === "shopping") {
         setTimeout(() => this._loadShoppingList(), 500);
+      } else if (this._activeView === "dashboard") {
+        setTimeout(() => {
+          this._loadShoppingList();
+          this._loadDashboardData();
+        }, 500);
       } else if (this._activeView === "detail" && this._detailEntity) {
         setTimeout(() => this._loadChartData(this._detailEntity), 500);
       }
@@ -767,6 +851,30 @@ class JuicePatrolPanel extends LitElement {
       this._shoppingData = null;
     }
     this._shoppingLoading = false;
+  }
+
+  async _loadDashboardData() {
+    if (!this._hass) return;
+    this._dashboardLoading = true;
+    try {
+      this._dashboardData = await this._hass.callWS({
+        type: "juice_patrol/get_dashboard_data",
+      });
+    } catch (e) {
+      if (!this._dashboardRetried) {
+        this._dashboardRetried = true;
+        this._dashboardLoading = false;
+        setTimeout(() => {
+          this._dashboardRetried = false;
+          this._loadDashboardData();
+        }, 1000);
+        return;
+      }
+      this._dashboardRetried = false;
+      console.error("Juice Patrol: failed to load dashboard data", e);
+      this._dashboardData = null;
+    }
+    this._dashboardLoading = false;
   }
 
   async _loadChartData(entityId) {
@@ -976,6 +1084,7 @@ class JuicePatrolPanel extends LitElement {
   get _tabs() {
     const base = this._basePath;
     return [
+      { path: `${base}/dashboard`, name: "Dashboard", iconPath: ICON_DASHBOARD },
       { path: `${base}/devices`, name: "Devices", iconPath: ICON_BATTERY },
       { path: `${base}/shopping`, name: "Shopping List", iconPath: ICON_SHOPPING },
     ];
@@ -1007,6 +1116,9 @@ class JuicePatrolPanel extends LitElement {
   get _activeFilterCount() {
     const DEFAULT_STATUS = ["active", "low"];
     return Object.entries(this._filters).filter(([group, f]) => {
+      if (group === "levelRange") {
+        return f.value && (f.value.min != null || f.value.max != null);
+      }
       if (!Array.isArray(f.value) || !f.value.length) return false;
       if (
         group === "status" &&
@@ -1033,8 +1145,9 @@ class JuicePatrolPanel extends LitElement {
       return this._renderDevicesView();
     }
 
-    // Detail + Shopping views use hass-tabs-subpage
+    // Dashboard, Detail, and Shopping views use hass-tabs-subpage
     const inDetail = this._activeView === "detail";
+    const isDashboard = this._activeView === "dashboard";
     return html`
       <hass-tabs-subpage
         .hass=${this._hass}
@@ -1047,7 +1160,9 @@ class JuicePatrolPanel extends LitElement {
         ${this._renderToolbarIcons()}
         ${inDetail
           ? html`<div id="jp-content">${renderDetailView(this)}</div>`
-          : html`<div class="jp-padded">${renderShoppingList(this)}</div>`}
+          : isDashboard
+            ? html`<div class="jp-padded">${renderDashboard(this)}</div>`
+            : html`<div class="jp-padded">${renderShoppingList(this)}</div>`}
       </hass-tabs-subpage>
     `;
   }
@@ -1134,6 +1249,8 @@ class JuicePatrolPanel extends LitElement {
           `)}
         </div>
       </ha-expansion-panel>
+      ${this._renderBatteryTypeFilterPane()}
+      ${this._renderLevelRangeFilterPane()}
       <ha-expansion-panel slot="filter-pane" outlined header="Prediction">
         <ha-icon slot="leading-icon" icon="mdi:crystal-ball" style="--mdc-icon-size:20px"></ha-icon>
         <div class="jp-filter-list">
@@ -1150,6 +1267,106 @@ class JuicePatrolPanel extends LitElement {
         </div>
       </ha-expansion-panel>
     `;
+  }
+
+  _renderBatteryTypeFilterPane() {
+    // Compute unique battery types from entities
+    const typeSet = new Map();
+    for (const e of this._entities || []) {
+      if (e.level == null) continue;
+      let typeKey;
+      if (e.isRechargeable) {
+        typeKey = "Rechargeable";
+      } else {
+        const m = e.batteryType?.match(/^(?:\d+\s*[×x]\s*)?(.+)$/i);
+        typeKey = m ? m[1].trim() : (e.batteryType || "Unknown");
+      }
+      typeSet.set(typeKey, (typeSet.get(typeKey) || 0) + 1);
+    }
+    // Sort by count descending
+    const types = [...typeSet.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([name, count]) => ({ value: name, label: `${name} (${count})` }));
+
+    if (types.length === 0) return nothing;
+
+    const typeValues = this._filters.batteryType?.value || [];
+    return html`
+      <ha-expansion-panel slot="filter-pane" outlined
+        .expanded=${typeValues.length > 0}
+        header="Battery Type">
+        <ha-icon slot="leading-icon" icon="mdi:battery-heart-variant" style="--mdc-icon-size:20px"></ha-icon>
+        <div class="jp-filter-list">
+          ${types.map((t) => html`
+            <label class="jp-filter-item">
+              <ha-checkbox
+                .checked=${typeValues.includes(t.value)}
+                @change=${(e) => this._toggleFilter("batteryType", t.value, e.target.checked)}
+              ></ha-checkbox>
+              <span>${t.label}</span>
+            </label>
+          `)}
+        </div>
+      </ha-expansion-panel>
+    `;
+  }
+
+  _renderLevelRangeFilterPane() {
+    const range = this._filters.levelRange?.value;
+    const hasRange = range && (range.min != null || range.max != null);
+    const minVal = range?.min ?? 0;
+    const maxVal = range?.max ?? 100;
+    return html`
+      <ha-expansion-panel slot="filter-pane" outlined
+        .expanded=${hasRange}
+        header="Battery Level">
+        <ha-icon slot="leading-icon" icon="mdi:gauge" style="--mdc-icon-size:20px"></ha-icon>
+        <div class="jp-level-range">
+          <div class="jp-level-slider-row">
+            <span class="jp-level-label">Min</span>
+            <ha-slider
+              .min=${0} .max=${100} .step=${1}
+              .value=${minVal}
+              pin
+              @change=${(e) => {
+                const v = parseInt(e.target.value, 10);
+                this._setLevelRange(v === 0 ? null : v, range?.max ?? null);
+              }}
+            ></ha-slider>
+            <span class="jp-level-value">${minVal}%</span>
+          </div>
+          <div class="jp-level-slider-row">
+            <span class="jp-level-label">Max</span>
+            <ha-slider
+              .min=${0} .max=${100} .step=${1}
+              .value=${maxVal}
+              pin
+              @change=${(e) => {
+                const v = parseInt(e.target.value, 10);
+                this._setLevelRange(range?.min ?? null, v === 100 ? null : v);
+              }}
+            ></ha-slider>
+            <span class="jp-level-value">${maxVal}%</span>
+          </div>
+          ${hasRange ? html`
+            <div style="padding:0 16px 8px;text-align:right">
+              <ha-button @click=${() => this._setLevelRange(null, null)}>
+                Clear
+              </ha-button>
+            </div>
+          ` : nothing}
+        </div>
+      </ha-expansion-panel>
+    `;
+  }
+
+  _setLevelRange(min, max) {
+    if (min == null && max == null) {
+      const { levelRange: _, ...rest } = this._filters;
+      this._filters = { ...rest };
+    } else {
+      this._filters = { ...this._filters, levelRange: { value: { min, max } } };
+    }
   }
 
   _toggleFilter(group, value, checked) {

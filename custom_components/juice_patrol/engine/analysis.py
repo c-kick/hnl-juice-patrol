@@ -215,7 +215,21 @@ def _analyze_stability(
             if prev_seg["count"] < 2 or curr_seg["count"] < 2:
                 continue
         else:
-            cliff_shifts += 1
+            # For rechargeable devices, a cliff drop that recovers
+            # (level returns to within 15% of the pre-drop level in a
+            # later segment) is a normal discharge→recharge cycle, not
+            # erratic behavior.  Only count unrecovered cliff drops.
+            if is_rechargeable and shift < 0:
+                pre_drop_level = prev_seg["mean"]
+                recovered = any(
+                    segments[j]["mean"] >= pre_drop_level - 15
+                    for j in range(i + 1, len(segments))
+                    if segments[j]["count"] >= 2
+                )
+                if not recovered:
+                    cliff_shifts += 1
+            else:
+                cliff_shifts += 1
 
         # Upward shift is suspicious (not normal discharge)
         if shift > min_shift:

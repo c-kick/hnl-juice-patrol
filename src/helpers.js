@@ -165,7 +165,7 @@ export function erraticTooltip(dev) {
     );
   }
 
-  if (dev.stabilityCv !== null && dev.stabilityCv > 0.05) {
+  if (dev.stabilityCv !== null && dev.stabilityCv > 0.05 && !dev.isRechargeable) {
     parts.push(`High reading variance (CV: ${(dev.stabilityCv * 100).toFixed(1)}%)`);
   }
 

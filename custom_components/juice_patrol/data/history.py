@@ -78,10 +78,11 @@ async def async_get_readings(
     entity_id: str,
     since: datetime | None = None,
     cache: HistoryCache | None = None,
+    history_days: int | None = None,
 ) -> list[dict[str, float]]:
     """Get battery readings from recorder.
 
-    Tries long-term statistics first (hourly means, up to HISTORY_DEFAULT_DAYS).
+    Tries long-term statistics first (hourly means, up to history_days).
     Falls back to raw state history (up to ~10 days) for entities without
     state_class (phones, tablets, etc.).
 
@@ -94,7 +95,7 @@ async def async_get_readings(
             return cached
 
     # Try long-term statistics first
-    readings = await _async_get_from_statistics(hass, entity_id, since)
+    readings = await _async_get_from_statistics(hass, entity_id, since, history_days)
 
     # Fall back to raw state history if statistics returned nothing
     if not readings:
@@ -110,6 +111,7 @@ async def _async_get_from_statistics(
     hass: HomeAssistant,
     entity_id: str,
     since: datetime | None,
+    history_days: int | None = None,
 ) -> list[dict[str, float]]:
     """Fetch from long-term statistics (hourly means)."""
     try:
@@ -120,7 +122,8 @@ async def _async_get_from_statistics(
     except ImportError:
         return []
 
-    start_time = since if since else utcnow() - timedelta(days=HISTORY_DEFAULT_DAYS)
+    days = history_days if history_days is not None else HISTORY_DEFAULT_DAYS
+    start_time = since if since else utcnow() - timedelta(days=days)
 
     try:
         stats = await get_instance(hass).async_add_executor_job(

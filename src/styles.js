@@ -83,6 +83,31 @@ export const panelStyles = css`
   .jp-filter-item:hover {
     background: var(--secondary-background-color);
   }
+  .jp-level-range {
+    padding: 4px 0;
+  }
+  .jp-level-slider-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 16px;
+  }
+  .jp-level-label {
+    font-size: 13px;
+    color: var(--secondary-text-color);
+    width: 28px;
+    flex-shrink: 0;
+  }
+  .jp-level-slider-row ha-slider {
+    flex: 1;
+  }
+  .jp-level-value {
+    font-size: 12px;
+    font-weight: 500;
+    width: 36px;
+    text-align: right;
+    flex-shrink: 0;
+  }
   .devices {
     background: var(--card-bg);
     border-radius: 12px;
@@ -463,20 +488,331 @@ export const panelStyles = css`
     flex-wrap: wrap;
     gap: 8px;
   }
+  /* ══════════════════════════════
+     DASHBOARD
+     ══════════════════════════════ */
+  .jp-dashboard {
+    max-width: 1240px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  /* ── Status badges ── */
+  .jp-badge {
+    display: inline-flex;
+    align-items: center;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 8px;
+  }
+  .jp-badge.error {
+    background: color-mix(in srgb, var(--error-color) 15%, transparent);
+    color: var(--error-color);
+  }
+  .jp-badge.warning {
+    background: color-mix(in srgb, var(--warning-color) 15%, transparent);
+    color: var(--warning-color);
+  }
+  .jp-badge.success {
+    background: color-mix(in srgb, var(--success-color) 15%, transparent);
+    color: var(--success-color);
+  }
+  .jp-badge.info {
+    background: color-mix(in srgb, var(--info-color) 15%, transparent);
+    color: var(--info-color);
+  }
+  .jp-badge.primary {
+    background: color-mix(in srgb, var(--primary-color) 15%, transparent);
+    color: var(--primary-color);
+  }
+  .jp-badge.neutral {
+    background: color-mix(in srgb, var(--secondary-text-color) 12%, transparent);
+    color: var(--secondary-text-color);
+  }
+
+  /* ── Dashboard shared card header ── */
+  .db-card-header {
+    padding: 14px 16px 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid var(--border);
+  }
+  .db-card-title {
+    font-size: 16px;
+    font-weight: 500;
+  }
+
+  /* ── Dashboard layout grids ── */
+  .db-top-row {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .db-mid-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+  }
+  .db-bottom-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+
+  /* ── Attention table ── */
+  .att-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  .att-table th {
+    font-size: 11px;
+    color: var(--disabled-text-color);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    text-align: left;
+    padding: 4px 8px 8px;
+    font-weight: 400;
+  }
+  .att-table td {
+    padding: 8px;
+    border-top: 1px solid var(--border);
+    vertical-align: middle;
+  }
+  .att-table .name-cell {
+    font-weight: 500;
+  }
+  .att-table .dim {
+    font-size: 12px;
+    color: var(--secondary-text-color);
+  }
+  .att-row {
+    cursor: pointer;
+  }
+  .att-row:hover {
+    background: var(--secondary-background-color);
+  }
+  .level-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .level-bar {
+    width: 40px;
+    height: 5px;
+    background: var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .level-bar-fill {
+    height: 100%;
+    border-radius: 3px;
+  }
+
+  /* ── Most Wanted cards ── */
+  .wanted-card {
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+  }
+  .wanted-card:hover {
+    opacity: 0.92;
+  }
+  .wanted-top {
+    padding: 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    border-bottom: 1px solid var(--border);
+  }
+  .wanted-identity {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+  }
+  .wanted-name {
+    font-size: 15px;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .wanted-sub {
+    font-size: 12px;
+    color: var(--secondary-text-color);
+    line-height: 1.3;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .wanted-level {
+    font-size: 28px;
+    font-weight: 500;
+    line-height: 1;
+    flex-shrink: 0;
+    margin-left: 12px;
+  }
+  .wanted-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .ws {
+    padding: 10px 14px;
+    border-right: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+  .ws:nth-child(2n) { border-right: none; }
+  .ws:nth-last-child(-n+2) { border-bottom: none; }
+  .ws-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--disabled-text-color);
+    margin-bottom: 2px;
+  }
+  .ws-value {
+    font-size: 14px;
+    font-weight: 500;
+  }
+  .wanted-gauge {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .gauge-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--disabled-text-color);
+    margin-bottom: 6px;
+  }
+  .gauge-track {
+    height: 8px;
+    background: var(--secondary-background-color);
+    border-radius: 4px;
+    overflow: hidden;
+    position: relative;
+  }
+  .gauge-fill {
+    height: 100%;
+    border-radius: 4px;
+  }
+  .gauge-threshold {
+    position: absolute;
+    top: -2px;
+    height: 12px;
+    width: 2px;
+    border-radius: 1px;
+    background: var(--primary-text-color);
+    opacity: 0.3;
+  }
+  .gauge-axis {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9px;
+    color: var(--disabled-text-color);
+    margin-top: 3px;
+  }
+  .wanted-badges {
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+    padding: 10px 16px 12px;
+  }
+  .wanted-verdict {
+    padding: 12px 16px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--secondary-text-color);
+    flex: 1;
+  }
+  .wanted-verdict strong {
+    color: var(--primary-text-color);
+    font-weight: 500;
+  }
+
+  /* ── Overview stats (inside Overview card) ── */
+  .db-overview-stats {
+    display: flex;
+    border-top: 1px solid var(--border);
+  }
+  .db-stat {
+    flex: 1;
+    padding: 12px 16px;
+    text-align: center;
+  }
+  .db-stat + .db-stat {
+    border-left: 1px solid var(--border);
+  }
+  .db-stat-value {
+    font-size: 28px;
+    font-weight: 500;
+    line-height: 1;
+    display: block;
+  }
+  .db-stat-label {
+    font-size: 12px;
+    color: var(--secondary-text-color);
+    display: block;
+    margin-top: 4px;
+  }
+  .db-stat-sub {
+    font-size: 10px;
+    color: var(--disabled-text-color);
+    display: block;
+    margin-top: 2px;
+  }
+
+  /* ── Health by Battery Type ── */
+  .type-health-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .type-health-row {
+    display: grid;
+    grid-template-columns: 80px 1fr 36px;
+    gap: 8px;
+    align-items: center;
+  }
+  .th-type {
+    font-size: 13px;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .th-chart-container {
+    height: 32px;
+    min-width: 0;
+  }
+  .th-count {
+    font-size: 12px;
+    color: var(--secondary-text-color);
+    text-align: right;
+  }
+
+  @media (max-width: 1060px) {
+    .db-bottom-row { grid-template-columns: 1fr; }
+    .db-mid-row { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 600px) {
+    .db-card-header {
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 6px;
+    }
+  }
   @media (max-width: 500px) {
     #jp-content,
     .jp-padded {
       padding: 10px;
-    }
-    .summary-card {
-      padding: 10px 14px;
-      min-width: 70px;
-    }
-    .summary-card .value {
-      font-size: 22px;
-    }
-    .summary-card .label {
-      font-size: 11px;
     }
     .shopping-summary {
       flex-wrap: wrap;

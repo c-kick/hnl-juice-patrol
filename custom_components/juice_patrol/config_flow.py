@@ -20,9 +20,11 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import (
+    CONF_HISTORY_DAYS,
     CONF_LOW_THRESHOLD,
     CONF_PREDICTION_HORIZON,
     CONF_STALE_TIMEOUT,
+    DEFAULT_HISTORY_DAYS,
     DEFAULT_LOW_THRESHOLD,
     DEFAULT_PREDICTION_HORIZON,
     DEFAULT_STALE_TIMEOUT,
@@ -63,6 +65,17 @@ def _prediction_horizon_selector() -> NumberSelector:
     )
 
 
+def _history_days_selector() -> NumberSelector:
+    """History lookback window selector."""
+    return NumberSelector(
+        NumberSelectorConfig(
+            min=30, max=3650, step=1,
+            unit_of_measurement="days",
+            mode=NumberSelectorMode.BOX,
+        )
+    )
+
+
 def _options_schema(options: dict) -> vol.Schema:
     """Build the full options schema with current values as defaults."""
     return vol.Schema(
@@ -81,6 +94,12 @@ def _options_schema(options: dict) -> vol.Schema:
                     CONF_PREDICTION_HORIZON, DEFAULT_PREDICTION_HORIZON
                 ),
             ): _prediction_horizon_selector(),
+            vol.Required(
+                CONF_HISTORY_DAYS,
+                default=options.get(
+                    CONF_HISTORY_DAYS, DEFAULT_HISTORY_DAYS
+                ),
+            ): _history_days_selector(),
         }
     )
 
@@ -139,6 +158,7 @@ class JuicePatrolConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_PREDICTION_HORIZON: int(
                         user_input[CONF_PREDICTION_HORIZON]
                     ),
+                    CONF_HISTORY_DAYS: int(user_input[CONF_HISTORY_DAYS]),
                 },
             )
 
@@ -168,6 +188,7 @@ class JuicePatrolOptionsFlow(OptionsFlow):
                 CONF_LOW_THRESHOLD: int(user_input[CONF_LOW_THRESHOLD]),
                 CONF_STALE_TIMEOUT: int(user_input[CONF_STALE_TIMEOUT]),
                 CONF_PREDICTION_HORIZON: int(user_input[CONF_PREDICTION_HORIZON]),
+                CONF_HISTORY_DAYS: int(user_input[CONF_HISTORY_DAYS]),
             })
 
         options = self.config_entry.options
