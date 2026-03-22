@@ -1048,6 +1048,65 @@ _RELIABILITY_MULTIPLIERS: dict[str, float] = {
 }
 
 
+def _cliff_ratio(
+    readings: list[dict[str, float]],
+    split_pct: float = 40.0,
+    min_points: int = 5,
+) -> float:
+    """Ratio of drain rate below split_pct to drain rate above it.
+
+    Values > 1.0 mean the battery drains faster below the split point
+    (Li-ion cliff behaviour). Returns 1.0 when there is insufficient
+    data on either side of the split.
+    """
+    above: list[tuple[float, float]] = []  # (t, v)
+    below: list[tuple[float, float]] = []
+    for r in readings:
+        if r["v"] > split_pct:
+            above.append((r["t"], r["v"]))
+        else:
+            below.append((r["t"], r["v"]))
+
+    if len(above) < min_points or len(below) < min_points:
+        return 1.0
+
+    # Compute drain rate (%/day) for each segment
+    def _rate(pts: list[tuple[float, float]]) -> float:
+        dt = (pts[-1][0] - pts[0][0]) / 86400.0
+        dv = pts[0][1] - pts[-1][1]  # positive = discharging
+        if dt <= 0 or dv <= 0:
+            return 0.0
+        return dv / dt
+
+    rate_above = _rate(above)
+    rate_below = _rate(below)
+    if rate_above <= 0:
+        return 1.0
+    return rate_below / rate_above
+
+
+def _stuck_near_cliff(
+    readings: list[dict[str, float]],
+    threshold_pct: float = 30.0,
+    window: int = 5,
+) -> bool:
+    """Detect sensor stuck at a low level — Zigbee cliff signature.
+
+    Returns True when the last ``window`` readings are all within 1.0 SoC
+    unit of each other AND their median is at or below ``threshold_pct``.
+    This catches the pattern where a sensor reports e.g. 25 % for weeks
+    then drops to 0 % in one step — _detect_regime_change is blind to
+    this because the tail slope is zero.
+    """
+    if len(readings) < window:
+        return False
+    tail = [r["v"] for r in readings[-window:]]
+    lo, hi = min(tail), max(tail)
+    if hi - lo > 1.0:
+        return False
+    return _median(tail) <= threshold_pct
+
+
 def _classify_confidence(
     r_squared: float, timespan_hours: float, data_points: int = 10,
 ) -> Confidence:
