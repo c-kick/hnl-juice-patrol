@@ -61,12 +61,14 @@ class PredictionResult:
     reliability: int | None = None  # 0-100 score
     session_count: int | None = None  # number of discharge sessions (multi-session only)
     t0: float | None = None  # reference timestamp for the regression (intercept is at t0)
+    chemistry: str | None = None  # chemistry used for this prediction (from chemistry_from_battery_type)
 
 
 def _no_prediction(
     status: PredictionStatus,
     data_points: int,
     session_count: int | None = None,
+    chemistry: str | None = None,
 ) -> PredictionResult:
     """Create a PredictionResult for early-exit cases with no usable prediction."""
     return PredictionResult(
@@ -83,6 +85,7 @@ def _no_prediction(
         reliability=None,
         session_count=session_count,
         t0=None,
+        chemistry=chemistry,
     )
 
 
@@ -156,13 +159,13 @@ def predict_discharge(
     readings = _validate_and_sort_readings(readings)
 
     if len(readings) < min_readings:
-        return _no_prediction(PredictionStatus.INSUFFICIENT_DATA, len(readings))
+        return _no_prediction(PredictionStatus.INSUFFICIENT_DATA, len(readings), chemistry=chemistry)
 
     # Check minimum timespan
     times = [r["t"] for r in readings]
     timespan_hours = (max(times) - min(times)) / 3600
     if timespan_hours < min_timespan_hours:
-        return _no_prediction(PredictionStatus.INSUFFICIENT_DATA, len(readings))
+        return _no_prediction(PredictionStatus.INSUFFICIENT_DATA, len(readings), chemistry=chemistry)
 
     # Early gating: single-level or insufficient range (on raw data)
     values = [r["v"] for r in readings]
@@ -170,11 +173,11 @@ def predict_discharge(
     value_range = max(values) - min(values)
 
     if len(unique_values) <= 1:
-        return _no_prediction(PredictionStatus.SINGLE_LEVEL, len(readings))
+        return _no_prediction(PredictionStatus.SINGLE_LEVEL, len(readings), chemistry=chemistry)
 
     step_size = _detect_step_size(values)
     if value_range <= step_size:
-        return _no_prediction(PredictionStatus.INSUFFICIENT_RANGE, len(readings))
+        return _no_prediction(PredictionStatus.INSUFFICIENT_RANGE, len(readings), chemistry=chemistry)
 
     # Compute cliff ratio on raw readings before compression
     cr = _cliff_ratio(readings)
@@ -323,6 +326,7 @@ def _build_result_from_curve(
                 chemistry=chemistry, cliff_ratio=cliff_ratio,
             ),
             t0=t0,
+            chemistry=chemistry,
         )
 
     if abs(overall_slope) <= FLAT_SLOPE_THRESHOLD:
@@ -350,6 +354,7 @@ def _build_result_from_curve(
                 chemistry=chemistry, cliff_ratio=cliff_ratio,
             ),
             t0=t0,
+            chemistry=chemistry,
         )
 
     if r_squared < 0.10:
@@ -373,6 +378,7 @@ def _build_result_from_curve(
                 chemistry=chemistry, cliff_ratio=cliff_ratio,
             ),
             t0=t0,
+            chemistry=chemistry,
         )
 
     # If the overall trend is clearly discharging but the instantaneous
@@ -429,6 +435,7 @@ def _build_result_from_curve(
                 chemistry=chemistry, cliff_ratio=cliff_ratio,
             ),
             t0=t0,
+            chemistry=chemistry,
         )
 
     # Can't extrapolate — return with slope but no prediction
@@ -514,6 +521,7 @@ def _predict_discharge_theil_sen(
                 chemistry=chemistry, cliff_ratio=cliff_ratio,
             ),
             t0=t0,
+            chemistry=chemistry,
         )
 
     if abs(slope) <= FLAT_SLOPE_THRESHOLD:
@@ -539,6 +547,7 @@ def _predict_discharge_theil_sen(
                 chemistry=chemistry, cliff_ratio=cliff_ratio,
             ),
             t0=t0,
+            chemistry=chemistry,
         )
 
     if r_squared < 0.10:
@@ -562,6 +571,7 @@ def _predict_discharge_theil_sen(
                 chemistry=chemistry, cliff_ratio=cliff_ratio,
             ),
             t0=t0,
+            chemistry=chemistry,
         )
 
     # Predict when level hits target
@@ -599,6 +609,7 @@ def _predict_discharge_theil_sen(
             chemistry=chemistry, cliff_ratio=cliff_ratio,
         ),
         t0=t0,
+        chemistry=chemistry,
     )
 
 
@@ -612,6 +623,7 @@ def predict_discharge_multisession(
     current_level: float,
     target_level: float = 0.0,
     min_sessions: int = 1,
+    chemistry: str | None = None,
 ) -> PredictionResult:
     """Predict discharge for rechargeable devices using multi-session analysis.
 
@@ -624,6 +636,8 @@ def predict_discharge_multisession(
         current_level: Current battery level (%).
         target_level: Target level to predict reaching (default 0).
         min_sessions: Minimum number of discharge sessions required.
+        chemistry: Optional chemistry string (e.g. "NMC", "NiMH") from
+            chemistry_from_battery_type(). Stored on the result for downstream use.
 
     Returns:
         Standard PredictionResult so all downstream consumers work unchanged.
@@ -635,6 +649,7 @@ def predict_discharge_multisession(
         return _no_prediction(
             PredictionStatus.INSUFFICIENT_DATA, total_points,
             session_count=len(sessions),
+            chemistry=chemistry,
         )
 
     # Fit each session: try parametric first, fall back to Theil-Sen slope
@@ -679,6 +694,7 @@ def predict_discharge_multisession(
         return _no_prediction(
             PredictionStatus.FLAT, total_points,
             session_count=len(sessions),
+            chemistry=chemistry,
         )
 
     median_slope = _median(session_slopes)
@@ -734,6 +750,7 @@ def predict_discharge_multisession(
             ),
             session_count=len(sessions),
             t0=now,
+            chemistry=chemistry,
         )
 
     if median_slope >= 0:
@@ -752,6 +769,7 @@ def predict_discharge_multisession(
             reliability=None,
             session_count=len(sessions),
             t0=now,
+            chemistry=chemistry,
         )
 
     # Use median of per-session predicted durations if available,
@@ -789,6 +807,7 @@ def predict_discharge_multisession(
         ),
         session_count=len(sessions),
         t0=now,
+        chemistry=chemistry,
     )
 
 
