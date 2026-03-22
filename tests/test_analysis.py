@@ -152,8 +152,8 @@ class TestRechargeableDetection:
         assert result.is_rechargeable is False
 
     def test_battery_type_not_rechargeable(self):
-        """Battery type alone no longer triggers rechargeable — only manual
-        override and battery_state do."""
+        """Battery type alone does not set rechargeable — only manual
+        override does (battery_state is a best-effort guess for initial discovery only)."""
         for btype in ("Li-ion", "NiMH", "CR2032"):
             result = analyze_battery(
                 _readings([90, 88, 86, 84, 82]),

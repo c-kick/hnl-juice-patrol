@@ -108,7 +108,7 @@ class TestAsyncSetupEntry:
     async def test_creates_per_device_and_summary_sensors(
         self, mock_coordinator
     ) -> None:
-        """Setup creates 3 per-device sensors + 1 summary sensor."""
+        """Setup creates 6 per-device sensors + 1 summary sensor."""
         mock_coordinator.data = {SOURCE_ENTITY: _make_device_info()}
 
         entry = MagicMock()
