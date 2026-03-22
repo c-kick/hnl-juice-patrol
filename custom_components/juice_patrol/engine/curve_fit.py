@@ -590,6 +590,7 @@ def _fit_piecewise_3(
 def fit_discharge_curve(
     readings: list[dict[str, float]],
     class_prior: ClassPrior | None = None,
+    candidates: list[str] | None = None,
 ) -> CurveFitResult | None:
     """Fit all model candidates and return the best by AICc.
 
@@ -598,6 +599,9 @@ def fit_discharge_curve(
         class_prior: Optional prior from completed cycles of the same
             device class. Used to inform initial guesses and tighten bounds
             for exponential and Weibull models.
+        candidates: Optional list of model names to try. When None, all
+            models are tried. Valid names: "exponential", "weibull",
+            "piecewise_linear_2", "piecewise_linear_3".
 
     Returns:
         Best CurveFitResult, or None if no model could be fitted.
@@ -623,25 +627,29 @@ def fit_discharge_curve(
             weibull_prior_params = class_prior.median_params
             weibull_prior_iqr = class_prior.iqr_params
 
-    candidates: list[CurveFitResult] = []
+    results: list[CurveFitResult] = []
 
-    exp_fit = _fit_exponential(t, v, exp_prior_params, exp_prior_iqr)
-    if exp_fit is not None:
-        candidates.append(exp_fit)
+    if candidates is None or "exponential" in candidates:
+        exp_fit = _fit_exponential(t, v, exp_prior_params, exp_prior_iqr)
+        if exp_fit is not None:
+            results.append(exp_fit)
 
-    weibull_fit = _fit_weibull(t, v, weibull_prior_params, weibull_prior_iqr)
-    if weibull_fit is not None:
-        candidates.append(weibull_fit)
+    if candidates is None or "weibull" in candidates:
+        weibull_fit = _fit_weibull(t, v, weibull_prior_params, weibull_prior_iqr)
+        if weibull_fit is not None:
+            results.append(weibull_fit)
 
-    pw2 = _fit_piecewise(t, v, n_segments=2)
-    if pw2 is not None:
-        candidates.append(pw2)
+    if candidates is None or "piecewise_linear_2" in candidates:
+        pw2 = _fit_piecewise(t, v, n_segments=2)
+        if pw2 is not None:
+            results.append(pw2)
 
-    pw3 = _fit_piecewise(t, v, n_segments=3)
-    if pw3 is not None:
-        candidates.append(pw3)
+    if candidates is None or "piecewise_linear_3" in candidates:
+        pw3 = _fit_piecewise(t, v, n_segments=3)
+        if pw3 is not None:
+            results.append(pw3)
 
-    if not candidates:
+    if not results:
         return None
 
     # When a class prior exists, give the prior's model type an AIC bonus.
@@ -651,7 +659,7 @@ def fit_discharge_curve(
     # balance when the prior model fits nearly as well as piecewise.
     if class_prior is not None and class_prior.cycle_count >= 2:
         prior_model = class_prior.model_name
-        for c in candidates:
+        for c in results:
             if c.model_name == prior_model and c.r_squared > 0.8:
                 # Bonus scales with evidence: log2(cycle_count) * 4.
                 # 2 cycles → 4, 3 cycles → 6.3, 5 cycles → 9.3, 10 → 13.3.
@@ -662,8 +670,8 @@ def fit_discharge_curve(
                 c.aic -= bonus
 
     # Select by AICc (lowest is best)
-    candidates.sort(key=lambda c: c.aic)
-    return candidates[0]
+    results.sort(key=lambda c: c.aic)
+    return results[0]
 
 
 def extrapolate_to_threshold(

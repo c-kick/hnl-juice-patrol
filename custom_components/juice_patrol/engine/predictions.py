@@ -967,6 +967,32 @@ def _reject_by_residual(
     )
 
 
+# Primary (non-rechargeable) chemistries — used for idle-day caps
+_PRIMARY_CHEMISTRIES = frozenset({"alkaline", "lithium_primary", "coin_cell"})
+
+# Curve-fit model candidates per chemistry class.
+# Primary cells discharge monotonically and never exhibit the S-curve or
+# plateau-then-cliff behaviour that Weibull captures. Limiting them to
+# piecewise + exponential avoids over-fitting artefacts.
+_PRIMARY_CHEMISTRY_MODELS: list[str] = [
+    "exponential",
+    "piecewise_linear_2",
+    "piecewise_linear_3",
+]
+_DEFAULT_MODELS: list[str] | None = None  # None = all models
+
+
+def _candidate_models(chemistry: str | None) -> list[str] | None:
+    """Return the curve-fit candidate list appropriate for a chemistry.
+
+    Returns None (= all models) for rechargeable / unknown chemistries,
+    or a restricted list for primary cells.
+    """
+    if chemistry and chemistry in _PRIMARY_CHEMISTRIES:
+        return _PRIMARY_CHEMISTRY_MODELS
+    return _DEFAULT_MODELS
+
+
 def _classify_confidence(
     r_squared: float, timespan_hours: float, data_points: int = 10,
 ) -> Confidence:
