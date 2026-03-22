@@ -193,8 +193,8 @@ export function showBatteryTypeDialog(panel, entityId, currentType) {
           <div class="jp-dialog-presets jp-chem-presets">
             ${chemistryPresets.map((c) => {
               const active = chemistryOverride === c;
-              return \`<button class="jp-preset jp-chem-chip\${active ? " active" : ""}"
-                data-chem="\${c}">\${chemistryLabels[c]}</button>\`;
+              return `<button class="jp-preset jp-chem-chip${active ? " active" : ""}"
+                data-chem="${c}">${chemistryLabels[c]}</button>`;
             }).join("")}
           </div>
           <div style="font-size:0.8em; color:var(--secondary-text-color); margin-top:6px">
