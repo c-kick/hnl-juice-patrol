@@ -992,6 +992,61 @@ def _candidate_models(chemistry: str | None) -> list[str] | None:
         return _PRIMARY_CHEMISTRY_MODELS
     return _DEFAULT_MODELS
 
+# Max idle days for calendar aging penalty.
+# Zigbee/Z-Wave sensors frequently go offline for days; idle_days uses
+# last-reading timestamp which cannot distinguish radio silence from
+# genuine idle.  A 14-day cap limits phantom SoC penalties from network
+# outages while still correcting for genuine slow sensors.
+_MAX_IDLE_DAYS = 365
+_MAX_IDLE_DAYS_PRIMARY = 14
+
+# Calendar aging constants: c_cal per chemistry (25°C, 50% SoC).
+# Q_loss_cal ≈ c_cal × idle_days^0.5  (see CLAUDE.md domain knowledge)
+_C_CAL: dict[str, float] = {
+    "LFP":             0.0002,
+    "NMC":             0.0005,
+    "NiMH":            0.001,
+    "LCO":             0.0008,
+    "alkaline":        0.0003,
+    "lithium_primary": 0.00005,
+    "coin_cell":       0.00008,
+}
+
+
+def _calendar_penalty(
+    idle_days: float,
+    chemistry: str | None,
+) -> float:
+    """Compute SoC penalty (%) from calendar aging during idle time.
+
+    Uses the simplified square-root model: penalty = c_cal × √(idle_days).
+    Idle days are capped per chemistry class to avoid phantom penalties
+    from radio-silent sensors.
+
+    Returns a non-negative value representing estimated SoC % lost.
+    """
+    if idle_days <= 0:
+        return 0.0
+    chem = chemistry or "unknown"
+    cap = _MAX_IDLE_DAYS_PRIMARY if chem in _PRIMARY_CHEMISTRIES else _MAX_IDLE_DAYS
+    capped = min(idle_days, cap)
+    c_cal = _C_CAL.get(chem, _C_CAL.get("NMC", 0.0005))
+    return c_cal * math.sqrt(capped) * 100.0  # convert fraction to %
+
+
+# Chemistry-specific reliability multipliers.
+# Primary cells with ultra-stable chemistries (lithium_primary, coin_cell)
+# get a small boost; cells with high self-discharge (NiMH) are penalised.
+_RELIABILITY_MULTIPLIERS: dict[str, float] = {
+    "LFP":             1.0,
+    "NMC":             1.0,
+    "NiMH":            0.85,
+    "LCO":             0.90,
+    "alkaline":        1.05,
+    "lithium_primary": 1.10,
+    "coin_cell":       1.10,
+}
+
 
 def _classify_confidence(
     r_squared: float, timespan_hours: float, data_points: int = 10,
