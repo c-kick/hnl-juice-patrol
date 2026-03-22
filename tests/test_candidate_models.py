@@ -1,34 +1,41 @@
-"""Tests for chemistry-aware model candidate selection (Phase 1).
+"""Tests for chemistry-aware model candidate selection.
 
 Verifies _candidate_models returns the correct candidate list for each
-chemistry class: primary cells get a restricted set, rechargeable and
-unknown chemistries get all models.
+chemistry class: primary cells get chemistry-specific restricted sets,
+rechargeable and unknown chemistries get all models.
 """
 
 from custom_components.juice_patrol.engine.predictions import (
     _candidate_models,
-    _PRIMARY_CHEMISTRY_MODELS,
+    _CHEMISTRY_CANDIDATES,
 )
 
 
 class TestCandidateModels:
     """Chemistry-aware model candidate selection."""
 
-    def test_alkaline_returns_primary_models(self):
+    def test_alkaline_returns_chemistry_specific_list(self):
         """Alkaline (primary cell) → restricted candidate list."""
         result = _candidate_models("alkaline")
-        assert result == _PRIMARY_CHEMISTRY_MODELS
+        assert result == _CHEMISTRY_CANDIDATES["alkaline"]
         assert "weibull" not in result
 
-    def test_lithium_primary_returns_primary_models(self):
-        """Lithium primary → restricted candidate list."""
-        result = _candidate_models("lithium_primary")
-        assert result == _PRIMARY_CHEMISTRY_MODELS
+    def test_alkaline_includes_exponential(self):
+        """Alkaline gets exponential (captures steepening near EOL)."""
+        result = _candidate_models("alkaline")
+        assert "exponential" in result
 
-    def test_coin_cell_returns_primary_models(self):
-        """Coin cell → restricted candidate list."""
+    def test_lithium_primary_excludes_exponential(self):
+        """Lithium primary plateau is too flat for exponential decay."""
+        result = _candidate_models("lithium_primary")
+        assert result == _CHEMISTRY_CANDIDATES["lithium_primary"]
+        assert "exponential" not in result
+
+    def test_coin_cell_excludes_exponential(self):
+        """Coin cell plateau is too flat for exponential decay."""
         result = _candidate_models("coin_cell")
-        assert result == _PRIMARY_CHEMISTRY_MODELS
+        assert result == _CHEMISTRY_CANDIDATES["coin_cell"]
+        assert "exponential" not in result
 
     def test_nmc_returns_all_models(self):
         """NMC (rechargeable) → None (all models)."""
@@ -54,12 +61,8 @@ class TestCandidateModels:
         """None chemistry → None (all models)."""
         assert _candidate_models(None) is None
 
-    def test_primary_models_include_exponential(self):
-        """Primary cells should still have exponential available."""
-        result = _candidate_models("alkaline")
-        assert "exponential" in result
-
-    def test_primary_models_include_piecewise(self):
-        """Primary cells should have piecewise linear models."""
-        result = _candidate_models("alkaline")
-        assert any("piecewise" in m for m in result)
+    def test_all_primary_have_piecewise(self):
+        """All primary chemistries should have piecewise linear models."""
+        for chem in _CHEMISTRY_CANDIDATES:
+            result = _candidate_models(chem)
+            assert any("piecewise" in m for m in result), f"{chem} missing piecewise"

@@ -61,12 +61,14 @@ class PredictionResult:
     reliability: int | None = None  # 0-100 score
     session_count: int | None = None  # number of discharge sessions (multi-session only)
     t0: float | None = None  # reference timestamp for the regression (intercept is at t0)
+    chemistry: str | None = None  # chemistry used for this prediction (from chemistry_from_battery_type)
 
 
 def _no_prediction(
     status: PredictionStatus,
     data_points: int,
     session_count: int | None = None,
+    chemistry: str | None = None,
 ) -> PredictionResult:
     """Create a PredictionResult for early-exit cases with no usable prediction."""
     return PredictionResult(
@@ -83,6 +85,7 @@ def _no_prediction(
         reliability=None,
         session_count=session_count,
         t0=None,
+        chemistry=chemistry,
     )
 
 
@@ -112,6 +115,37 @@ def _validate_and_sort_readings(
     readings = [r for r in readings if r["t"] <= cutoff]
 
     return readings
+
+
+def _strip_trailing_dead(
+    readings: list[dict[str, float]],
+    dead_threshold: float = 1.0,
+) -> list[dict[str, float]]:
+    """Remove trailing readings where the battery is effectively dead.
+
+    Walks backwards from the end and strips readings with v ≤ dead_threshold.
+    Keeps at least 3 readings so downstream gating works normally.
+    If the entire series is at or below the threshold, returns it unchanged
+    (the battery was always "dead" from the engine's perspective).
+    """
+    if len(readings) <= 3:
+        return readings
+
+    # Find the last reading above the dead threshold
+    last_alive = len(readings) - 1
+    while last_alive >= 0 and readings[last_alive]["v"] <= dead_threshold:
+        last_alive -= 1
+
+    if last_alive < 0:
+        # Every reading is at/below threshold — return unchanged
+        return readings
+
+    # Keep up to last_alive (inclusive), but ensure at least 3 readings
+    trimmed = readings[: last_alive + 1]
+    if len(trimmed) < 3:
+        return readings
+
+    return trimmed
 
 
 # ---------------------------------------------------------------------------
@@ -155,14 +189,28 @@ def predict_discharge(
     # Validate and sort (but do NOT compress yet — need raw counts for gating)
     readings = _validate_and_sort_readings(readings)
 
+    # Strip trailing "dead battery" readings (≤1%) before fitting.
+    # Post-death 0% readings add no signal and flatten the fitted slope,
+    # causing the prediction to overshoot by weeks/months.
+    # The normal pipeline then curve-fits the actual discharge, producing
+    # a proper prediction line that shows users the system predicted correctly.
+    n_before_strip = len(readings)
+    readings = _strip_trailing_dead(readings, dead_threshold=1.0)
+    # When dead readings were stripped, the battery died around the last
+    # surviving reading.  Use its timestamp for estimated_empty_timestamp
+    # instead of "now + 0 days" (which would be the present, not when it died).
+    dead_at_ts: float | None = (
+        readings[-1]["t"] if len(readings) < n_before_strip and readings else None
+    )
+
     if len(readings) < min_readings:
-        return _no_prediction(PredictionStatus.INSUFFICIENT_DATA, len(readings))
+        return _no_prediction(PredictionStatus.INSUFFICIENT_DATA, len(readings), chemistry=chemistry)
 
     # Check minimum timespan
     times = [r["t"] for r in readings]
     timespan_hours = (max(times) - min(times)) / 3600
     if timespan_hours < min_timespan_hours:
-        return _no_prediction(PredictionStatus.INSUFFICIENT_DATA, len(readings))
+        return _no_prediction(PredictionStatus.INSUFFICIENT_DATA, len(readings), chemistry=chemistry)
 
     # Early gating: single-level or insufficient range (on raw data)
     values = [r["v"] for r in readings]
@@ -170,14 +218,22 @@ def predict_discharge(
     value_range = max(values) - min(values)
 
     if len(unique_values) <= 1:
-        return _no_prediction(PredictionStatus.SINGLE_LEVEL, len(readings))
+        return _no_prediction(PredictionStatus.SINGLE_LEVEL, len(readings), chemistry=chemistry)
 
     step_size = _detect_step_size(values)
     if value_range <= step_size:
-        return _no_prediction(PredictionStatus.INSUFFICIENT_RANGE, len(readings))
+        return _no_prediction(PredictionStatus.INSUFFICIENT_RANGE, len(readings), chemistry=chemistry)
 
-    # Compute cliff ratio on raw readings before compression
-    cr = _cliff_ratio(readings)
+    # Compute SoC-split ratio on raw readings before compression
+    cr = _soc_split_ratio(readings)
+
+    # Compute tail-cliff ratio for primary-cell cliff detection
+    tcr = _tail_cliff_ratio(readings)
+    use_tail_slope = (
+        chemistry in _CLIFF_CHEMISTRIES
+        and tcr is not None
+        and tcr > 2.5
+    )
 
     # SDT compress for fitting (preserves slope transitions, removes plateaus)
     full_readings = readings
@@ -211,8 +267,9 @@ def predict_discharge(
                 timespan_hours,
                 len(readings),
                 chemistry=chemistry,
-                cliff_ratio=cr,
+                soc_split_ratio=cr,
                 readings=full_readings,
+                tail_cliff_ratio=tcr,
             )
             if full_conf != result.confidence:
                 result = _replace(
@@ -225,7 +282,8 @@ def predict_discharge(
                         full_conf,
                         days_remaining=result.estimated_days_remaining,
                         chemistry=chemistry,
-                        cliff_ratio=cr,
+                        soc_split_ratio=cr,
+                        tail_cliff_ratio=tcr,
                     ),
                 )
             return result
@@ -255,34 +313,53 @@ def predict_discharge(
         )
 
     if curve_fit is not None and curve_fit.r_squared > 0.10:
-        return _build_result_from_curve(
+        result = _build_result_from_curve(
             curve_fit, readings, full_readings, t0, now, now_days, target_level,
-            timespan_hours, n_points, chemistry=chemistry, cliff_ratio=cr,
-            cal_soc_lost=cal_soc_lost,
+            timespan_hours, n_points, chemistry=chemistry, soc_split_ratio=cr,
+            cal_soc_lost=cal_soc_lost, use_tail_slope=use_tail_slope,
+            tail_cliff_ratio=tcr,
+        )
+    else:
+        # Theil-Sen fallback: reject outliers first (linear model is sensitive)
+        cleaned, x, y = _reject_by_residual(readings, x, y)
+        if len(cleaned) < min_readings:
+            cleaned = readings
+            t0 = cleaned[0]["t"]
+            x = [(r["t"] - t0) / 86400.0 for r in cleaned]
+            y = [r["v"] for r in cleaned]
+
+        result = _predict_discharge_theil_sen(
+            cleaned, x, y, t0, now, now_days, target_level,
+            half_life_days, timespan_hours, len(cleaned),
+            chemistry=chemistry, soc_split_ratio=cr,
+            full_readings=full_readings, cal_soc_lost=cal_soc_lost,
+            use_tail_slope=use_tail_slope, tail_cliff_ratio=tcr,
         )
 
-    # Theil-Sen fallback: reject outliers first (linear model is sensitive)
-    cleaned, x, y = _reject_by_residual(readings, x, y)
-    if len(cleaned) < min_readings:
-        cleaned = readings
-        t0 = cleaned[0]["t"]
-        x = [(r["t"] - t0) / 86400.0 for r in cleaned]
-        y = [r["v"] for r in cleaned]
+    # Post-death override: when dead readings were stripped, the battery is
+    # dead regardless of what the curve fit predicts.  Keep the fitted slope
+    # and R² (they produce the prediction curve on the chart) but override
+    # days remaining and timestamp to reflect reality.
+    if dead_at_ts is not None:
+        from dataclasses import replace as _dc_replace
+        result = _dc_replace(
+            result,
+            estimated_empty_timestamp=round(dead_at_ts, 0),
+            estimated_days_remaining=0.0,
+            estimated_hours_remaining=0.0,
+        )
 
-    return _predict_discharge_theil_sen(
-        cleaned, x, y, t0, now, now_days, target_level,
-        half_life_days, timespan_hours, len(cleaned),
-        chemistry=chemistry, cliff_ratio=cr,
-        full_readings=full_readings, cal_soc_lost=cal_soc_lost,
-    )
+    return result
 
 
 def _build_result_from_curve(
     fit, cleaned, full_readings, t0, now, now_days, target_level,
     timespan_hours, n_cleaned,
     chemistry: str | None = None,
-    cliff_ratio: float = 1.0,
+    soc_split_ratio: float = 1.0,
     cal_soc_lost: float = 0.0,
+    use_tail_slope: bool = False,
+    tail_cliff_ratio: float | None = None,
 ) -> PredictionResult:
     """Build PredictionResult from a successful CurveFitResult."""
     # Compute instantaneous slope at t=now as %/day
@@ -305,7 +382,8 @@ def _build_result_from_curve(
     if overall_slope > 0.01:
         conf = _classify_confidence(
             r_squared, timespan_hours, n_cleaned,
-            chemistry=chemistry, cliff_ratio=cliff_ratio, readings=full_readings,
+            chemistry=chemistry, soc_split_ratio=soc_split_ratio, readings=full_readings,
+            tail_cliff_ratio=tail_cliff_ratio,
         )
         return PredictionResult(
             slope_per_day=round(slope, 4),
@@ -320,9 +398,11 @@ def _build_result_from_curve(
             status=PredictionStatus.CHARGING,
             reliability=compute_reliability(
                 n_cleaned, timespan_hours, r_squared, conf, days_remaining=None,
-                chemistry=chemistry, cliff_ratio=cliff_ratio,
+                chemistry=chemistry, soc_split_ratio=soc_split_ratio,
+                tail_cliff_ratio=tail_cliff_ratio,
             ),
             t0=t0,
+            chemistry=chemistry,
         )
 
     if abs(overall_slope) <= FLAT_SLOPE_THRESHOLD:
@@ -332,7 +412,8 @@ def _build_result_from_curve(
         flat_slope_per_hour = 0.0 if slope > 0 else slope_per_hour
         conf = _classify_confidence(
             r_squared, timespan_hours, n_cleaned,
-            chemistry=chemistry, cliff_ratio=cliff_ratio, readings=full_readings,
+            chemistry=chemistry, soc_split_ratio=soc_split_ratio, readings=full_readings,
+            tail_cliff_ratio=tail_cliff_ratio,
         )
         return PredictionResult(
             slope_per_day=flat_slope,
@@ -347,15 +428,18 @@ def _build_result_from_curve(
             status=PredictionStatus.FLAT,
             reliability=compute_reliability(
                 n_cleaned, timespan_hours, r_squared, conf, days_remaining=None,
-                chemistry=chemistry, cliff_ratio=cliff_ratio,
+                chemistry=chemistry, soc_split_ratio=soc_split_ratio,
+                tail_cliff_ratio=tail_cliff_ratio,
             ),
             t0=t0,
+            chemistry=chemistry,
         )
 
     if r_squared < 0.10:
         conf = _classify_confidence(
             r_squared, timespan_hours, n_cleaned,
-            chemistry=chemistry, cliff_ratio=cliff_ratio, readings=full_readings,
+            chemistry=chemistry, soc_split_ratio=soc_split_ratio, readings=full_readings,
+            tail_cliff_ratio=tail_cliff_ratio,
         )
         return PredictionResult(
             slope_per_day=None,
@@ -370,9 +454,11 @@ def _build_result_from_curve(
             status=PredictionStatus.NOISY,
             reliability=compute_reliability(
                 n_cleaned, timespan_hours, r_squared, conf, days_remaining=None,
-                chemistry=chemistry, cliff_ratio=cliff_ratio,
+                chemistry=chemistry, soc_split_ratio=soc_split_ratio,
+                tail_cliff_ratio=tail_cliff_ratio,
             ),
             t0=t0,
+            chemistry=chemistry,
         )
 
     # If the overall trend is clearly discharging but the instantaneous
@@ -400,6 +486,45 @@ def _build_result_from_curve(
         else:
             days_remaining_val = None
 
+    # Cliff override for primary cells: when the tail is much steeper than
+    # the overall trend and the model is not piecewise (which already handles
+    # breakpoints natively), re-extrapolate using the tail slope.
+    if (
+        use_tail_slope
+        and days_remaining_val is not None
+        and not fit.model_name.startswith("piecewise_linear")
+    ):
+        current_val = fit.predict(now_days)
+        # Compute tail OLS slope from the last 5 full_readings
+        _tail = full_readings[-5:]
+        _t0t = _tail[0]["t"]
+        _xt = [(_r["t"] - _t0t) / 86400.0 for _r in _tail]
+        _yt = [_r["v"] for _r in _tail]
+        _n = len(_xt)
+        _sx = sum(_xt)
+        _sy = sum(_yt)
+        _sxx = sum(_xi * _xi for _xi in _xt)
+        _sxy = sum(_xi * _yi for _xi, _yi in zip(_xt, _yt))
+        _d = _n * _sxx - _sx * _sx
+        if abs(_d) > 1e-15:
+            tail_slope = (_n * _sxy - _sx * _sy) / _d
+            if tail_slope < -0.001:
+                days_remaining_val = max(0.0, (target_level - current_val) / tail_slope)
+                slope = tail_slope
+                slope_per_hour = round(slope / 24.0, 4)
+
+    # Stuck-plateau cap for primary cells: sensor stuck at a low level
+    # is in the pre-cliff zone — cap remaining days by chemistry.
+    if (
+        chemistry in _STUCK_PLATEAU_CAPS
+        and full_readings is not None
+        and _stuck_near_cliff(full_readings, threshold_pct=30.0)
+        and days_remaining_val is not None
+    ):
+        cap = _STUCK_PLATEAU_CAPS[chemistry]
+        if days_remaining_val > cap:
+            days_remaining_val = cap
+
     if days_remaining_val is not None:
         if days_remaining_val < 0:
             days_remaining_val = 0.0
@@ -410,7 +535,8 @@ def _build_result_from_curve(
         estimated_empty_timestamp = now + (days_remaining_val * 86400.0)
         conf = _classify_confidence(
             r_squared, timespan_hours, n_cleaned,
-            chemistry=chemistry, cliff_ratio=cliff_ratio, readings=full_readings,
+            chemistry=chemistry, soc_split_ratio=soc_split_ratio, readings=full_readings,
+            tail_cliff_ratio=tail_cliff_ratio,
         )
         return PredictionResult(
             slope_per_day=round(slope, 4),
@@ -426,15 +552,18 @@ def _build_result_from_curve(
             reliability=compute_reliability(
                 n_cleaned, timespan_hours, r_squared, conf,
                 days_remaining=days_remaining_val,
-                chemistry=chemistry, cliff_ratio=cliff_ratio,
+                chemistry=chemistry, soc_split_ratio=soc_split_ratio,
+                tail_cliff_ratio=tail_cliff_ratio,
             ),
             t0=t0,
+            chemistry=chemistry,
         )
 
     # Can't extrapolate — return with slope but no prediction
     conf = _classify_confidence(
         r_squared, timespan_hours, n_cleaned,
-        chemistry=chemistry, cliff_ratio=cliff_ratio, readings=full_readings,
+        chemistry=chemistry, soc_split_ratio=soc_split_ratio, readings=full_readings,
+        tail_cliff_ratio=tail_cliff_ratio,
     )
     return PredictionResult(
         slope_per_day=round(slope, 4),
@@ -449,9 +578,11 @@ def _build_result_from_curve(
         status=PredictionStatus.NORMAL,
         reliability=compute_reliability(
             n_cleaned, timespan_hours, r_squared, conf, days_remaining=None,
-            chemistry=chemistry, cliff_ratio=cliff_ratio,
+            chemistry=chemistry, soc_split_ratio=soc_split_ratio,
+            tail_cliff_ratio=tail_cliff_ratio,
         ),
         t0=t0,
+        chemistry=chemistry,
     )
 
 
@@ -459,9 +590,11 @@ def _predict_discharge_theil_sen(
     cleaned, x, y, t0, now, now_days, target_level,
     half_life_days, timespan_hours, n_cleaned,
     chemistry: str | None = None,
-    cliff_ratio: float = 1.0,
+    soc_split_ratio: float = 1.0,
     full_readings: list[dict[str, float]] | None = None,
     cal_soc_lost: float = 0.0,
+    use_tail_slope: bool = False,
+    tail_cliff_ratio: float | None = None,
 ) -> PredictionResult:
     """Theil-Sen fallback path (< 6 points or parametric fit failed)."""
     # Auto-compute half-life from drain characteristics if not specified
@@ -496,7 +629,8 @@ def _predict_discharge_theil_sen(
     if slope > 0.01:
         conf = _classify_confidence(
             r_squared, timespan_hours, n_cleaned,
-            chemistry=chemistry, cliff_ratio=cliff_ratio, readings=_readings,
+            chemistry=chemistry, soc_split_ratio=soc_split_ratio, readings=_readings,
+            tail_cliff_ratio=tail_cliff_ratio,
         )
         return PredictionResult(
             slope_per_day=round(slope, 4),
@@ -511,9 +645,11 @@ def _predict_discharge_theil_sen(
             status=PredictionStatus.CHARGING,
             reliability=compute_reliability(
                 n_cleaned, timespan_hours, r_squared, conf, days_remaining=None,
-                chemistry=chemistry, cliff_ratio=cliff_ratio,
+                chemistry=chemistry, soc_split_ratio=soc_split_ratio,
+                tail_cliff_ratio=tail_cliff_ratio,
             ),
             t0=t0,
+            chemistry=chemistry,
         )
 
     if abs(slope) <= FLAT_SLOPE_THRESHOLD:
@@ -521,7 +657,8 @@ def _predict_discharge_theil_sen(
         flat_slope_per_hour = 0.0 if slope > 0 else slope_per_hour
         conf = _classify_confidence(
             r_squared, timespan_hours, n_cleaned,
-            chemistry=chemistry, cliff_ratio=cliff_ratio, readings=_readings,
+            chemistry=chemistry, soc_split_ratio=soc_split_ratio, readings=_readings,
+            tail_cliff_ratio=tail_cliff_ratio,
         )
         return PredictionResult(
             slope_per_day=flat_slope,
@@ -536,15 +673,18 @@ def _predict_discharge_theil_sen(
             status=PredictionStatus.FLAT,
             reliability=compute_reliability(
                 n_cleaned, timespan_hours, r_squared, conf, days_remaining=None,
-                chemistry=chemistry, cliff_ratio=cliff_ratio,
+                chemistry=chemistry, soc_split_ratio=soc_split_ratio,
+                tail_cliff_ratio=tail_cliff_ratio,
             ),
             t0=t0,
+            chemistry=chemistry,
         )
 
     if r_squared < 0.10:
         conf = _classify_confidence(
             r_squared, timespan_hours, n_cleaned,
-            chemistry=chemistry, cliff_ratio=cliff_ratio, readings=_readings,
+            chemistry=chemistry, soc_split_ratio=soc_split_ratio, readings=_readings,
+            tail_cliff_ratio=tail_cliff_ratio,
         )
         return PredictionResult(
             slope_per_day=None,
@@ -559,9 +699,11 @@ def _predict_discharge_theil_sen(
             status=PredictionStatus.NOISY,
             reliability=compute_reliability(
                 n_cleaned, timespan_hours, r_squared, conf, days_remaining=None,
-                chemistry=chemistry, cliff_ratio=cliff_ratio,
+                chemistry=chemistry, soc_split_ratio=soc_split_ratio,
+                tail_cliff_ratio=tail_cliff_ratio,
             ),
             t0=t0,
+            chemistry=chemistry,
         )
 
     # Predict when level hits target
@@ -571,6 +713,38 @@ def _predict_discharge_theil_sen(
     if days_remaining < 0:
         days_remaining = 0.0
 
+    # Cliff override for primary cells: use tail slope instead of
+    # overall Theil-Sen when entering the cliff zone.
+    if use_tail_slope and _readings:
+        _tail = _readings[-5:]
+        if len(_tail) >= 3:
+            _t0t = _tail[0]["t"]
+            _xt = [(_r["t"] - _t0t) / 86400.0 for _r in _tail]
+            _yt = [_r["v"] for _r in _tail]
+            _n = len(_xt)
+            _sx = sum(_xt)
+            _sy = sum(_yt)
+            _sxx = sum(_xi * _xi for _xi in _xt)
+            _sxy = sum(_xi * _yi for _xi, _yi in zip(_xt, _yt))
+            _d = _n * _sxx - _sx * _sx
+            if abs(_d) > 1e-15:
+                tail_slope = (_n * _sxy - _sx * _sy) / _d
+                if tail_slope < -0.001:
+                    current_val = _readings[-1]["v"]
+                    days_remaining = max(0.0, (target_level - current_val) / tail_slope)
+                    slope = tail_slope
+                    slope_per_hour = round(slope / 24.0, 4)
+
+    # Stuck-plateau cap for primary cells
+    if (
+        chemistry in _STUCK_PLATEAU_CAPS
+        and _readings is not None
+        and _stuck_near_cliff(_readings, threshold_pct=30.0)
+    ):
+        cap = _STUCK_PLATEAU_CAPS[chemistry]
+        if days_remaining > cap:
+            days_remaining = cap
+
     # Calendar aging penalty: reduce remaining days by SoC lost / |slope|
     if cal_soc_lost > 0 and slope < -FLAT_SLOPE_THRESHOLD:
         days_remaining = max(0.0, days_remaining - cal_soc_lost / abs(slope))
@@ -579,7 +753,8 @@ def _predict_discharge_theil_sen(
     estimated_empty_timestamp = now + (days_remaining * 86400.0)
     conf = _classify_confidence(
         r_squared, timespan_hours, n_cleaned,
-        chemistry=chemistry, cliff_ratio=cliff_ratio, readings=_readings,
+        chemistry=chemistry, soc_split_ratio=soc_split_ratio, readings=_readings,
+        tail_cliff_ratio=tail_cliff_ratio,
     )
 
     return PredictionResult(
@@ -596,9 +771,11 @@ def _predict_discharge_theil_sen(
         reliability=compute_reliability(
             n_cleaned, timespan_hours, r_squared, conf,
             days_remaining=days_remaining,
-            chemistry=chemistry, cliff_ratio=cliff_ratio,
+            chemistry=chemistry, soc_split_ratio=soc_split_ratio,
+            tail_cliff_ratio=tail_cliff_ratio,
         ),
         t0=t0,
+        chemistry=chemistry,
     )
 
 
@@ -612,6 +789,7 @@ def predict_discharge_multisession(
     current_level: float,
     target_level: float = 0.0,
     min_sessions: int = 1,
+    chemistry: str | None = None,
 ) -> PredictionResult:
     """Predict discharge for rechargeable devices using multi-session analysis.
 
@@ -624,6 +802,8 @@ def predict_discharge_multisession(
         current_level: Current battery level (%).
         target_level: Target level to predict reaching (default 0).
         min_sessions: Minimum number of discharge sessions required.
+        chemistry: Optional chemistry string (e.g. "NMC", "NiMH") from
+            chemistry_from_battery_type(). Stored on the result for downstream use.
 
     Returns:
         Standard PredictionResult so all downstream consumers work unchanged.
@@ -635,6 +815,7 @@ def predict_discharge_multisession(
         return _no_prediction(
             PredictionStatus.INSUFFICIENT_DATA, total_points,
             session_count=len(sessions),
+            chemistry=chemistry,
         )
 
     # Fit each session: try parametric first, fall back to Theil-Sen slope
@@ -679,6 +860,7 @@ def predict_discharge_multisession(
         return _no_prediction(
             PredictionStatus.FLAT, total_points,
             session_count=len(sessions),
+            chemistry=chemistry,
         )
 
     median_slope = _median(session_slopes)
@@ -734,6 +916,7 @@ def predict_discharge_multisession(
             ),
             session_count=len(sessions),
             t0=now,
+            chemistry=chemistry,
         )
 
     if median_slope >= 0:
@@ -752,6 +935,7 @@ def predict_discharge_multisession(
             reliability=None,
             session_count=len(sessions),
             t0=now,
+            chemistry=chemistry,
         )
 
     # Use median of per-session predicted durations if available,
@@ -789,6 +973,7 @@ def predict_discharge_multisession(
         ),
         session_count=len(sessions),
         t0=now,
+        chemistry=chemistry,
     )
 
 
@@ -1001,30 +1186,32 @@ def _adaptive_half_life(
     return min(max(half_life, 7.0), 180.0)
 
 
-# Primary (non-rechargeable) chemistries — used for idle-day caps
-_PRIMARY_CHEMISTRIES = frozenset({"alkaline", "lithium_primary", "coin_cell"})
+# Curve-fit model candidates per primary chemistry.
+# Alkaline: two-regime (gradual + cliff); exponential can capture the
+# steepening near EOL.  Piecewise finds the breakpoint.
+# Lithium primary / coin cell: flat plateau then abrupt step.  Exponential
+# over-fits mid-life; Weibull is overkill for a single-use cell.
+# Rechargeable / unknown: None → all models (AICc decides).
+_CHEMISTRY_CANDIDATES: dict[str, list[str]] = {
+    "alkaline": ["piecewise_linear_2", "piecewise_linear_3", "exponential"],
+    "lithium_primary": ["piecewise_linear_2", "piecewise_linear_3"],
+    "coin_cell": ["piecewise_linear_2", "piecewise_linear_3"],
+}
 
-# Curve-fit model candidates per chemistry class.
-# Primary cells discharge monotonically and never exhibit the S-curve or
-# plateau-then-cliff behaviour that Weibull captures. Limiting them to
-# piecewise + exponential avoids over-fitting artefacts.
-_PRIMARY_CHEMISTRY_MODELS: list[str] = [
-    "exponential",
-    "piecewise_linear_2",
-    "piecewise_linear_3",
-]
-_DEFAULT_MODELS: list[str] | None = None  # None = all models
+# Primary (non-rechargeable) chemistries — used for idle-day caps
+_PRIMARY_CHEMISTRIES = frozenset(_CHEMISTRY_CANDIDATES.keys())
 
 
 def _candidate_models(chemistry: str | None) -> list[str] | None:
     """Return the curve-fit candidate list appropriate for a chemistry.
 
     Returns None (= all models) for rechargeable / unknown chemistries,
-    or a restricted list for primary cells.
+    or a chemistry-specific restricted list for primary cells where certain
+    model families are known to be inappropriate.
     """
-    if chemistry and chemistry in _PRIMARY_CHEMISTRIES:
-        return _PRIMARY_CHEMISTRY_MODELS
-    return _DEFAULT_MODELS
+    if chemistry is not None and chemistry in _CHEMISTRY_CANDIDATES:
+        return _CHEMISTRY_CANDIDATES[chemistry]
+    return None
 
 # Max idle days for calendar aging penalty.
 # Zigbee/Z-Wave sensors frequently go offline for days; idle_days uses
@@ -1041,9 +1228,10 @@ _C_CAL: dict[str, float] = {
     "NMC":             0.0005,
     "NiMH":            0.001,
     "LCO":             0.0008,
-    "alkaline":        0.0003,
-    "lithium_primary": 0.00005,
-    "coin_cell":       0.00008,
+    "alkaline":        0.00105,
+    "lithium_primary": 0.00052,
+    "coin_cell":       0.00052,
+    "unknown":         0.00105,
 }
 
 
@@ -1065,26 +1253,27 @@ def _calendar_penalty(
     chem = chemistry or "unknown"
     cap = _MAX_IDLE_DAYS_PRIMARY if chem in _PRIMARY_CHEMISTRIES else _MAX_IDLE_DAYS
     capped = min(idle_days, cap)
-    c_cal = _C_CAL.get(chem, _C_CAL.get("NMC", 0.0005))
+    c_cal = _C_CAL.get(chem, _C_CAL["unknown"])
     loss = c_cal * math.sqrt(capped) * 100.0  # convert fraction to %
     return max(0.0, current_soc - loss)
 
 
 # Chemistry-specific reliability multipliers.
-# Primary cells with ultra-stable chemistries (lithium_primary, coin_cell)
-# get a small boost; cells with high self-discharge (NiMH) are penalised.
+# Flat-curve primaries (coin_cell, lithium_primary) are penalised because
+# integer SoC quantisation makes R² an unreliable quality signal.
+# High self-discharge chemistries (NiMH) are also penalised.
 _RELIABILITY_MULTIPLIERS: dict[str, float] = {
     "LFP":             1.0,
     "NMC":             1.0,
     "NiMH":            0.85,
     "LCO":             0.90,
     "alkaline":        1.05,
-    "lithium_primary": 1.10,
-    "coin_cell":       1.10,
+    "lithium_primary": 0.80,
+    "coin_cell":       0.75,
 }
 
 
-def _cliff_ratio(
+def _soc_split_ratio(
     readings: list[dict[str, float]],
     split_pct: float = 40.0,
     min_points: int = 5,
@@ -1143,6 +1332,68 @@ def _stuck_near_cliff(
     return _median(tail) <= threshold_pct
 
 
+# Primary (non-rechargeable) chemistries eligible for cliff detection.
+_CLIFF_CHEMISTRIES = frozenset({"alkaline", "lithium_primary", "coin_cell"})
+
+# Stuck-plateau remaining-days caps per chemistry.
+# Primary cell stuck below 30% is in the pre-cliff zone — historical data
+# shows these die in days to weeks, not months.
+_STUCK_PLATEAU_CAPS: dict[str, float] = {
+    "alkaline": 14.0,
+    "lithium_primary": 21.0,
+    "coin_cell": 21.0,
+}
+
+
+def _tail_cliff_ratio(
+    readings: list[dict[str, float]],
+    tail_n: int = 5,
+) -> float | None:
+    """Ratio of tail slope to overall Theil-Sen slope.
+
+    Quantifies how steep the current discharge rate is relative to the
+    session baseline.  > 2.5 indicates entering cliff zone; > 5.0 deep cliff.
+
+    Returns None if fewer than tail_n + 3 points, or if overall slope is
+    near-zero (can't compute meaningful ratio for flat discharge).
+
+    Uses _theil_sen() for the overall slope. Uses simple OLS for the tail
+    (no outliers expected in the last few readings; Theil-Sen on 5 points
+    has high variance).
+    """
+    if len(readings) < tail_n + 3:
+        return None
+
+    # Overall Theil-Sen slope (%/day)
+    t0 = readings[0]["t"]
+    x_all = [(r["t"] - t0) / 86400.0 for r in readings]
+    y_all = [r["v"] for r in readings]
+    overall_slope, _, _ = _theil_sen(x_all, y_all)
+
+    if abs(overall_slope) < FLAT_SLOPE_THRESHOLD:
+        return None
+
+    # Tail OLS slope (last tail_n readings)
+    tail = readings[-tail_n:]
+    t0_tail = tail[0]["t"]
+    x_tail = [(r["t"] - t0_tail) / 86400.0 for r in tail]
+    y_tail = [r["v"] for r in tail]
+
+    n = len(x_tail)
+    sum_x = sum(x_tail)
+    sum_y = sum(y_tail)
+    sum_xx = sum(xi * xi for xi in x_tail)
+    sum_xy = sum(xi * yi for xi, yi in zip(x_tail, y_tail))
+    denom = n * sum_xx - sum_x * sum_x
+    if abs(denom) < 1e-15:
+        return None
+    tail_slope = (n * sum_xy - sum_x * sum_y) / denom
+
+    if overall_slope == 0:
+        return None
+    return tail_slope / overall_slope
+
+
 def _reject_by_residual(
     readings: list[dict[str, float]],
     x: list[float],
@@ -1193,36 +1444,58 @@ def _classify_confidence(
     timespan_hours: float,
     data_points: int = 10,
     chemistry: str | None = None,
-    cliff_ratio: float = 1.0,
+    soc_split_ratio: float = 1.0,
     readings: list[dict[str, float]] | None = None,
+    tail_cliff_ratio: float | None = None,
 ) -> Confidence:
     """Classify prediction confidence.
 
     Additional chemistry / cliff awareness:
     - coin_cell and lithium_primary are capped at MEDIUM (staircase sensors
       with 5-10% steps make HIGH unreliable).
-    - cliff_ratio > 2.5 forces LOW (rapid drain-rate change below the
+    - coin_cell and lithium_primary get more generous R² thresholds (lowered
+      by 0.05) because integer SoC quantisation artificially deflates R².
+    - soc_split_ratio > 2.5 forces LOW (rapid drain-rate change below the
       split point makes the extrapolation unreliable).
+    - tail_cliff_ratio > 2.5 on primary chemistry forces LOW (cliff zone —
+      slope estimate is unreliable).
     - _stuck_near_cliff forces LOW (sensor stuck at a low plateau; the
       next step is likely to zero).
     """
     timespan_days = timespan_hours / 24.0
 
-    if r_squared > 0.8 and timespan_days >= 7 and data_points >= 10:
+    # Flat-curve chemistries: lower R² thresholds by 0.05 to compensate
+    # for integer SoC quantisation artificially deflating R².
+    flat_curve = chemistry in ("coin_cell", "lithium_primary")
+    r2_high = 0.75 if flat_curve else 0.8
+    r2_med = 0.25 if flat_curve else 0.3
+    r2_low = 0.05 if flat_curve else 0.1
+
+    if r_squared > r2_high and timespan_days >= 7 and data_points >= 10:
         level = Confidence.HIGH
-    elif r_squared > 0.3 and timespan_days >= 3 and data_points >= 5:
+    elif r_squared > r2_med and timespan_days >= 3 and data_points >= 5:
         level = Confidence.MEDIUM
-    elif r_squared > 0.1:
+    elif r_squared > r2_low:
         level = Confidence.LOW
     else:
         return Confidence.INSUFFICIENT_DATA
 
     # Cap coin_cell / lithium_primary at MEDIUM — coarse staircase readings
-    if chemistry in ("coin_cell", "lithium_primary") and level == Confidence.HIGH:
+    if flat_curve and level == Confidence.HIGH:
         level = Confidence.MEDIUM
 
-    # Cliff ratio penalty
-    if cliff_ratio > 2.5 and level != Confidence.LOW:
+    # SoC-split ratio penalty
+    if soc_split_ratio > 2.5 and level != Confidence.LOW:
+        level = Confidence.LOW
+
+    # Cliff penalty: tail_cliff_ratio > 2.5 on primary chemistry forces LOW.
+    # The cliff makes the slope estimate unreliable regardless of R².
+    if (
+        tail_cliff_ratio is not None
+        and tail_cliff_ratio > 2.5
+        and chemistry in _CLIFF_CHEMISTRIES
+        and level != Confidence.LOW
+    ):
         level = Confidence.LOW
 
     # Stuck-near-cliff penalty
@@ -1239,7 +1512,8 @@ def compute_reliability(
     confidence: Confidence,
     days_remaining: float | None = None,
     chemistry: str | None = None,
-    cliff_ratio: float = 1.0,
+    soc_split_ratio: float = 1.0,
+    tail_cliff_ratio: float | None = None,
 ) -> int:
     """Compute a 0-100 reliability score for a prediction."""
     timespan_days = timespan_hours / 24.0
@@ -1282,11 +1556,22 @@ def compute_reliability(
     multiplier = _RELIABILITY_MULTIPLIERS.get(chem, 1.0)
     raw *= multiplier
 
-    # Cliff penalty: high cliff_ratio means the extrapolation below the
+    # SoC-split penalty: high soc_split_ratio means the extrapolation below the
     # split point is unreliable. Scale: ratio 2.5→−10, 5.0→−20.
-    if cliff_ratio > 2.0:
-        cliff_penalty = min(20.0, (cliff_ratio - 2.0) * (20.0 / 3.0))
-        raw -= cliff_penalty
+    if soc_split_ratio > 2.0:
+        split_penalty = min(20.0, (soc_split_ratio - 2.0) * (20.0 / 3.0))
+        raw -= split_penalty
+
+    # Tail-cliff penalty for primary cells: chemistry-specific.
+    # alkaline: −15 at cliff (>2.5), −25 at deep cliff (>5.0)
+    # lithium_primary/coin_cell: −20 at cliff, −30 at deep cliff
+    if tail_cliff_ratio is not None and tail_cliff_ratio > 2.5 and chem in _CLIFF_CHEMISTRIES:
+        if chem == "alkaline":
+            tcr_penalty = 15.0 if tail_cliff_ratio <= 5.0 else 25.0
+        else:
+            # lithium_primary, coin_cell — abrupt cliff, harder to predict
+            tcr_penalty = 20.0 if tail_cliff_ratio <= 5.0 else 30.0
+        raw -= tcr_penalty
 
     return round(max(0, min(100, raw)))
 

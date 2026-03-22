@@ -590,6 +590,21 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             and battery_state.lower() in ("charging",)
         )
 
+        # Resolve battery type early so chemistry is available for predictions.
+        # Manual type from store takes precedence over auto-detection.
+        manual_type = dev.battery_type if dev else None
+        if manual_type:
+            battery_type = manual_type
+            battery_type_source = "manual"
+        else:
+            battery_type, battery_type_source = self.type_resolver.resolve_type(
+                entity_id, battery.device_id
+            )
+
+        # Compute chemistry — override takes precedence over auto-detected.
+        chemistry_override = getattr(dev, "chemistry_override", None) if dev else None
+        chemistry = chemistry_override or chemistry_from_battery_type(battery_type)
+
         # Look up class prior for this device (non-rechargeable only)
         prior_battery_type = dev.battery_type if dev else None
         class_prior = (
@@ -604,6 +619,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 all_readings,
                 current_level=current if current is not None else 0.0,
                 target_level=0.0,
+                chemistry=chemistry,
             )
             # Suppress discharge prediction when the device is idle (not actively
             # discharging). Check the last few readings: if the level is stable or
@@ -632,6 +648,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 min_readings=MIN_READINGS_FOR_PREDICTION,
                 min_timespan_hours=min_span,
                 class_prior=class_prior,
+                chemistry=chemistry,
             )
         # Sanity-check predictions against actual current level.
         # Copy before mutating to avoid corrupting shared state.
@@ -649,16 +666,6 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     estimated_empty_timestamp=None,
                 )
 
-        # Auto-detect battery type if not manually set
-        manual_type = dev.battery_type if dev else None
-        if manual_type:
-            battery_type = manual_type
-            battery_type_source = "manual"
-        else:
-            battery_type, battery_type_source = self.type_resolver.resolve_type(
-                entity_id, battery.device_id
-            )
-
         # Health metrics from completed cycles (rechargeable only)
         soh: float | None = None
         dmg: float | None = None
@@ -673,7 +680,6 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if c is not None
             ]
             cycle_count = len(cycles)
-            chemistry = chemistry_from_battery_type(battery_type)
             soh = soh_from_cycles(cycles)
             dmg = damage_score(cycles, chemistry)
             soh_cycling = (
@@ -782,6 +788,8 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "soh_cycling": soh_cycling,
             "knee_risk": knee,
             "cycle_count": cycle_count,
+            "chemistry": chemistry,
+            "chemistry_override": chemistry_override,
         }
 
     def _get_battery_state(self, entity_id: str, device_id: str | None) -> str | None:
@@ -1279,6 +1287,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "battery_type": entity_data.get("battery_type"),
             "charging_state": entity_data.get("charging_state"),
             "session_count": entity_data.get("session_count"),
+            "chemistry": entity_data.get("chemistry"),
         }
 
         # Cache the result for short-lived reuse

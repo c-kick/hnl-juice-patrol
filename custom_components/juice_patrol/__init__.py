@@ -102,6 +102,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ws_update_settings,
         ws_set_battery_type,
         ws_set_rechargeable,
+        ws_set_chemistry_override,
         ws_confirm_replacement,
         ws_mark_replaced,
         ws_undo_replacement,
@@ -304,6 +305,28 @@ async def ws_set_rechargeable(hass, connection, msg):
     entity_id = msg["entity_id"]
     value = msg.get("is_rechargeable")
     if coordinator.store.set_rechargeable(entity_id, value):
+        await coordinator.async_request_refresh()
+        connection.send_result(msg["id"], {"ok": True})
+    else:
+        connection.send_error(msg["id"], "not_found", f"Entity {entity_id} not in store")
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "juice_patrol/set_chemistry_override",
+        vol.Required("entity_id"): cv.entity_id,
+        vol.Optional("chemistry"): vol.Any(str, None),
+    }
+)
+@websocket_api.async_response
+async def ws_set_chemistry_override(hass, connection, msg):
+    """Set chemistry override for a device. None = use auto-detected."""
+    coordinator = _ws_get_coordinator(hass, connection, msg["id"])
+    if not coordinator:
+        return
+    entity_id = msg["entity_id"]
+    value = msg.get("chemistry")
+    if coordinator.store.set_chemistry_override(entity_id, value):
         await coordinator.async_request_refresh()
         connection.send_result(msg["id"], {"ok": True})
     else:

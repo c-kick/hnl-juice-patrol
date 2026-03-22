@@ -1,11 +1,11 @@
-"""Tests for cliff ratio and stuck-near-cliff detection (Phase 3).
+"""Tests for SoC-split ratio and stuck-near-cliff detection (Phase 3).
 
-Verifies _cliff_ratio computes drain rate ratios correctly and
+Verifies _soc_split_ratio computes drain rate ratios correctly and
 _stuck_near_cliff detects Zigbee cliff signatures.
 """
 
 from custom_components.juice_patrol.engine.predictions import (
-    _cliff_ratio,
+    _soc_split_ratio,
     _stuck_near_cliff,
 )
 
@@ -35,7 +35,7 @@ class TestCliffRatio:
     def test_uniform_discharge_ratio_near_one(self):
         """Linear discharge across the split → ratio ≈ 1.0."""
         readings = _make_discharge(80.0, 10.0, 50, span_days=100)
-        ratio = _cliff_ratio(readings, split_pct=40.0)
+        ratio = _soc_split_ratio(readings, split_pct=40.0)
         assert 0.8 < ratio < 1.3
 
     def test_cliff_discharge_ratio_above_one(self):
@@ -51,19 +51,19 @@ class TestCliffRatio:
                 "t": t_start + frac * 10 * 86400,
                 "v": 39.0 + (5.0 - 39.0) * frac,
             })
-        ratio = _cliff_ratio(above + below, split_pct=40.0)
+        ratio = _soc_split_ratio(above + below, split_pct=40.0)
         assert ratio > 2.0
 
     def test_insufficient_above_returns_one(self):
         """Not enough points above split → default 1.0."""
         readings = _make_discharge(35.0, 5.0, 20, span_days=30)
-        ratio = _cliff_ratio(readings, split_pct=40.0, min_points=5)
+        ratio = _soc_split_ratio(readings, split_pct=40.0, min_points=5)
         assert ratio == 1.0
 
     def test_insufficient_below_returns_one(self):
         """Not enough points below split → default 1.0."""
         readings = _make_discharge(90.0, 50.0, 20, span_days=30)
-        ratio = _cliff_ratio(readings, split_pct=40.0, min_points=5)
+        ratio = _soc_split_ratio(readings, split_pct=40.0, min_points=5)
         assert ratio == 1.0
 
     def test_flat_above_returns_one(self):
@@ -71,14 +71,14 @@ class TestCliffRatio:
         t0 = 1_700_000_000.0
         above = [{"t": t0 + i * 86400, "v": 60.0} for i in range(10)]
         below = [{"t": t0 + (10 + i) * 86400, "v": 39.0 - i * 3.0} for i in range(10)]
-        ratio = _cliff_ratio(above + below, split_pct=40.0, min_points=5)
+        ratio = _soc_split_ratio(above + below, split_pct=40.0, min_points=5)
         assert ratio == 1.0
 
     def test_custom_split_point(self):
         """Custom split_pct changes the partition."""
         readings = _make_discharge(90.0, 5.0, 40, span_days=100)
-        ratio_low = _cliff_ratio(readings, split_pct=20.0, min_points=3)
-        ratio_high = _cliff_ratio(readings, split_pct=60.0, min_points=3)
+        ratio_low = _soc_split_ratio(readings, split_pct=20.0, min_points=3)
+        ratio_high = _soc_split_ratio(readings, split_pct=60.0, min_points=3)
         # With linear discharge, both should be near 1.0
         assert 0.5 < ratio_low < 2.0
         assert 0.5 < ratio_high < 2.0
