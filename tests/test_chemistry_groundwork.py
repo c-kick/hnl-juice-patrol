@@ -361,3 +361,94 @@ class TestChemistryFromResolvedType:
         chemistry = chemistry_override or chemistry_from_battery_type(battery_type)
 
         assert chemistry == "lithium_primary"
+
+
+# ---------------------------------------------------------------------------
+# 7. _candidate_models — chemistry-gated model selection
+# ---------------------------------------------------------------------------
+
+from custom_components.juice_patrol.engine.predictions import _candidate_models
+
+
+class TestCandidateModels:
+    """Test chemistry-specific model candidate lists."""
+
+    def test_alkaline_starts_with_piecewise(self):
+        models = _candidate_models("alkaline")
+        assert models is not None
+        assert models[0] == "piecewise_linear_2"
+
+    def test_alkaline_includes_exponential(self):
+        models = _candidate_models("alkaline")
+        assert "exponential" in models
+
+    def test_alkaline_excludes_weibull(self):
+        models = _candidate_models("alkaline")
+        assert "weibull" not in models
+
+    def test_coin_cell_excludes_weibull(self):
+        models = _candidate_models("coin_cell")
+        assert models is not None
+        assert "weibull" not in models
+
+    def test_coin_cell_excludes_exponential(self):
+        """Coin cell plateau is too flat for exponential decay."""
+        models = _candidate_models("coin_cell")
+        assert "exponential" not in models
+
+    def test_lithium_primary_excludes_exponential(self):
+        """Lithium primary plateau is too flat for exponential decay."""
+        models = _candidate_models("lithium_primary")
+        assert models is not None
+        assert "exponential" not in models
+
+    def test_lithium_primary_has_piecewise(self):
+        models = _candidate_models("lithium_primary")
+        assert "piecewise_linear_2" in models
+        assert "piecewise_linear_3" in models
+
+    def test_unknown_returns_none(self):
+        """Unknown chemistry → None (all models tried)."""
+        assert _candidate_models("unknown") is None
+        assert _candidate_models(None) is None
+
+    def test_rechargeable_returns_none(self):
+        """Rechargeable chemistries → None (all models tried)."""
+        assert _candidate_models("NMC") is None
+        assert _candidate_models("LFP") is None
+        assert _candidate_models("NiMH") is None
+        assert _candidate_models("LCO") is None
+
+    def test_unrecognised_falls_back_to_all(self):
+        assert _candidate_models("unobtanium") is None
+
+
+class TestAlkalineFlatThenCliff:
+    """Regression: flat-then-cliff alkaline should select piecewise model."""
+
+    def test_piecewise_selected_for_alkaline_cliff(self):
+        """90 days flat at 95%, then 10 days dropping 95→20%.
+
+        Piecewise should win — it can model the breakpoint.
+        The prediction should extrapolate from the cliff segment,
+        not the overall average.
+        """
+        now = time.time()
+        readings = []
+        # Flat phase: 90 days at ~95% (daily readings)
+        for i in range(90):
+            readings.append({"t": now - (100 - i) * 86400, "v": 95.0})
+        # Cliff phase: 10 days, 95 → 20
+        for i in range(11):
+            t = now - (10 - i) * 86400
+            v = 95.0 - (75.0 * i / 10)
+            readings.append({"t": t, "v": v})
+
+        result = predict_discharge(readings, target_level=0.0, chemistry="alkaline")
+
+        assert result.status.value == "normal"
+        assert result.estimated_days_remaining is not None
+        # With cliff slope of ~7.5%/day, reaching 20→0 takes ~2.7 days.
+        # Linear overall slope would predict ~50+ days.  Piecewise should
+        # extrapolate from the cliff, giving a much shorter estimate.
+        assert result.estimated_days_remaining < 20

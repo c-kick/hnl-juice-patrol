@@ -1020,30 +1020,32 @@ def _adaptive_half_life(
     return min(max(half_life, 7.0), 180.0)
 
 
-# Primary (non-rechargeable) chemistries — used for idle-day caps
-_PRIMARY_CHEMISTRIES = frozenset({"alkaline", "lithium_primary", "coin_cell"})
+# Curve-fit model candidates per primary chemistry.
+# Alkaline: two-regime (gradual + cliff); exponential can capture the
+# steepening near EOL.  Piecewise finds the breakpoint.
+# Lithium primary / coin cell: flat plateau then abrupt step.  Exponential
+# over-fits mid-life; Weibull is overkill for a single-use cell.
+# Rechargeable / unknown: None → all models (AICc decides).
+_CHEMISTRY_CANDIDATES: dict[str, list[str]] = {
+    "alkaline": ["piecewise_linear_2", "piecewise_linear_3", "exponential"],
+    "lithium_primary": ["piecewise_linear_2", "piecewise_linear_3"],
+    "coin_cell": ["piecewise_linear_2", "piecewise_linear_3"],
+}
 
-# Curve-fit model candidates per chemistry class.
-# Primary cells discharge monotonically and never exhibit the S-curve or
-# plateau-then-cliff behaviour that Weibull captures. Limiting them to
-# piecewise + exponential avoids over-fitting artefacts.
-_PRIMARY_CHEMISTRY_MODELS: list[str] = [
-    "exponential",
-    "piecewise_linear_2",
-    "piecewise_linear_3",
-]
-_DEFAULT_MODELS: list[str] | None = None  # None = all models
+# Primary (non-rechargeable) chemistries — used for idle-day caps
+_PRIMARY_CHEMISTRIES = frozenset(_CHEMISTRY_CANDIDATES.keys())
 
 
 def _candidate_models(chemistry: str | None) -> list[str] | None:
     """Return the curve-fit candidate list appropriate for a chemistry.
 
     Returns None (= all models) for rechargeable / unknown chemistries,
-    or a restricted list for primary cells.
+    or a chemistry-specific restricted list for primary cells where certain
+    model families are known to be inappropriate.
     """
-    if chemistry and chemistry in _PRIMARY_CHEMISTRIES:
-        return _PRIMARY_CHEMISTRY_MODELS
-    return _DEFAULT_MODELS
+    if chemistry is not None and chemistry in _CHEMISTRY_CANDIDATES:
+        return _CHEMISTRY_CANDIDATES[chemistry]
+    return None
 
 # Max idle days for calendar aging penalty.
 # Zigbee/Z-Wave sensors frequently go offline for days; idle_days uses
