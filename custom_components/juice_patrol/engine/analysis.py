@@ -6,6 +6,7 @@ Handles reading stability, abnormal discharge detection, and rechargeable detect
 from __future__ import annotations
 
 import math
+import re
 import time
 from dataclasses import dataclass
 from enum import StrEnum
@@ -123,7 +124,6 @@ def chemistry_from_battery_type(battery_type: str | None) -> str:
     # CR prefix catch-all: matches "cr2", "cr-v3", "cr 1/3n" etc. but not
     # words that merely contain "cr" (e.g. "micro", "secret").
     # Requires "cr" at start of string or after a space/separator.
-    import re
     if re.search(r"(?:^|[\s\-×])cr[\d\-/\s]", normalised):
         return "lithium_primary"
     return "unknown"

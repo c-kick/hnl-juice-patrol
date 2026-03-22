@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as _dc_replace
 from enum import StrEnum
 
 from ..const import FLAT_SLOPE_THRESHOLD
@@ -232,7 +232,7 @@ def predict_discharge(
     use_tail_slope = (
         chemistry in _CLIFF_CHEMISTRIES
         and tcr is not None
-        and tcr > 2.5
+        and tcr > _CLIFF_RATIO_THRESHOLD
     )
 
     # SDT compress for fitting (preserves slope transitions, removes plateaus)
@@ -261,7 +261,6 @@ def predict_discharge(
                 chemistry=chemistry,
             )
             # Reclassify confidence using the full dataset context.
-            from dataclasses import replace as _replace
             full_conf = _classify_confidence(
                 result.r_squared or 0.0,
                 timespan_hours,
@@ -272,7 +271,7 @@ def predict_discharge(
                 tail_cliff_ratio=tcr,
             )
             if full_conf != result.confidence:
-                result = _replace(
+                result = _dc_replace(
                     result,
                     confidence=full_conf,
                     reliability=compute_reliability(
@@ -341,7 +340,6 @@ def predict_discharge(
     # and R² (they produce the prediction curve on the chart) but override
     # days remaining and timestamp to reflect reality.
     if dead_at_ts is not None:
-        from dataclasses import replace as _dc_replace
         result = _dc_replace(
             result,
             estimated_empty_timestamp=round(dead_at_ts, 0),
@@ -1333,7 +1331,13 @@ def _stuck_near_cliff(
 
 
 # Primary (non-rechargeable) chemistries eligible for cliff detection.
-_CLIFF_CHEMISTRIES = frozenset({"alkaline", "lithium_primary", "coin_cell"})
+# Same set as _PRIMARY_CHEMISTRIES — defined as alias for clarity.
+_CLIFF_CHEMISTRIES = _PRIMARY_CHEMISTRIES
+
+# Tail-cliff ratio thresholds.  > _CLIFF_RATIO_THRESHOLD = entering cliff zone,
+# > _DEEP_CLIFF_RATIO = deep cliff (days remaining, not weeks).
+_CLIFF_RATIO_THRESHOLD = 2.5
+_DEEP_CLIFF_RATIO = 5.0
 
 # Stuck-plateau remaining-days caps per chemistry.
 # Primary cell stuck below 30% is in the pre-cliff zone — historical data
@@ -1488,11 +1492,11 @@ def _classify_confidence(
     if soc_split_ratio > 2.5 and level != Confidence.LOW:
         level = Confidence.LOW
 
-    # Cliff penalty: tail_cliff_ratio > 2.5 on primary chemistry forces LOW.
+    # Cliff penalty: tail in cliff zone on primary chemistry forces LOW.
     # The cliff makes the slope estimate unreliable regardless of R².
     if (
         tail_cliff_ratio is not None
-        and tail_cliff_ratio > 2.5
+        and tail_cliff_ratio > _CLIFF_RATIO_THRESHOLD
         and chemistry in _CLIFF_CHEMISTRIES
         and level != Confidence.LOW
     ):
@@ -1565,12 +1569,12 @@ def compute_reliability(
     # Tail-cliff penalty for primary cells: chemistry-specific.
     # alkaline: −15 at cliff (>2.5), −25 at deep cliff (>5.0)
     # lithium_primary/coin_cell: −20 at cliff, −30 at deep cliff
-    if tail_cliff_ratio is not None and tail_cliff_ratio > 2.5 and chem in _CLIFF_CHEMISTRIES:
+    if tail_cliff_ratio is not None and tail_cliff_ratio > _CLIFF_RATIO_THRESHOLD and chem in _CLIFF_CHEMISTRIES:
         if chem == "alkaline":
-            tcr_penalty = 15.0 if tail_cliff_ratio <= 5.0 else 25.0
+            tcr_penalty = 15.0 if tail_cliff_ratio <= _DEEP_CLIFF_RATIO else 25.0
         else:
             # lithium_primary, coin_cell — abrupt cliff, harder to predict
-            tcr_penalty = 20.0 if tail_cliff_ratio <= 5.0 else 30.0
+            tcr_penalty = 20.0 if tail_cliff_ratio <= _DEEP_CLIFF_RATIO else 30.0
         raw -= tcr_penalty
 
     return round(max(0, min(100, raw)))
