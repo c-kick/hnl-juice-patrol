@@ -235,7 +235,6 @@ class JuicePatrolSoH(JuicePatrolEntity, SensorEntity):
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_suggested_display_precision = 1
-    _attr_icon = "mdi:heart-pulse"
 
     def __init__(
         self,
@@ -263,7 +262,6 @@ class JuicePatrolSoHCycling(JuicePatrolEntity, SensorEntity):
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_suggested_display_precision = 1
-    _attr_icon = "mdi:battery-heart"
 
     def __init__(
         self,
@@ -291,7 +289,6 @@ class JuicePatrolKneeRisk(JuicePatrolEntity, SensorEntity):
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_suggested_display_precision = 0
-    _attr_icon = "mdi:chart-bell-curve"
 
     def __init__(
         self,

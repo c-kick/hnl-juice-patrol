@@ -10,6 +10,15 @@
       "days_remaining": {
         "default": "mdi:calendar-clock"
       },
+      "soh": {
+        "default": "mdi:heart-pulse"
+      },
+      "soh_cycling": {
+        "default": "mdi:battery-heart"
+      },
+      "knee_risk": {
+        "default": "mdi:chart-bell-curve"
+      },
       "lowest_battery": {
         "default": "mdi:battery-alert"
       }
