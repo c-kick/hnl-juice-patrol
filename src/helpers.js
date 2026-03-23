@@ -235,7 +235,13 @@ export function confidenceTooltip(pred, chartData) {
     const hi = Math.max(...tail);
     const med = tail.slice().sort((a, b) => a - b)[2];
     if (hi - lo <= 1.0 && med <= 30) {
-      factors.push(`battery stuck at ${Math.round(med)}% \u2014 readings have flatlined near end-of-life`);
+      const daysRem = pred.estimated_days_remaining;
+      if (daysRem != null && daysRem < 1.0) {
+        // Battery is confirmed dead — stuck-near-cliff is expected, not a penalty
+        factors.push(`battery flatlined at ${Math.round(med)}% \u2014 confirmed depleted`);
+      } else {
+        factors.push(`battery stuck at ${Math.round(med)}% \u2014 readings have flatlined near end-of-life`);
+      }
     }
   }
 

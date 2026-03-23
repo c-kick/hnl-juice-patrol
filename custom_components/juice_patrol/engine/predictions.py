@@ -534,7 +534,7 @@ def _build_result_from_curve(
         conf = _classify_confidence(
             r_squared, timespan_hours, n_cleaned,
             chemistry=chemistry, soc_split_ratio=soc_split_ratio, readings=full_readings,
-            tail_cliff_ratio=tail_cliff_ratio,
+            tail_cliff_ratio=tail_cliff_ratio, days_remaining=days_remaining_val,
         )
         return PredictionResult(
             slope_per_day=round(slope, 4),
@@ -752,7 +752,7 @@ def _predict_discharge_theil_sen(
     conf = _classify_confidence(
         r_squared, timespan_hours, n_cleaned,
         chemistry=chemistry, soc_split_ratio=soc_split_ratio, readings=_readings,
-        tail_cliff_ratio=tail_cliff_ratio,
+        tail_cliff_ratio=tail_cliff_ratio, days_remaining=days_remaining,
     )
 
     return PredictionResult(
@@ -1451,6 +1451,7 @@ def _classify_confidence(
     soc_split_ratio: float = 1.0,
     readings: list[dict[str, float]] | None = None,
     tail_cliff_ratio: float | None = None,
+    days_remaining: float | None = None,
 ) -> Confidence:
     """Classify prediction confidence.
 
@@ -1464,7 +1465,8 @@ def _classify_confidence(
     - tail_cliff_ratio > 2.5 on primary chemistry forces LOW (cliff zone —
       slope estimate is unreliable).
     - _stuck_near_cliff forces LOW (sensor stuck at a low plateau; the
-      next step is likely to zero).
+      next step is likely to zero) — UNLESS days_remaining < 1.0, meaning
+      the battery is already confirmed dead and the prediction agrees.
     """
     timespan_days = timespan_hours / 24.0
 
@@ -1502,8 +1504,10 @@ def _classify_confidence(
     ):
         level = Confidence.LOW
 
-    # Stuck-near-cliff penalty
-    if readings and _stuck_near_cliff(readings):
+    # Stuck-near-cliff penalty — skip when days_remaining < 1.0 because
+    # the battery is already dead and the prediction confirms it.
+    already_dead = days_remaining is not None and days_remaining < 1.0
+    if readings and _stuck_near_cliff(readings) and not already_dead:
         level = Confidence.LOW
 
     return level

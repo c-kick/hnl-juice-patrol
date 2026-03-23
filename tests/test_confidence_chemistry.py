@@ -92,6 +92,28 @@ class TestClassifyConfidence:
         )
         assert result == Confidence.LOW
 
+    def test_stuck_near_cliff_skipped_when_already_dead(self):
+        """Stuck-near-cliff does NOT force LOW when days_remaining < 1.0.
+
+        A flatlined battery with ~0 days remaining is confirmed dead —
+        the prediction is correct and confident, not uncertain.
+        """
+        readings = [{"t": float(i), "v": 25.0} for i in range(10)]
+        result = _classify_confidence(
+            r_squared=0.95, timespan_hours=240, data_points=20,
+            readings=readings, days_remaining=0.0,
+        )
+        assert result == Confidence.HIGH
+
+    def test_stuck_near_cliff_still_low_with_days_remaining(self):
+        """Stuck-near-cliff still forces LOW when days_remaining >= 1.0."""
+        readings = [{"t": float(i), "v": 25.0} for i in range(10)]
+        result = _classify_confidence(
+            r_squared=0.95, timespan_hours=240, data_points=20,
+            readings=readings, days_remaining=5.0,
+        )
+        assert result == Confidence.LOW
+
     def test_normal_readings_no_stuck_penalty(self):
         """Normal readings don't trigger stuck-near-cliff penalty."""
         readings = [{"t": float(i), "v": 50.0 - i * 2} for i in range(10)]
