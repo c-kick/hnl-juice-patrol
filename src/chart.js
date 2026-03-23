@@ -580,7 +580,7 @@ export async function initChart(panel, chartData) {
       {
         type: "inside",
         xAxisIndex: 0,
-        filterMode: "none",
+        filterMode: "weakFilter",
         startValue: tMin,
         endValue: tMax,
       },

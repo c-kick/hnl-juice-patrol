@@ -10,6 +10,13 @@ export function formatLevel(level) {
   return d !== null ? d + "%" : "\u2014";
 }
 
+export function formatDaysRemaining(dev) {
+  const d = dev.daysRemaining;
+  if (d == null) return "\u2014";
+  if (d <= 1) return Math.round(d * 24) + "h";
+  return (Math.round(d * 10) / 10).toString();
+}
+
 export function displayLevel(level) {
   if (level === null) return null;
   return Math.ceil(level);
@@ -181,6 +188,11 @@ export function confidenceTooltip(pred, chartData) {
   const conf = pred.confidence;
   const r2 = pred.r_squared;
   const points = pred.data_points_used;
+  const chemistry = chartData?.chemistry;
+
+  if (conf === "history-based") {
+    return "Estimated from previous charging cycles. The time-to-full estimate will become more accurate as more charging data is collected during this session.";
+  }
 
   // Total history timespan from chart readings
   const readings = chartData?.readings;
@@ -203,7 +215,7 @@ export function confidenceTooltip(pred, chartData) {
     return parts.join(". ");
   }
 
-  // Explain what's limiting confidence
+  // Explain what's limiting confidence — replicate engine downgrade checks
   const factors = [];
   if (r2 != null && r2 <= 0.8) {
     factors.push(`trend fit is ${r2 <= 0.3 ? "weak" : "moderate"} (R\u00b2 ${r2.toFixed(2)})`);
@@ -215,8 +227,26 @@ export function confidenceTooltip(pred, chartData) {
     factors.push(`only ${points} readings (need 10+)`);
   }
 
+  // Stuck-near-cliff: last readings clustered at a low level (Zigbee cliff signature)
+  if (readings?.length >= 5) {
+    const tail = readings.slice(-5).map(r => r.v);
+    const lo = Math.min(...tail);
+    const hi = Math.max(...tail);
+    const med = tail.slice().sort((a, b) => a - b)[2];
+    if (hi - lo <= 1.0 && med <= 30) {
+      factors.push(`battery stuck at ${Math.round(med)}% \u2014 readings have flatlined near end-of-life`);
+    }
+  }
+
+  // Flat-curve chemistry cap: coin_cell/lithium_primary capped at medium
+  const flatCurve = chemistry === "coin_cell" || chemistry === "lithium_primary";
+  if (flatCurve && conf === "medium" && r2 != null && r2 > 0.75
+    && regSpanDays != null && regSpanDays >= 7 && points != null && points >= 10) {
+    factors.push(`flat-curve battery chemistry (${chemistry === "coin_cell" ? "coin cell" : "lithium primary"}) caps confidence at medium due to coarse SoC steps`);
+  }
+
   const label = conf === "medium" ? "Medium" : conf === "low" ? "Low" : "Insufficient";
-  const reason = factors.length ? `: ${factors.join(", ")}` : "";
+  const reason = factors.length ? `: ${factors.join(". ")}` : "";
 
   if (isNarrowed) {
     return `${label} confidence${reason}. A rate change was detected \u2014 prediction uses the recent ${_fmtDays(regSpanDays)} trend from ${_fmtDays(totalSpanDays)} of history.`;
@@ -225,7 +255,12 @@ export function confidenceTooltip(pred, chartData) {
   if (conf === "insufficient_data") {
     return "Insufficient data: not enough readings or trend too weak to make a prediction";
   }
-  return `${label} confidence${reason}`;
+
+  if (factors.length) {
+    return `${label} confidence: ${factors.join(". ")}.`;
+  }
+
+  return `${label} confidence`;
 }
 
 function _fmtDays(d) {

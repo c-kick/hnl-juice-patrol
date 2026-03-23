@@ -316,10 +316,8 @@ class JuicePatrolPanel extends LitElement {
     // the battery dies in 2 days, not when it has 2 years left.
     if (this._activeView === "detail" && this._detailEntity && !this._chartLoading && this._chartData) {
       const dev = this._getDevice(this._detailEntity);
-      // Skip stale-detection for offline devices: the entity sensor suppresses
-      // its state when stale (returns "unknown"), but the chart WS data still
-      // carries the last prediction timestamp.  Comparing null (entity) against
-      // non-null (chart) creates an infinite stale → refresh → stale loop.
+      // Skip for stale devices: their prediction goes to null ("unknown"),
+      // which isn't a meaningful chart update worth prompting the user about.
       if (dev && !dev.isStale) {
         const newPredTs = dev.predictedEmpty ? new Date(dev.predictedEmpty).getTime() : null;
         const oldPredTs = this._chartLastPredictedEmpty;
@@ -895,11 +893,11 @@ class JuicePatrolPanel extends LitElement {
         entity_id: entityId,
       });
       this._chartLastLevel = data?.level ?? null;
-      const predTs = data?.prediction?.estimated_empty_timestamp;
-      // Cap to match sensor suppression: >10yr predictions are treated as null
-      const predMs = predTs ? predTs * 1000 : null;
+      // Snapshot the entity's current prediction — this is the same source
+      // that _processHassUpdate compares against, so they can never diverge.
+      const dev = this._getDevice(entityId);
       this._chartLastPredictedEmpty =
-        predMs && (predMs - Date.now()) < 3650 * 86400 * 1000 ? predMs : null;
+        dev?.predictedEmpty ? new Date(dev.predictedEmpty).getTime() : null;
       this._chartData = data;
       this._chartStale = false;
     } catch (e) {
@@ -1105,6 +1103,9 @@ class JuicePatrolPanel extends LitElement {
 
   /** Toolbar icons shared between both layout variants. */
   _renderToolbarIcons() {
+    if (this._activeView === "detail") {
+      return this._renderDetailToolbarIcons();
+    }
     return html`
       <div slot="toolbar-icon" style="display:flex">
         <ha-icon-button
@@ -1116,6 +1117,52 @@ class JuicePatrolPanel extends LitElement {
         >
           <ha-icon icon="mdi:refresh"></ha-icon>
         </ha-icon-button>
+      </div>
+    `;
+  }
+
+  _renderDetailToolbarIcons() {
+    const entityId = this._detailEntity;
+    const dev = this._getDevice(entityId);
+    return html`
+      <div slot="toolbar-icon" style="display:flex">
+        <ha-dropdown
+          @wa-select=${(e) => {
+            const action = e.detail?.item?.value;
+            if (!action || !entityId) return;
+            if (action === "replace") {
+              this._markReplaced(entityId);
+            } else if (action === "recalculate") {
+              this._recalculate(entityId);
+              setTimeout(() => this._loadChartData(entityId), 500);
+            } else if (action === "type") {
+              this._setBatteryType(entityId, dev?.batteryType);
+            } else if (action === "ignore") {
+              this._ignoreDevice(entityId);
+            }
+          }}
+        >
+          <ha-icon-button slot="trigger">
+            <ha-icon icon="mdi:dots-vertical"></ha-icon>
+          </ha-icon-button>
+          <ha-dropdown-item value="replace">
+            <ha-icon slot="icon" icon="mdi:battery-sync"></ha-icon>
+            Mark as replaced
+          </ha-dropdown-item>
+          <ha-dropdown-item value="recalculate">
+            <ha-icon slot="icon" icon="mdi:calculator-variant"></ha-icon>
+            Recalculate
+          </ha-dropdown-item>
+          <ha-dropdown-item value="type">
+            <ha-icon slot="icon" icon="mdi:battery-heart-variant"></ha-icon>
+            Set battery type
+          </ha-dropdown-item>
+          <wa-divider></wa-divider>
+          <ha-dropdown-item value="ignore">
+            <ha-icon slot="icon" icon="mdi:eye-off"></ha-icon>
+            Ignore device
+          </ha-dropdown-item>
+        </ha-dropdown>
       </div>
     `;
   }
