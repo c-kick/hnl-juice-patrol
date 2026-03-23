@@ -10,7 +10,7 @@
 // and by inline style="" strings in templates.
 
 export const COLOR_PRIMARY = { var: "--primary-color", fallback: "#03a9f4" };
-export const COLOR_INFO = { var: "--info-color", fallback: "#039be5" };
+export const COLOR_RECHARGEABLE = { var: "--info-color", fallback: "#039be5" };
 export const COLOR_SUCCESS = { var: "--success-color", fallback: "#43a047" };
 export const COLOR_WARNING = { var: "--warning-color", fallback: "#ffa726" };
 export const COLOR_ERROR = { var: "--error-color", fallback: "#db4437" };
@@ -25,7 +25,7 @@ export const COLOR_DIVIDER = { var: "--divider-color", fallback: "rgba(0,0,0,0.1
 // For use directly in template style="" strings.
 
 export const CSS_PRIMARY = `var(${COLOR_PRIMARY.var}, ${COLOR_PRIMARY.fallback})`;
-export const CSS_INFO = `var(${COLOR_INFO.var}, ${COLOR_INFO.fallback})`;
+export const CSS_RECHARGEABLE = `var(${COLOR_RECHARGEABLE.var}, ${COLOR_RECHARGEABLE.fallback})`;
 export const CSS_SUCCESS = `var(${COLOR_SUCCESS.var}, ${COLOR_SUCCESS.fallback})`;
 export const CSS_WARNING = `var(${COLOR_WARNING.var}, ${COLOR_WARNING.fallback})`;
 export const CSS_ERROR = `var(${COLOR_ERROR.var}, ${COLOR_ERROR.fallback})`;

@@ -39,7 +39,7 @@ export const panelStyles = css`
   .hero-bar-row { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
   .hero-bar {
     flex: 1; height: 8px;
-    background: color-mix(in srgb, var(--secondary-text-color) 18%, transparent);
+    background: var(--secondary-background-color);
     border-radius: 4px; overflow: hidden;
   }
   .hero-bar-fill { height: 100%; border-radius: 4px; }
@@ -82,11 +82,6 @@ export const panelStyles = css`
   .chart-card-title { font-size: 14px; font-weight: 500; }
 
   /* Prediction details grid (inside expansion panel) */
-  .pred-detail-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
-    gap: 14px; padding: 8px 8px 16px;
-  }
   /* Replacement history table inside expansion panel */
   .expansion-content {
     padding: 8px 8px 16px;
@@ -175,6 +170,7 @@ export const panelStyles = css`
   .confidence-dot.high { background: var(--success-color); }
   .confidence-dot.medium { background: var(--warning-color); }
   .confidence-dot.low { background: var(--error-color); }
+  .confidence-dot.insufficient_data { background: var(--disabled-text-color, #999); }
   .confidence-dot.history-based { background: var(--disabled-text-color, #999); }
   .empty-state {
     padding: 40px;
@@ -532,17 +528,6 @@ export const panelStyles = css`
     border-radius: 8px;
     font-size: 13px;
     color: var(--secondary-text-color);
-  }
-  .detail-meta-label {
-    font-size: 12px;
-    color: var(--secondary-text-color);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    margin-bottom: 4px;
-  }
-  .detail-meta-value {
-    font-size: 15px;
-    font-weight: 500;
   }
   .detail-reason {
     display: flex;

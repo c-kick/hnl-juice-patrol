@@ -101,9 +101,9 @@ export function formatRate(dev) {
   if (isFastDischarge(dev)) {
     return dev.dischargeRateHour !== null ? dev.dischargeRateHour + "%/h" : "\u2014";
   }
-  if (dev.dischargeRate === null) return "\u2014";
+  if (dev.dischargeRate === null || dev.dischargeRate === 0) return "\u2014";
   const r = dev.dischargeRate;
-  if (r < 0.01) return r.toFixed(4) + "%/d";
+  if (r < 0.01) return r.toFixed(3) + "%/d";
   if (r < 1) return r.toFixed(2) + "%/d";
   return r.toFixed(1) + "%/d";
 }

@@ -2,9 +2,9 @@ import { html, nothing } from "lit";
 import { getLevelColor, formatRate, getDeviceSubText, displayLevel } from "../helpers.js";
 import { resolveColor } from "../chart.js";
 import {
-  COLOR_PRIMARY, COLOR_INFO, COLOR_SUCCESS, COLOR_WARNING, COLOR_ERROR,
+  COLOR_PRIMARY, COLOR_RECHARGEABLE, COLOR_SUCCESS, COLOR_WARNING, COLOR_ERROR,
   COLOR_DISABLED, COLOR_SECONDARY_TEXT, COLOR_PRIMARY_TEXT, COLOR_CARD_BG,
-  CSS_SUCCESS, CSS_WARNING, CSS_ERROR, CSS_INFO, CSS_PRIMARY,
+  CSS_SUCCESS, CSS_WARNING, CSS_ERROR, CSS_RECHARGEABLE, CSS_PRIMARY,
 } from "../colors.js";
 
 // ── Pure computation (testable, no DOM) ──
@@ -375,7 +375,7 @@ function _buildFleetSeries(panel) {
       opacity: parseFloat(b.mix) / 100,
       levelMin: b.min, levelMax: b.max,
     })),
-    { name: "Rechargeable", value: fleet.rechargeable, color: rc(COLOR_INFO.var, COLOR_INFO.fallback), opacity: 0.55, filter: "rechargeable" },
+    { name: "Rechargeable", value: fleet.rechargeable, color: rc(COLOR_RECHARGEABLE.var, COLOR_RECHARGEABLE.fallback), opacity: 0.55, filter: "rechargeable" },
     { name: "Stale", value: fleet.stale, color: rc(COLOR_DISABLED.var, COLOR_DISABLED.fallback), opacity: 0.5, filter: "stale" },
     { name: "Unavailable", value: fleet.unavailable, color: rc(COLOR_DISABLED.var, COLOR_DISABLED.fallback), opacity: 0.3, filter: "unavailable" },
   ];
@@ -421,7 +421,7 @@ function _buildTypeSeries(panel, typeData, xMax) {
   const categories = LEVEL_BUCKETS.map(b => {
     const count = typeData.buckets[b.key];
     const color = typeData.isRechargeable
-      ? rc(COLOR_INFO.var, COLOR_INFO.fallback)
+      ? rc(COLOR_RECHARGEABLE.var, COLOR_RECHARGEABLE.fallback)
       : rc(b.colorVar, COLOR_DISABLED.fallback);
     const opacity = typeData.isRechargeable
       ? 0.25 + (b.min / 100) * 0.35
@@ -683,7 +683,7 @@ function renderHealthByType(types) {
         <div class="type-health-list">
           ${types.map(t => html`
             <div class="type-health-row">
-              <span class="th-type" style="color:${t.isRechargeable ? CSS_INFO : CSS_PRIMARY}">${t.type}</span>
+              <span class="th-type" style="color:${t.isRechargeable ? CSS_RECHARGEABLE : CSS_PRIMARY}">${t.type}</span>
               <div id="jp-type-chart-${_slugify(t.type)}" class="th-chart-container"></div>
               <span class="th-count">${t.devices.length}</span>
             </div>

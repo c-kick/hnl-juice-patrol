@@ -275,19 +275,19 @@ function renderPredictionDetails(panel, dev) {
           <span style="flex:1;font-weight:500">Prediction Details</span>
           <span class="jp-badge ${badgeClass}">${badgeText}</span>
         </div>
-        <div class="pred-detail-grid">
+        <div class="hero-stats">
           ${confidence ? html`
-            <div title="${confidenceTooltip(chargePred || pred, cd)}">
-              <div class="detail-meta-label">Confidence</div>
-              <div class="detail-meta-value">
+            <div class="hero-stat" title="${confidenceTooltip(chargePred || pred, cd)}">
+              <div class="hero-stat-label">Confidence</div>
+              <div class="hero-stat-val">
                 <span class="confidence-dot ${confidence}"></span>${CONFIDENCE_LABELS[confidence]?.replace(" confidence", "") || confidence}
               </div>
             </div>
           ` : nothing}
           ${pred.r_squared != null ? html`
-            <div title="How well the trend line fits the data. 1.0 = perfect fit, 0.0 = no pattern. Above 0.7 is good, below 0.3 means data is too scattered.">
-              <div class="detail-meta-label">R\u00b2</div>
-              <div class="detail-meta-value">${pred.r_squared.toFixed(3)}</div>
+            <div class="hero-stat" title="How well the trend line fits the data. 1.0 = perfect fit, 0.0 = no pattern. Above 0.7 is good, below 0.3 means data is too scattered.">
+              <div class="hero-stat-label">R\u00b2</div>
+              <div class="hero-stat-val">${pred.r_squared.toFixed(3)}</div>
             </div>
           ` : nothing}
           ${pred.reliability != null ? (() => {
@@ -296,40 +296,40 @@ function renderPredictionDetails(panel, dev) {
             if (r == null || !hasTime) return nothing;
             const rColor = r >= 70 ? "high" : r >= 40 ? "medium" : "low";
             return html`
-              <div title="Prediction reliability: ${r}%. Based on how consistent the discharge pattern has been across recent observations.">
-                <div class="detail-meta-label">Reliability</div>
-                <div class="detail-meta-value">
+              <div class="hero-stat" title="Prediction reliability: ${r}%. Based on how consistent the discharge pattern has been across recent observations.">
+                <div class="hero-stat-label">Reliability</div>
+                <div class="hero-stat-val">
                   <span class="confidence-dot ${rColor}"></span>${r}%
                 </div>
               </div>`;
           })() : nothing}
-          <div>
-            <div class="detail-meta-label">Data Points</div>
-            <div class="detail-meta-value">
+          <div class="hero-stat">
+            <div class="hero-stat-label">Data Points</div>
+            <div class="hero-stat-val">
               ${pred.data_points_used > 0 ? pred.data_points_used : (cd?.readings?.length ?? "\u2014")}${cd?.session_count ? html` <span style="color:${CSS_SECONDARY_TEXT};font-size:0.85em">(${cd.session_count} session${cd.session_count !== 1 ? "s" : ""})</span>` : nothing}
             </div>
           </div>
           ${dev.lastCalculated ? html`
-            <div>
-              <div class="detail-meta-label">Last Calculated</div>
-              <div class="detail-meta-value">${formatDate(dev.lastCalculated * 1000, true)}</div>
+            <div class="hero-stat">
+              <div class="hero-stat-label">Last Calculated</div>
+              <div class="hero-stat-val">${formatDate(dev.lastCalculated * 1000, true)}</div>
             </div>
           ` : nothing}
           ${cd?.chemistry ? html`
-            <div>
-              <div class="detail-meta-label">Chemistry</div>
-              <div class="detail-meta-value">${CHEMISTRY_LABELS[cd.chemistry] || cd.chemistry}</div>
+            <div class="hero-stat">
+              <div class="hero-stat-label">Chemistry</div>
+              <div class="hero-stat-val">${CHEMISTRY_LABELS[cd.chemistry] || cd.chemistry}</div>
             </div>
           ` : nothing}
           ${chargePred?.estimated_full_timestamp ? html`
-            <div>
-              <div class="detail-meta-label">Predicted Full</div>
-              <div class="detail-meta-value">${formatDate(chargePred.estimated_full_timestamp * 1000, true)}</div>
+            <div class="hero-stat">
+              <div class="hero-stat-label">Predicted Full</div>
+              <div class="hero-stat-val">${formatDate(chargePred.estimated_full_timestamp * 1000, true)}</div>
             </div>
           ` : dev.predictedEmpty ? html`
-            <div>
-              <div class="detail-meta-label">Predicted Empty</div>
-              <div class="detail-meta-value">${formatDate(dev.predictedEmpty, isFastDischarge(dev))}</div>
+            <div class="hero-stat">
+              <div class="hero-stat-label">Predicted Empty</div>
+              <div class="hero-stat-val">${formatDate(dev.predictedEmpty, isFastDischarge(dev))}</div>
             </div>
           ` : nothing}
         </div>
