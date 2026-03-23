@@ -49,8 +49,8 @@ function renderHeroCard(panel, dev) {
   const bigNumber = hasPrediction ? formatDaysRemaining(dev) : formatLevel(dev.level);
   const unitLabel = hasPrediction ? "days remaining" : "battery level";
   const barPct = dev.level != null ? Math.max(0, Math.min(100, Math.ceil(dev.level))) : 0;
-  const barRightText = hasPrediction ? formatLevel(dev.level) : "no prediction";
-  const barRightColor = hasPrediction ? levelColor : CSS_DISABLED;
+  const barRightText = formatLevel(dev.level);
+  const barRightColor = levelColor;
 
   // Stats strip
   const cd = panel._chartData;
