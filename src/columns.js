@@ -6,6 +6,10 @@ import {
   predictionReason, predictionReasonDetail, erraticTooltip, displayLevel,
   renderBadgeLabel, renderReliabilityBadge, getDeviceSubText,
 } from "./helpers.js";
+import {
+  BADGE_REPLACED, BADGE_LOW, BADGE_STALE, BADGE_CLIFF, BADGE_RAPID,
+  BADGE_ERRATIC, BADGE_NO_PREDICTION, BADGE_CHARGING, BADGE_AVG_LEVEL,
+} from "./colors.js";
 
 /**
  * Build ha-data-table column definitions.
@@ -118,7 +122,11 @@ export function buildColumns(panel) {
       showNarrow: true,
       template: (dev) => html`
         <ha-dropdown
-          @wa-select=${(e) => panel._handleMenuSelect(e, dev.sourceEntity)}
+          @wa-select=${(e) => {
+            e.stopPropagation();
+            panel._handleMenuSelect(e, dev.sourceEntity);
+          }}
+          @click=${(e) => e.stopPropagation()}
         >
           <ha-icon-button
             slot="trigger"
@@ -148,7 +156,7 @@ export function getBadgeLabels(dev, panel) {
     labels.push({
       label_id: "replaced",
       name: dev.isRechargeable ? "RECHARGED?" : "REPLACED?",
-      color: "#FF9800",
+      color: BADGE_REPLACED,
       description: dev.isRechargeable
         ? "Battery level jumped significantly \u2014 normal recharge cycle?"
         : "Battery level jumped significantly \u2014 was the battery replaced?",
@@ -159,7 +167,7 @@ export function getBadgeLabels(dev, panel) {
     labels.push({
       label_id: "low",
       name: "LOW",
-      color: "#F44336",
+      color: BADGE_LOW,
       description: `Battery is at ${displayLevel(dev.level)}%, below the ${t}% threshold`,
     });
   }
@@ -167,7 +175,7 @@ export function getBadgeLabels(dev, panel) {
     labels.push({
       label_id: "stale",
       name: "STALE",
-      color: "#FF9800",
+      color: BADGE_STALE,
       description: "No battery reading received within the stale timeout period",
     });
   }
@@ -175,14 +183,14 @@ export function getBadgeLabels(dev, panel) {
     labels.push({
       label_id: "cliff",
       name: "CLIFF DROP",
-      color: "#F44336",
+      color: BADGE_CLIFF,
       description: `Sudden drop of ${dev.dropSize ?? "?"}% in a single reading interval`,
     });
   } else if (dev.anomaly === "rapid") {
     labels.push({
       label_id: "rapid",
       name: "RAPID",
-      color: "#F44336",
+      color: BADGE_RAPID,
       description: `Discharge rate significantly higher than average \u2014 ${dev.dropSize ?? "?"}% drop`,
     });
   }
@@ -190,7 +198,7 @@ export function getBadgeLabels(dev, panel) {
     labels.push({
       label_id: "erratic",
       name: "ERRATIC",
-      color: "#9C27B0",
+      color: BADGE_ERRATIC,
       description: erraticTooltip(dev),
     });
   }
@@ -199,7 +207,7 @@ export function getBadgeLabels(dev, panel) {
     labels.push({
       label_id: "no-pred",
       name: predictionReason(dev),
-      color: "#9E9E9E",
+      color: BADGE_NO_PREDICTION,
       description: predictionReasonDetail(dev.predictionStatus) || "",
     });
   }
@@ -208,7 +216,7 @@ export function getBadgeLabels(dev, panel) {
       label_id: "charging",
       name: "Charging",
       icon: "mdi:battery-charging",
-      color: "#4CAF50",
+      color: BADGE_CHARGING,
       description: "Currently charging",
     });
   }
@@ -224,7 +232,7 @@ export function getBadgeLabels(dev, panel) {
       labels.push({
         label_id: "avg",
         name: `avg ${dMean}%`,
-        color: "#2196F3",
+        color: BADGE_AVG_LEVEL,
         description: `7-day average is ${dMean}% while current reading is ${dLevel ?? "?"}%`,
       });
     }

@@ -5,6 +5,12 @@
  * instance (`panel`) to access shadow DOM, theme colors, and chart state.
  */
 
+import {
+  COLOR_PRIMARY, COLOR_WARNING, COLOR_ERROR, COLOR_SUCCESS,
+  COLOR_SECONDARY_TEXT, COLOR_DIVIDER, COLOR_CARD_BG, COLOR_PRIMARY_TEXT,
+  CHART_SUSPECTED_REPLACEMENT,
+} from "./colors.js";
+
 /**
  * Resolve a CSS custom property to a concrete color value for ECharts canvas.
  * Falls back to the provided default if the variable is unset or empty.
@@ -43,16 +49,16 @@ export async function initChart(panel, chartData) {
 
   // Resolve HA theme colors to concrete values — ECharts renders to canvas
   // and cannot resolve CSS custom properties.
-  const colorLevel = rc("--primary-color", "#03a9f4");
-  const colorPredicted = rc("--warning-color", "#ffa726");
-  const colorThreshold = rc("--error-color", "#db4437");
-  const colorCharge = rc("--success-color", "#4caf50");
-  const colorNowLine = rc("--secondary-text-color", "#999");
-  const colorAxis = rc("--secondary-text-color", "#999");
-  const colorGrid = rc("--divider-color", "rgba(0,0,0,0.12)");
-  const colorTooltipBg = rc("--ha-card-background", rc("--card-background-color", "#fff"));
-  const colorTooltipText = rc("--primary-text-color", "#212121");
-  const colorLegend = rc("--primary-text-color", "#212121");
+  const colorLevel = rc(COLOR_PRIMARY.var, COLOR_PRIMARY.fallback);
+  const colorPredicted = rc(COLOR_WARNING.var, COLOR_WARNING.fallback);
+  const colorThreshold = rc(COLOR_ERROR.var, COLOR_ERROR.fallback);
+  const colorCharge = rc(COLOR_SUCCESS.var, COLOR_SUCCESS.fallback);
+  const colorNowLine = rc(COLOR_SECONDARY_TEXT.var, COLOR_SECONDARY_TEXT.fallback);
+  const colorAxis = rc(COLOR_SECONDARY_TEXT.var, COLOR_SECONDARY_TEXT.fallback);
+  const colorGrid = rc(COLOR_DIVIDER.var, COLOR_DIVIDER.fallback);
+  const colorTooltipBg = rc(COLOR_CARD_BG.var, rc("--card-background-color", COLOR_CARD_BG.fallback));
+  const colorTooltipText = rc(COLOR_PRIMARY_TEXT.var, COLOR_PRIMARY_TEXT.fallback);
+  const colorLegend = rc(COLOR_PRIMARY_TEXT.var, COLOR_PRIMARY_TEXT.fallback);
 
   const readings = chartData.readings;
   const allReadings = chartData.all_readings || readings;
@@ -467,8 +473,8 @@ export async function initChart(panel, chartData) {
   // Merge both into a single sorted array for unified crowding/stagger logic.
   const replacementHistory = chartData.replacement_history || [];
   const suspectedReplacements = chartData.suspected_replacements || [];
-  const colorReplacement = rc("--success-color", "#4caf50");
-  const colorSuspected = "#ab47bc";
+  const colorReplacement = rc(COLOR_SUCCESS.var, COLOR_SUCCESS.fallback);
+  const colorSuspected = CHART_SUSPECTED_REPLACEMENT;
   const allReplacements = [
     ...replacementHistory.map((t) => ({ ts: t * 1000, type: "confirmed" })),
     ...suspectedReplacements.map((s) => ({ ts: s.timestamp * 1000, type: "suspected" })),

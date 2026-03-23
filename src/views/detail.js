@@ -5,6 +5,7 @@ import {
   formatTimeRemaining, formatDate, isFastDischarge,
   predictionReasonDetail, getDeviceSubText, confidenceTooltip,
 } from "../helpers.js";
+import { CSS_SUCCESS, CSS_WARNING, CSS_ERROR, CSS_SECONDARY_TEXT, CSS_DISABLED } from "../colors.js";
 
 const CHEMISTRY_LABELS = {
   alkaline: "Alkaline",
@@ -49,7 +50,7 @@ function renderHeroCard(panel, dev) {
   const unitLabel = hasPrediction ? "days remaining" : "battery level";
   const barPct = dev.level != null ? Math.max(0, Math.min(100, Math.ceil(dev.level))) : 0;
   const barRightText = hasPrediction ? formatLevel(dev.level) : "no prediction";
-  const barRightColor = hasPrediction ? levelColor : "var(--disabled-text-color)";
+  const barRightColor = hasPrediction ? levelColor : CSS_DISABLED;
 
   // Stats strip
   const cd = panel._chartData;
@@ -100,7 +101,7 @@ function renderHeroCard(panel, dev) {
             <div class="hero-name">${dev.name || dev.sourceEntity}</div>
             <ha-icon-button
               .path=${"M11,9H13V7H11M12,20C7.59,20 4,16.41 4,12C4,7.59 7.59,4 12,4C16.41,4 20,7.59 20,12C20,16.41 16.41,20 12,20M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M11,17H13V11H11V17Z"}
-              style="--mdc-icon-button-size:32px;--mdc-icon-size:20px;color:var(--secondary-text-color)"
+              style="--mdc-icon-button-size:32px;--mdc-icon-size:20px;color:${CSS_SECONDARY_TEXT}"
               title="More info"
               @click=${() => {
                 panel.dispatchEvent(
@@ -267,71 +268,73 @@ function renderPredictionDetails(panel, dev) {
     : "neutral";
 
   return html`
-    <ha-expansion-panel outlined style="margin-bottom:16px">
-      <div slot="header" style="display:flex;align-items:center;gap:8px;width:100%">
-        <ha-icon icon="mdi:chart-line" style="--mdc-icon-size:20px;color:var(--secondary-text-color)"></ha-icon>
-        <span style="flex:1;font-weight:500">Prediction Details</span>
-        <span class="jp-badge ${badgeClass}">${badgeText}</span>
-      </div>
-      <div class="pred-detail-grid">
-        ${confidence ? html`
-          <div title="${confidenceTooltip(chargePred || pred, cd)}">
-            <div class="detail-meta-label">Confidence</div>
+    <ha-card style="margin-bottom:16px">
+      <ha-expansion-panel>
+        <div slot="header" style="display:flex;align-items:center;gap:8px;width:100%">
+          <ha-icon icon="mdi:chart-line" style="--mdc-icon-size:20px;color:${CSS_SECONDARY_TEXT}"></ha-icon>
+          <span style="flex:1;font-weight:500">Prediction Details</span>
+          <span class="jp-badge ${badgeClass}">${badgeText}</span>
+        </div>
+        <div class="pred-detail-grid">
+          ${confidence ? html`
+            <div title="${confidenceTooltip(chargePred || pred, cd)}">
+              <div class="detail-meta-label">Confidence</div>
+              <div class="detail-meta-value">
+                <span class="confidence-dot ${confidence}"></span>${CONFIDENCE_LABELS[confidence]?.replace(" confidence", "") || confidence}
+              </div>
+            </div>
+          ` : nothing}
+          ${pred.r_squared != null ? html`
+            <div title="How well the trend line fits the data. 1.0 = perfect fit, 0.0 = no pattern. Above 0.7 is good, below 0.3 means data is too scattered.">
+              <div class="detail-meta-label">R\u00b2</div>
+              <div class="detail-meta-value">${pred.r_squared.toFixed(3)}</div>
+            </div>
+          ` : nothing}
+          ${pred.reliability != null ? (() => {
+            const r = dev.reliability;
+            const hasTime = dev.daysRemaining !== null || dev.hoursRemaining !== null;
+            if (r == null || !hasTime) return nothing;
+            const rColor = r >= 70 ? "high" : r >= 40 ? "medium" : "low";
+            return html`
+              <div title="Prediction reliability: ${r}%. Based on how consistent the discharge pattern has been across recent observations.">
+                <div class="detail-meta-label">Reliability</div>
+                <div class="detail-meta-value">
+                  <span class="confidence-dot ${rColor}"></span>${r}%
+                </div>
+              </div>`;
+          })() : nothing}
+          <div>
+            <div class="detail-meta-label">Data Points</div>
             <div class="detail-meta-value">
-              <span class="confidence-dot ${confidence}"></span>${CONFIDENCE_LABELS[confidence]?.replace(" confidence", "") || confidence}
+              ${pred.data_points_used > 0 ? pred.data_points_used : (cd?.readings?.length ?? "\u2014")}${cd?.session_count ? html` <span style="color:${CSS_SECONDARY_TEXT};font-size:0.85em">(${cd.session_count} session${cd.session_count !== 1 ? "s" : ""})</span>` : nothing}
             </div>
           </div>
-        ` : nothing}
-        ${pred.r_squared != null ? html`
-          <div title="How well the trend line fits the data. 1.0 = perfect fit, 0.0 = no pattern. Above 0.7 is good, below 0.3 means data is too scattered.">
-            <div class="detail-meta-label">R\u00b2</div>
-            <div class="detail-meta-value">${pred.r_squared.toFixed(3)}</div>
-          </div>
-        ` : nothing}
-        ${pred.reliability != null ? (() => {
-          const r = dev.reliability;
-          const hasTime = dev.daysRemaining !== null || dev.hoursRemaining !== null;
-          if (r == null || !hasTime) return nothing;
-          const rColor = r >= 70 ? "high" : r >= 40 ? "medium" : "low";
-          return html`
-            <div title="Prediction reliability: ${r}%. Based on how consistent the discharge pattern has been across recent observations.">
-              <div class="detail-meta-label">Reliability</div>
-              <div class="detail-meta-value">
-                <span class="confidence-dot ${rColor}"></span>${r}%
-              </div>
-            </div>`;
-        })() : nothing}
-        <div>
-          <div class="detail-meta-label">Data Points</div>
-          <div class="detail-meta-value">
-            ${pred.data_points_used > 0 ? pred.data_points_used : (cd?.readings?.length ?? "\u2014")}${cd?.session_count ? html` <span style="color:var(--secondary-text-color);font-size:0.85em">(${cd.session_count} session${cd.session_count !== 1 ? "s" : ""})</span>` : nothing}
-          </div>
+          ${dev.lastCalculated ? html`
+            <div>
+              <div class="detail-meta-label">Last Calculated</div>
+              <div class="detail-meta-value">${formatDate(dev.lastCalculated * 1000, true)}</div>
+            </div>
+          ` : nothing}
+          ${cd?.chemistry ? html`
+            <div>
+              <div class="detail-meta-label">Chemistry</div>
+              <div class="detail-meta-value">${CHEMISTRY_LABELS[cd.chemistry] || cd.chemistry}</div>
+            </div>
+          ` : nothing}
+          ${chargePred?.estimated_full_timestamp ? html`
+            <div>
+              <div class="detail-meta-label">Predicted Full</div>
+              <div class="detail-meta-value">${formatDate(chargePred.estimated_full_timestamp * 1000, true)}</div>
+            </div>
+          ` : dev.predictedEmpty ? html`
+            <div>
+              <div class="detail-meta-label">Predicted Empty</div>
+              <div class="detail-meta-value">${formatDate(dev.predictedEmpty, isFastDischarge(dev))}</div>
+            </div>
+          ` : nothing}
         </div>
-        ${dev.lastCalculated ? html`
-          <div>
-            <div class="detail-meta-label">Last Calculated</div>
-            <div class="detail-meta-value">${formatDate(dev.lastCalculated * 1000, true)}</div>
-          </div>
-        ` : nothing}
-        ${cd?.chemistry ? html`
-          <div>
-            <div class="detail-meta-label">Chemistry</div>
-            <div class="detail-meta-value">${CHEMISTRY_LABELS[cd.chemistry] || cd.chemistry}</div>
-          </div>
-        ` : nothing}
-        ${chargePred?.estimated_full_timestamp ? html`
-          <div>
-            <div class="detail-meta-label">Predicted Full</div>
-            <div class="detail-meta-value">${formatDate(chargePred.estimated_full_timestamp * 1000, true)}</div>
-          </div>
-        ` : dev.predictedEmpty ? html`
-          <div>
-            <div class="detail-meta-label">Predicted Empty</div>
-            <div class="detail-meta-value">${formatDate(dev.predictedEmpty, isFastDischarge(dev))}</div>
-          </div>
-        ` : nothing}
-      </div>
-    </ha-expansion-panel>
+      </ha-expansion-panel>
+    </ha-card>
   `;
 }
 
@@ -352,13 +355,14 @@ function renderReplacementHistory(panel) {
   if (entries.length === 0) return nothing;
 
   return html`
-    <ha-expansion-panel outlined style="margin-bottom:16px">
-      <div slot="header" style="display:flex;align-items:center;gap:8px;width:100%">
-        <ha-icon icon="mdi:history" style="--mdc-icon-size:20px;color:var(--secondary-text-color)"></ha-icon>
-        <span style="flex:1;font-weight:500">Replacement History</span>
-        <span class="jp-badge neutral">${entries.length}</span>
-      </div>
-      <div class="expansion-content"><div class="replacement-table">
+    <ha-card style="margin-bottom:16px">
+      <ha-expansion-panel>
+        <div slot="header" style="display:flex;align-items:center;gap:8px;width:100%">
+          <ha-icon icon="mdi:history" style="--mdc-icon-size:20px;color:${CSS_SECONDARY_TEXT}"></ha-icon>
+          <span style="flex:1;font-weight:500">Replacement History</span>
+          <span class="jp-badge neutral">${entries.length}</span>
+        </div>
+        <div class="expansion-content"><div class="replacement-table">
         <div class="replacement-table-header">
           <span>Date</span>
           <span>Type</span>
@@ -369,10 +373,10 @@ function renderReplacementHistory(panel) {
             <span>${formatDate(e.timestamp * 1000, true)}</span>
             <span>
               ${e.type === "confirmed" ? html`
-                <ha-icon icon="mdi:battery-sync" style="--mdc-icon-size:16px;color:var(--success-color,#4caf50)"></ha-icon>
+                <ha-icon icon="mdi:battery-sync" style="--mdc-icon-size:16px;color:${CSS_SUCCESS}"></ha-icon>
                 Replaced
               ` : html`
-                <ha-icon icon="mdi:help-circle-outline" style="--mdc-icon-size:16px;color:var(--warning-color,#ff9800)"></ha-icon>
+                <ha-icon icon="mdi:help-circle-outline" style="--mdc-icon-size:16px;color:${CSS_WARNING}"></ha-icon>
                 Suspected (${Math.round(e.old_level)}% \u2192 ${Math.round(e.new_level)}%)
               `}
             </span>
@@ -380,20 +384,20 @@ function renderReplacementHistory(panel) {
               ${e.type === "suspected" ? html`
                 <ha-icon-button
                   .path=${ICON_CHECK}
-                  style="--mdc-icon-button-size:28px;color:var(--success-color,#4caf50)"
+                  style="--mdc-icon-button-size:28px;color:${CSS_SUCCESS}"
                   title="Confirm replacement"
                   @click=${() => panel._confirmSuspectedReplacement(entityId, e.timestamp)}
                 ></ha-icon-button>
                 <ha-icon-button
                   .path=${ICON_CLOSE}
-                  style="--mdc-icon-button-size:28px;color:var(--error-color,#f44336)"
+                  style="--mdc-icon-button-size:28px;color:${CSS_ERROR}"
                   title="Not a replacement"
                   @click=${() => panel._denySuspectedReplacement(entityId, e.timestamp)}
                 ></ha-icon-button>
               ` : html`
                 <ha-icon-button
                   .path=${ICON_CLOSE}
-                  style="--mdc-icon-button-size:28px;color:var(--secondary-text-color)"
+                  style="--mdc-icon-button-size:28px;color:${CSS_SECONDARY_TEXT}"
                   title="Remove this replacement"
                   @click=${() => panel._undoReplacementAt(entityId, e.timestamp)}
                 ></ha-icon-button>
@@ -402,6 +406,7 @@ function renderReplacementHistory(panel) {
           </div>
         `)}
       </div></div>
-    </ha-expansion-panel>
+      </ha-expansion-panel>
+    </ha-card>
   `;
 }

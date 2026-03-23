@@ -1,4 +1,5 @@
 import { html, nothing } from "lit";
+import { CSS_ERROR, CSS_WARNING, CSS_SUCCESS, CSS_DISABLED } from "./colors.js";
 
 /**
  * Pure helper functions — no dependency on panel instance state.
@@ -53,11 +54,11 @@ export function getBatteryIcon(dev) {
 }
 
 export function getLevelColor(level, threshold, defaultThreshold = 20) {
-  if (level === null) return "var(--disabled-text-color)";
+  if (level === null) return CSS_DISABLED;
   const t = threshold ?? defaultThreshold;
-  if (level <= t / 2) return "var(--error-color, #db4437)";
-  if (level <= t * 1.25) return "var(--warning-color, #ffa726)";
-  return "var(--success-color, #43a047)";
+  if (level <= t / 2) return CSS_ERROR;
+  if (level <= t * 1.25) return CSS_WARNING;
+  return CSS_SUCCESS;
 }
 
 export function isActivelyCharging(dev) {
@@ -300,7 +301,7 @@ export function renderReliabilityBadge(dev) {
   const r = dev.reliability;
   const hasTimePrediction = dev.daysRemaining !== null || dev.hoursRemaining !== null;
   if (r === null || r === undefined || !hasTimePrediction) return "\u2014";
-  const color = r >= 70 ? "var(--success-color, #43a047)" : r >= 40 ? "var(--warning-color, #ffa726)" : "var(--disabled-text-color, #999)";
+  const color = r >= 70 ? CSS_SUCCESS : r >= 40 ? CSS_WARNING : CSS_DISABLED;
   return html`<span
     style="display:inline-block;font-size:11px;font-weight:500;padding:1px 6px;border-radius:8px;background:color-mix(in srgb, ${color} 15%, transparent);color:${color}"
     title="Prediction reliability: ${r}%"

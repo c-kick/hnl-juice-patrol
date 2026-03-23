@@ -1,14 +1,19 @@
 import { html, nothing } from "lit";
 import { getLevelColor, formatRate, getDeviceSubText, displayLevel } from "../helpers.js";
 import { resolveColor } from "../chart.js";
+import {
+  COLOR_PRIMARY, COLOR_INFO, COLOR_SUCCESS, COLOR_WARNING, COLOR_ERROR,
+  COLOR_DISABLED, COLOR_SECONDARY_TEXT, COLOR_PRIMARY_TEXT, COLOR_CARD_BG,
+  CSS_SUCCESS, CSS_WARNING, CSS_ERROR, CSS_INFO, CSS_PRIMARY,
+} from "../colors.js";
 
 // ── Pure computation (testable, no DOM) ──
 
 /** Level buckets for fleet/type composition charts. */
 const LEVEL_BUCKETS = [
-  { key: "critical", min: 0, max: 10, label: "0–10%", colorVar: "--error-color", mix: "50%" },
-  { key: "warning", min: 11, max: 50, label: "10–50%", colorVar: "--warning-color", mix: "45%" },
-  { key: "healthy", min: 51, max: 100, label: "50–100%", colorVar: "--success-color", mix: "50%" },
+  { key: "critical", min: 0, max: 10, label: "0–10%", colorVar: "--error-color", mix: "80%" },
+  { key: "warning", min: 11, max: 50, label: "10–50%", colorVar: "--warning-color", mix: "80%" },
+  { key: "healthy", min: 51, max: 100, label: "50–100%", colorVar: "--success-color", mix: "80%" },
 ];
 
 /** Anomaly description lookup keyed by `anomaly|stability` combo. */
@@ -293,9 +298,9 @@ function _initStackedBar(panel, containerId, { categories, series, total, xMax, 
   if (!container) return;
 
   const rc = (v, fb) => resolveColor(panel, v, fb);
-  const colorSecondary = rc("--secondary-text-color", "#999");
-  const colorBg = rc("--ha-card-background", rc("--card-background-color", "#fff"));
-  const colorText = rc("--primary-text-color", "#212121");
+  const colorSecondary = rc(COLOR_SECONDARY_TEXT.var, COLOR_SECONDARY_TEXT.fallback);
+  const colorBg = rc(COLOR_CARD_BG.var, rc("--card-background-color", COLOR_CARD_BG.fallback));
+  const colorText = rc(COLOR_PRIMARY_TEXT.var, COLOR_PRIMARY_TEXT.fallback);
 
   const option = {
     xAxis: { type: "value", show: false, max: xMax || "dataMax" },
@@ -360,19 +365,19 @@ function _initStackedBar(panel, containerId, { categories, series, total, xMax, 
 function _buildFleetSeries(panel) {
   const fleet = panel._fleetData;
   const rc = (v, fb) => resolveColor(panel, v, fb);
-  const colorText = rc("--primary-text-color", "#212121");
+  const colorText = rc(COLOR_PRIMARY_TEXT.var, COLOR_PRIMARY_TEXT.fallback);
 
   const categories = [
     ...LEVEL_BUCKETS.map(b => ({
       name: b.label,
       value: fleet.buckets[b.key],
-      color: rc(b.colorVar, "#999"),
+      color: rc(b.colorVar, COLOR_DISABLED.fallback),
       opacity: parseFloat(b.mix) / 100,
       levelMin: b.min, levelMax: b.max,
     })),
-    { name: "Rechargeable", value: fleet.rechargeable, color: rc("--info-color", "#039be5"), opacity: 0.55, filter: "rechargeable" },
-    { name: "Stale", value: fleet.stale, color: rc("--disabled-text-color", "#999"), opacity: 0.5, filter: "stale" },
-    { name: "Unavailable", value: fleet.unavailable, color: rc("--disabled-text-color", "#999"), opacity: 0.3, filter: "unavailable" },
+    { name: "Rechargeable", value: fleet.rechargeable, color: rc(COLOR_INFO.var, COLOR_INFO.fallback), opacity: 0.55, filter: "rechargeable" },
+    { name: "Stale", value: fleet.stale, color: rc(COLOR_DISABLED.var, COLOR_DISABLED.fallback), opacity: 0.5, filter: "stale" },
+    { name: "Unavailable", value: fleet.unavailable, color: rc(COLOR_DISABLED.var, COLOR_DISABLED.fallback), opacity: 0.3, filter: "unavailable" },
   ];
 
   const series = categories.map(cat => ({
@@ -411,13 +416,13 @@ function _buildFleetSeries(panel) {
  */
 function _buildTypeSeries(panel, typeData, xMax) {
   const rc = (v, fb) => resolveColor(panel, v, fb);
-  const colorText = rc("--primary-text-color", "#212121");
+  const colorText = rc(COLOR_PRIMARY_TEXT.var, COLOR_PRIMARY_TEXT.fallback);
 
   const categories = LEVEL_BUCKETS.map(b => {
     const count = typeData.buckets[b.key];
     const color = typeData.isRechargeable
-      ? rc("--info-color", "#039be5")
-      : rc(b.colorVar, "#999");
+      ? rc(COLOR_INFO.var, COLOR_INFO.fallback)
+      : rc(b.colorVar, COLOR_DISABLED.fallback);
     const opacity = typeData.isRechargeable
       ? 0.25 + (b.min / 100) * 0.35
       : parseFloat(b.mix) / 100;
@@ -460,8 +465,8 @@ export const initTimelineChart = initFleetChart;
 // ── Overview card: fleet chart + readiness + avg level ──
 
 function renderOverview(fleet, scores) {
-  const readinessColor = scores.readiness >= 80 ? "var(--success-color, #43a047)"
-    : scores.readiness >= 50 ? "var(--warning-color, #ffa726)" : "var(--error-color, #db4437)";
+  const readinessColor = scores.readiness >= 80 ? CSS_SUCCESS
+    : scores.readiness >= 50 ? CSS_WARNING : CSS_ERROR;
 
   return html`
     <ha-card>
@@ -478,9 +483,9 @@ function renderOverview(fleet, scores) {
         </div>
         <div class="db-stat">
           <span class="db-stat-value" style="color:${
-            scores.avgLevel <= 10 ? "var(--error-color, #db4437)"
-              : scores.avgLevel <= 50 ? "var(--warning-color, #ffa726)"
-              : "var(--success-color, #43a047)"
+            scores.avgLevel <= 10 ? CSS_ERROR
+              : scores.avgLevel <= 50 ? CSS_WARNING
+              : CSS_SUCCESS
           }">${scores.avgLevel}%</span>
           <span class="db-stat-label">Average Level</span>
           <span class="db-stat-sub">Across all disposable devices</span>
@@ -557,7 +562,7 @@ function renderWantedCard(panel, { entity: e, replCount, replData }) {
     ? (e.daysRemaining <= 1 ? Math.round(e.daysRemaining * 24) + " hours" : Math.round(e.daysRemaining * 10) / 10 + " days")
     : (e.hoursRemaining != null ? e.hoursRemaining + " hours" : "Unknown");
   const remainColor = e.daysRemaining != null && e.daysRemaining <= 7
-    ? "var(--error-color, #db4437)" : "";
+    ? CSS_ERROR : "";
 
   // Replacement stats
   let replText = replCount > 0 ? `${replCount}×` : "0";
@@ -569,8 +574,8 @@ function renderWantedCard(panel, { entity: e, replCount, replData }) {
       replText = `${replCount}× in ${months}mo`;
     }
   }
-  const replColor = replCount >= 3 ? "var(--error-color, #db4437)"
-    : replCount >= 2 ? "var(--warning-color, #ffa726)" : "";
+  const replColor = replCount >= 3 ? CSS_ERROR
+    : replCount >= 2 ? CSS_WARNING : "";
 
   // Reliability
   const reliabilityText = e.reliability != null ? `${e.reliability}%` : "—";
@@ -607,7 +612,7 @@ function renderWantedCard(panel, { entity: e, replCount, replData }) {
         <div class="ws"><div class="ws-label">Reliability</div><div class="ws-value">${reliabilityText}</div></div>
         <div class="ws"><div class="ws-label">Anomaly</div><div class="ws-value"${
           e.anomaly && e.anomaly !== "normal"
-            ? ` style="color:var(--error-color, #db4437)"`
+            ? ` style="color:${CSS_ERROR}"`
             : ""
         }>${e.anomaly === "cliff" ? "Cliff Drop" : e.anomaly === "rapid" ? "Rapid" : e.stability === "erratic" ? "Erratic" : "None"}</div></div>
       </div>
@@ -616,8 +621,8 @@ function renderWantedCard(panel, { entity: e, replCount, replData }) {
         <div class="gauge-track">
           <div class="gauge-fill" style="width:${lvl}%;background:${
             lvl <= threshold
-              ? "var(--error-color, #db4437)"
-              : `linear-gradient(90deg, var(--error-color, #db4437), ${color})`
+              ? CSS_ERROR
+              : `linear-gradient(90deg, ${CSS_ERROR}, ${color})`
           }"></div>
           <div class="gauge-threshold" style="left:${threshold}%"></div>
         </div>
@@ -678,7 +683,7 @@ function renderHealthByType(types) {
         <div class="type-health-list">
           ${types.map(t => html`
             <div class="type-health-row">
-              <span class="th-type" style="color:${t.isRechargeable ? "var(--info-color, #039be5)" : "var(--primary-color, #03a9f4)"}">${t.type}</span>
+              <span class="th-type" style="color:${t.isRechargeable ? CSS_INFO : CSS_PRIMARY}">${t.type}</span>
               <div id="jp-type-chart-${_slugify(t.type)}" class="th-chart-container"></div>
               <span class="th-count">${t.devices.length}</span>
             </div>
