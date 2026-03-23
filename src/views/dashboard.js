@@ -11,9 +11,9 @@ import {
 
 /** Level buckets for fleet/type composition charts. */
 const LEVEL_BUCKETS = [
-  { key: "critical", min: 0, max: 10, label: "0–10%", colorVar: "--error-color", mix: "80%" },
-  { key: "warning", min: 11, max: 50, label: "10–50%", colorVar: "--warning-color", mix: "80%" },
-  { key: "healthy", min: 51, max: 100, label: "50–100%", colorVar: "--success-color", mix: "80%" },
+  { key: "critical", min: 0, max: 10, label: "0–10%", color: COLOR_ERROR },
+  { key: "warning", min: 11, max: 50, label: "10–50%", color: COLOR_WARNING },
+  { key: "healthy", min: 51, max: 100, label: "50–100%", color: COLOR_SUCCESS },
 ];
 
 /** Anomaly description lookup keyed by `anomaly|stability` combo. */
@@ -371,11 +371,11 @@ function _buildFleetSeries(panel) {
     ...LEVEL_BUCKETS.map(b => ({
       name: b.label,
       value: fleet.buckets[b.key],
-      color: rc(b.colorVar, COLOR_DISABLED.fallback),
-      opacity: parseFloat(b.mix) / 100,
+      color: rc(b.color.var, b.color.fallback),
+      opacity: b.color.opacity,
       levelMin: b.min, levelMax: b.max,
     })),
-    { name: "Rechargeable", value: fleet.rechargeable, color: rc(COLOR_RECHARGEABLE.var, COLOR_RECHARGEABLE.fallback), opacity: 0.55, filter: "rechargeable" },
+    { name: "Rechargeable", value: fleet.rechargeable, color: rc(COLOR_RECHARGEABLE.var, COLOR_RECHARGEABLE.fallback), opacity: COLOR_RECHARGEABLE.opacity, filter: "rechargeable" },
     { name: "Stale", value: fleet.stale, color: rc(COLOR_DISABLED.var, COLOR_DISABLED.fallback), opacity: 0.5, filter: "stale" },
     { name: "Unavailable", value: fleet.unavailable, color: rc(COLOR_DISABLED.var, COLOR_DISABLED.fallback), opacity: 0.3, filter: "unavailable" },
   ];
@@ -418,14 +418,16 @@ function _buildTypeSeries(panel, typeData, xMax) {
   const rc = (v, fb) => resolveColor(panel, v, fb);
   const colorText = rc(COLOR_PRIMARY_TEXT.var, COLOR_PRIMARY_TEXT.fallback);
 
-  const categories = LEVEL_BUCKETS.map(b => {
+  const n = LEVEL_BUCKETS.length;
+  const categories = LEVEL_BUCKETS.map((b, i) => {
     const count = typeData.buckets[b.key];
     const color = typeData.isRechargeable
       ? rc(COLOR_RECHARGEABLE.var, COLOR_RECHARGEABLE.fallback)
-      : rc(b.colorVar, COLOR_DISABLED.fallback);
+      : rc(b.color.var, b.color.fallback);
+    const [oMin, oMax] = COLOR_RECHARGEABLE.opacityRange;
     const opacity = typeData.isRechargeable
-      ? 0.25 + (b.min / 100) * 0.35
-      : parseFloat(b.mix) / 100;
+      ? oMin + (i / (n - 1)) * (oMax - oMin)
+      : b.color.opacity;
     return {
       name: b.label, value: count, color, opacity,
       levelMin: b.min, levelMax: b.max,

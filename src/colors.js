@@ -8,12 +8,14 @@
 // ── HA theme CSS vars with fallbacks ──
 // Used by resolveColor() for ECharts canvas (which can't read CSS vars)
 // and by inline style="" strings in templates.
+// Chart opacity: used by dashboard bar charts. For rechargeable, opacityRange
+// defines [min, max] for the per-bucket gradient in health-by-type charts.
 
 export const COLOR_PRIMARY = { var: "--primary-color", fallback: "#03a9f4" };
-export const COLOR_RECHARGEABLE = { var: "--info-color", fallback: "#039be5" };
-export const COLOR_SUCCESS = { var: "--success-color", fallback: "#43a047" };
-export const COLOR_WARNING = { var: "--warning-color", fallback: "#ffa726" };
-export const COLOR_ERROR = { var: "--error-color", fallback: "#db4437" };
+export const COLOR_RECHARGEABLE = { var: "--info-color", fallback: "#039be5", opacity: 0.80, opacityRange: [0.25, 0.80] };
+export const COLOR_SUCCESS = { var: "--success-color", fallback: "#43a047", opacity: 0.80 };
+export const COLOR_WARNING = { var: "--warning-color", fallback: "#ffa726", opacity: 0.80 };
+export const COLOR_ERROR = { var: "--error-color", fallback: "#db4437", opacity: 0.80 };
 export const COLOR_DISABLED = { var: "--disabled-text-color", fallback: "#999" };
 export const COLOR_SECONDARY_TEXT = { var: "--secondary-text-color", fallback: "#999" };
 export const COLOR_PRIMARY_TEXT = { var: "--primary-text-color", fallback: "#212121" };
