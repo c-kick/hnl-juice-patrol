@@ -195,6 +195,9 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._class_models = DeviceClassModels()
         # Background bootstrap task tracking
         self._bootstrap_task: asyncio.Task | None = None
+        # Entity registry listener for real-time new device discovery
+        self._unsub_entity_listener: CALLBACK_TYPE | None = None
+        self._discovery_debounce_task: asyncio.Task | None = None
 
     def async_register_new_device_callback(
         self, cb: Callable[[list[str]], None]
@@ -236,6 +239,12 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self.type_resolver.async_load_library()
         # Populate class models from stored completed cycles
         self._load_class_models_from_store()
+        # Listen for new entities to discover battery devices promptly
+        # instead of waiting for the next hourly poll.
+        self._unsub_entity_listener = self.hass.bus.async_listen(
+            er.EVENT_ENTITY_REGISTRY_UPDATED,
+            self._handle_entity_registry_update,
+        )
 
     def _load_class_models_from_store(self) -> None:
         """Populate DeviceClassModels from stored completed_cycles at startup."""
@@ -244,6 +253,29 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._class_models.load_cycles(
                     entity_id, dev.battery_type, dev.completed_cycles,
                 )
+
+    @callback
+    def _handle_entity_registry_update(self, event: Event) -> None:
+        """Handle entity registry changes — trigger re-discovery for new entities.
+
+        Debounces rapid entity registrations (e.g. new device pairing
+        creates multiple entities at once) into a single re-discovery.
+        """
+        if event.data.get("action") not in ("create", "update"):
+            return
+        if self._discovery_debounce_task and not self._discovery_debounce_task.done():
+            self._discovery_debounce_task.cancel()
+        self._discovery_debounce_task = self.hass.async_create_task(
+            self._async_debounced_rediscovery()
+        )
+
+    async def _async_debounced_rediscovery(self) -> None:
+        """Wait briefly to batch rapid entity registrations, then re-discover."""
+        await asyncio.sleep(5)
+        try:
+            await self.async_request_refresh()
+        except Exception:
+            _LOGGER.debug("Debounced rediscovery failed", exc_info=True)
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Periodic update: re-discover devices and save store."""
@@ -1503,6 +1535,14 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._unsub_state_listener:
             self._unsub_state_listener()
             self._unsub_state_listener = None
+        # Remove entity registry listener
+        if self._unsub_entity_listener:
+            self._unsub_entity_listener()
+            self._unsub_entity_listener = None
+        # Cancel debounced rediscovery
+        if self._discovery_debounce_task and not self._discovery_debounce_task.done():
+            self._discovery_debounce_task.cancel()
+            self._discovery_debounce_task = None
         # Cancel bootstrap if running
         if self._bootstrap_task and not self._bootstrap_task.done():
             self._bootstrap_task.cancel()
@@ -1515,3 +1555,9 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Clear callbacks to prevent leaks on reload
         self._new_device_callbacks.clear()
         await self.store.async_save()
+        # CRITICAL: Cancel the base DataUpdateCoordinator's periodic
+        # update timer.  Without this, the old coordinator keeps running
+        # hourly updates after a reload/reconfigure — those phantom
+        # updates can remove devices from the device registry and cause
+        # entity loss.
+        await super().async_shutdown()

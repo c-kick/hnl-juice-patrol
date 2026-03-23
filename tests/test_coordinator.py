@@ -1,5 +1,6 @@
 """Tests for Juice Patrol coordinator."""
 
+import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -459,3 +460,113 @@ class TestAsyncGetEntityChartData:
         assert result["readings"] == []
         assert result["prediction"] == {}
         assert result["first_reading_timestamp"] is None
+
+
+# ── async_shutdown ─────────────────────────────────────────────────────
+
+
+class TestAsyncShutdown:
+    """Test that async_shutdown properly cleans up all resources."""
+
+    @pytest.mark.asyncio
+    async def test_shutdown_calls_super(self, make_coordinator):
+        """async_shutdown must call super().async_shutdown() to cancel periodic timer."""
+        coord = make_coordinator()
+
+        from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+
+        with patch.object(
+            DataUpdateCoordinator,
+            "async_shutdown",
+            new_callable=AsyncMock,
+        ) as mock_super:
+            await coord.async_shutdown()
+
+        mock_super.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_cancels_entity_listener(self, make_coordinator):
+        """async_shutdown removes the entity registry listener."""
+        coord = make_coordinator()
+        mock_unsub = MagicMock()
+        coord._unsub_entity_listener = mock_unsub
+
+        from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+
+        with patch.object(
+            DataUpdateCoordinator,
+            "async_shutdown",
+            new_callable=AsyncMock,
+        ):
+            await coord.async_shutdown()
+
+        mock_unsub.assert_called_once()
+        assert coord._unsub_entity_listener is None
+
+    @pytest.mark.asyncio
+    async def test_shutdown_cancels_debounce_task(self, make_coordinator):
+        """async_shutdown cancels any pending debounced rediscovery."""
+        coord = make_coordinator()
+        mock_task = MagicMock()
+        mock_task.done.return_value = False
+        coord._discovery_debounce_task = mock_task
+
+        from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+
+        with patch.object(
+            DataUpdateCoordinator,
+            "async_shutdown",
+            new_callable=AsyncMock,
+        ):
+            await coord.async_shutdown()
+
+        mock_task.cancel.assert_called_once()
+        assert coord._discovery_debounce_task is None
+
+
+# ── Entity registry listener ──────────────────────────────────────────
+
+
+class TestEntityRegistryListener:
+    """Test that entity registry changes trigger re-discovery."""
+
+    def test_create_event_schedules_rediscovery(self, make_coordinator):
+        """A 'create' entity registry event schedules debounced rediscovery."""
+        coord = make_coordinator()
+        event = MagicMock()
+        event.data = {"action": "create", "entity_id": "sensor.new_battery"}
+
+        coord._handle_entity_registry_update(event)
+
+        coord.hass.async_create_task.assert_called_once()
+
+    def test_remove_event_ignored(self, make_coordinator):
+        """A 'remove' entity registry event does not schedule rediscovery."""
+        coord = make_coordinator()
+        event = MagicMock()
+        event.data = {"action": "remove", "entity_id": "sensor.old_battery"}
+
+        coord._handle_entity_registry_update(event)
+
+        coord.hass.async_create_task.assert_not_called()
+
+    def test_rapid_events_cancel_previous_debounce(self, make_coordinator):
+        """Rapid create events cancel the previous debounce task."""
+        coord = make_coordinator()
+
+        # First event
+        event1 = MagicMock()
+        event1.data = {"action": "create", "entity_id": "sensor.battery_1"}
+        mock_task = MagicMock()
+        mock_task.done.return_value = False
+        coord.hass.async_create_task.return_value = mock_task
+
+        coord._handle_entity_registry_update(event1)
+        assert coord._discovery_debounce_task is mock_task
+
+        # Second event — should cancel the first
+        event2 = MagicMock()
+        event2.data = {"action": "create", "entity_id": "sensor.battery_2"}
+        coord._handle_entity_registry_update(event2)
+
+        mock_task.cancel.assert_called_once()
