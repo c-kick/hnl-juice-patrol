@@ -107,6 +107,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ws_mark_replaced,
         ws_undo_replacement,
         ws_deny_replacement,
+        ws_restore_denied_replacement,
         ws_detect_battery_type,
         ws_refresh,
         ws_recalculate,
@@ -421,6 +422,30 @@ async def ws_deny_replacement(hass, connection, msg):
         return
     entity_id = msg["entity_id"]
     if await coordinator.async_deny_replacement(entity_id, msg["timestamp"]):
+        connection.send_result(msg["id"], {"ok": True})
+    else:
+        connection.send_error(
+            msg["id"], "not_found", f"Entity {entity_id} not in store"
+        )
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "juice_patrol/restore_denied_replacement",
+        vol.Required("entity_id"): cv.entity_id,
+        vol.Required("timestamp"): vol.Coerce(float),
+    }
+)
+@websocket_api.async_response
+async def ws_restore_denied_replacement(hass, connection, msg):
+    """Restore a previously denied replacement (re-enables suggestion)."""
+    coordinator = _ws_get_coordinator(hass, connection, msg["id"])
+    if not coordinator:
+        return
+    entity_id = msg["entity_id"]
+    if await coordinator.async_restore_denied_replacement(
+        entity_id, msg["timestamp"]
+    ):
         connection.send_result(msg["id"], {"ok": True})
     else:
         connection.send_error(

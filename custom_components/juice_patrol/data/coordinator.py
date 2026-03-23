@@ -910,6 +910,20 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return False
         return True
 
+    async def async_restore_denied_replacement(
+        self, entity_id: str, timestamp: float
+    ) -> bool:
+        """Restore a previously denied replacement (re-enables detection).
+
+        Returns False if entity_id not found in store or timestamp not denied.
+        Schedules a background refresh for sensor updates.
+        """
+        if not self.store.restore_denied_replacement(entity_id, timestamp):
+            return False
+        self._history_cache.invalidate(entity_id)
+        self.hass.async_create_task(self.async_request_refresh())
+        return True
+
     async def async_undo_replacement(
         self, entity_id: str, *, timestamp: float | None = None
     ) -> bool:
@@ -1280,6 +1294,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "last_replaced": dev.last_replaced if dev else None,
             "replacement_history": dev.replacement_history if dev else [],
             "suspected_replacements": suspected_replacements,
+            "denied_replacements": dev.denied_replacements if dev else [],
             "is_rechargeable": is_rechargeable,
             "first_reading_timestamp": readings[0]["t"] if readings else None,
             "device_name": battery.device_name,

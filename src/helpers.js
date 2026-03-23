@@ -315,12 +315,17 @@ export function renderReliabilityBadge(dev) {
   >`;
 }
 
-export function showToast(panel, message) {
+export function showToast(panel, message, action) {
+  const detail = { message };
+  if (action) {
+    detail.action = action;
+    detail.duration = 8000;
+  }
   panel.dispatchEvent(
     new CustomEvent("hass-notification", {
       bubbles: true,
       composed: true,
-      detail: { message },
+      detail,
     })
   );
 }

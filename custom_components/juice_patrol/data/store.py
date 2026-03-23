@@ -348,6 +348,23 @@ class JuicePatrolStore:
         _LOGGER.info("Suspected replacement denied at %s: %s", timestamp, entity_id)
         return True
 
+    def restore_denied_replacement(
+        self, entity_id: str, timestamp: float
+    ) -> bool:
+        """Remove a timestamp from denied_replacements (re-enables detection)."""
+        dev = self._data.devices.get(entity_id)
+        if dev is None:
+            return False
+        try:
+            dev.denied_replacements.remove(timestamp)
+        except ValueError:
+            return False
+        self._dirty = True
+        _LOGGER.info(
+            "Denied replacement restored at %s: %s", timestamp, entity_id
+        )
+        return True
+
     def set_ignored(self, entity_id: str, ignored: bool) -> None:
         """Set the ignored flag for a device."""
         if entity_id not in self._data.devices:

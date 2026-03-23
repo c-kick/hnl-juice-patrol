@@ -568,8 +568,8 @@ class JuicePatrolPanel extends LitElement {
     return formatLevel(level);
   }
 
-  _showToast(message) {
-    showToast(this, message);
+  _showToast(message, action) {
+    showToast(this, message, action);
   }
 
   _applyDeepLinkHighlight() {
@@ -729,13 +729,41 @@ class JuicePatrolPanel extends LitElement {
         entity_id: entityId,
         timestamp,
       });
-      this._showToast("Suggestion dismissed");
+      this._showToast("Suggestion dismissed", {
+        text: "Undo",
+        action: () => this._restoreDeniedReplacement(entityId, timestamp),
+      });
       if (this._detailEntity === entityId) {
         setTimeout(() => this._loadChartData(entityId), 500);
       }
     } catch (e) {
       this._showToast("Failed to dismiss suggestion");
     }
+  }
+
+  async _restoreDeniedReplacement(entityId, timestamp) {
+    try {
+      await this._hass.callWS({
+        type: "juice_patrol/restore_denied_replacement",
+        entity_id: entityId,
+        timestamp,
+      });
+      this._showToast("Suggestion restored");
+      if (this._detailEntity === entityId) {
+        setTimeout(() => this._loadChartData(entityId), 500);
+      }
+    } catch (e) {
+      this._showToast("Failed to restore suggestion");
+    }
+  }
+
+  _zoomToTimestamp(timestamp) {
+    // Zoom chart to ±3 days around the given Unix timestamp (seconds)
+    this._chartZoomTarget = timestamp;
+    this._chartRange = "zoom";
+    // Scroll chart into view so the user sees the result
+    const chartEl = this.shadowRoot?.getElementById("jp-chart");
+    if (chartEl) chartEl.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
   async _recalculate(entityId) {

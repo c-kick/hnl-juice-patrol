@@ -1,5 +1,5 @@
 import { html, nothing } from "lit";
-import { ICON_CHECK, ICON_CLOSE, CHART_RANGES } from "../constants.js";
+import { ICON_CHECK, ICON_CLOSE, ICON_MAGNIFY, ICON_RESTORE, CHART_RANGES } from "../constants.js";
 import {
   getLevelColor, formatLevel, formatRate, formatDaysRemaining,
   formatTimeRemaining, formatDate, isFastDischarge,
@@ -225,7 +225,7 @@ function renderChartCard(panel) {
             (r) => html`
               <button
                 class="range-pill ${panel._chartRange === r.key ? "active" : ""}"
-                @click=${() => { panel._chartRange = r.key; }}
+                @click=${() => { panel._chartZoomTarget = null; panel._chartRange = r.key; }}
               >${r.label}</button>
             `
           )}
@@ -383,6 +383,12 @@ function renderReplacementHistory(panel) {
             <span>
               ${e.type === "suspected" ? html`
                 <ha-icon-button
+                  .path=${ICON_MAGNIFY}
+                  style="--mdc-icon-button-size:28px;color:${CSS_SECONDARY_TEXT}"
+                  title="Show on chart"
+                  @click=${() => panel._zoomToTimestamp(e.timestamp)}
+                ></ha-icon-button>
+                <ha-icon-button
                   .path=${ICON_CHECK}
                   style="--mdc-icon-button-size:28px;color:${CSS_SUCCESS}"
                   title="Confirm replacement"
@@ -406,7 +412,51 @@ function renderReplacementHistory(panel) {
           </div>
         `)}
       </div></div>
+      ${renderDismissedSuggestions(panel, entityId, cd)}
       </ha-expansion-panel>
     </ha-card>
+  `;
+}
+
+function renderDismissedSuggestions(panel, entityId, cd) {
+  const denied = cd?.denied_replacements || [];
+  if (denied.length === 0) return nothing;
+
+  return html`
+    <ha-expansion-panel style="margin:0 8px 8px">
+      <div slot="header" style="display:flex;align-items:center;gap:8px;width:100%">
+        <ha-icon icon="mdi:eye-off-outline" style="--mdc-icon-size:18px;color:${CSS_SECONDARY_TEXT}"></ha-icon>
+        <span style="flex:1;font-weight:400;font-size:13px">Dismissed suggestions</span>
+        <span class="jp-badge neutral" style="font-size:11px">${denied.length}</span>
+      </div>
+      <div class="expansion-content"><div class="replacement-table">
+        ${denied
+          .slice()
+          .sort((a, b) => b - a)
+          .map((ts) => html`
+            <div class="replacement-table-row denied">
+              <span>${formatDate(ts * 1000, true)}</span>
+              <span style="color:${CSS_SECONDARY_TEXT};font-size:13px">
+                <ha-icon icon="mdi:eye-off-outline" style="--mdc-icon-size:16px;color:${CSS_SECONDARY_TEXT}"></ha-icon>
+                Dismissed
+              </span>
+              <span>
+                <ha-icon-button
+                  .path=${ICON_MAGNIFY}
+                  style="--mdc-icon-button-size:28px;color:${CSS_SECONDARY_TEXT}"
+                  title="Show on chart"
+                  @click=${() => panel._zoomToTimestamp(ts)}
+                ></ha-icon-button>
+                <ha-icon-button
+                  .path=${ICON_RESTORE}
+                  style="--mdc-icon-button-size:28px;color:${CSS_SECONDARY_TEXT}"
+                  title="Restore suggestion"
+                  @click=${() => panel._restoreDeniedReplacement(entityId, ts)}
+                ></ha-icon-button>
+              </span>
+            </div>
+          `)}
+      </div></div>
+    </ha-expansion-panel>
   `;
 }

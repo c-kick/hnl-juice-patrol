@@ -173,7 +173,13 @@ export async function initChart(panel, chartData) {
   };
   let tMin, tMax;
   const range = panel._chartRange || "auto";
-  if (range === "auto") {
+  if (range === "zoom" && panel._chartZoomTarget) {
+    // Zoom to ±3 days around a specific timestamp (e.g. suspected replacement)
+    const centerMs = panel._chartZoomTarget * 1000;
+    const windowMs = 3 * 86400000;
+    tMin = centerMs - windowMs;
+    tMax = centerMs + windowMs;
+  } else if (range === "auto") {
     tMin = autoTMin;
     tMax = autoTMax;
   } else if (range === "all") {
@@ -294,7 +300,7 @@ export async function initChart(panel, chartData) {
         data: [[startMs, 100], [endMs, 100]],
         symbol: "none",
         lineStyle: { width: 0 },
-        areaStyle: { color: "rgba(76, 175, 80, 0.18)", origin: 0 },
+        areaStyle: { color: colorCharge, opacity: 0.18, origin: 0 },
         silent: true,
         tooltip: { show: false },
       });
@@ -321,7 +327,9 @@ export async function initChart(panel, chartData) {
     fontSize: 10,
     color,
     distance: 6,
-    backgroundColor: "rgba(0,0,0,0.6)",
+    backgroundColor: colorTooltipBg,
+    borderColor: colorGrid,
+    borderWidth: 1,
     borderRadius: 3,
     padding: [3, 6],
   });

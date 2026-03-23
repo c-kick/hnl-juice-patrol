@@ -201,7 +201,7 @@ export const panelStyles = css`
     margin-top: 4px;
     z-index: 20;
     min-width: 160px;
-    background: var(--card-background-color, #1e1e1e);
+    background: var(--card-background-color, #fff);
     border: 1px solid var(--divider-color);
     border-radius: 8px;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
@@ -255,7 +255,7 @@ export const panelStyles = css`
     padding: 0 6px;
     border-radius: 10px;
     background: var(--primary-color);
-    color: #fff;
+    color: var(--text-primary-color, #fff);
     font-size: 11px;
     font-weight: 700;
     line-height: 1;
@@ -320,7 +320,7 @@ export const panelStyles = css`
     left: 0;
     z-index: 10;
     width: 240px;
-    background: var(--card-background-color, #1e1e1e);
+    background: var(--card-background-color, #fff);
     border: 1px solid var(--divider-color);
     border-radius: 8px;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
@@ -635,7 +635,7 @@ export const panelStyles = css`
     text-transform: uppercase;
     letter-spacing: 0.5px;
     color: var(--secondary-text-color);
-    border-bottom: 1px solid var(--divider-color, rgba(255,255,255,0.12));
+    border-bottom: 1px solid var(--divider-color, rgba(0,0,0,0.12));
   }
   .replacement-table-row {
     display: contents;
@@ -645,7 +645,7 @@ export const panelStyles = css`
     align-items: center;
     gap: 6px;
     padding: 8px 12px 8px 0;
-    border-bottom: 1px solid var(--divider-color, rgba(255,255,255,0.06));
+    border-bottom: 1px solid var(--divider-color, rgba(0,0,0,0.06));
   }
   .replacement-table-row.suspected > span {
     background: rgba(255, 152, 0, 0.05);
