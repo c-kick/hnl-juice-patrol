@@ -107,6 +107,97 @@ async def async_get_readings(
     return readings
 
 
+def _parse_statistics_entries(
+    entity_stats: list[dict],
+) -> list[dict[str, float]]:
+    """Convert raw statistics entries to readings format."""
+    readings: list[dict[str, float]] = []
+    for entry in entity_stats:
+        mean = entry.get("mean")
+        if mean is None:
+            continue
+        val = float(mean)
+        if not (0.0 <= val <= 100.0):  # Rejects NaN, inf, out-of-range
+            continue
+        readings.append({"t": entry["start"], "v": val})
+    return readings
+
+
+async def async_batch_get_statistics(
+    hass: HomeAssistant,
+    entity_ids: set[str],
+    cache: HistoryCache | None = None,
+    history_days: int | None = None,
+) -> dict[str, list[dict[str, float]]]:
+    """Fetch statistics for many entities in a single recorder query.
+
+    Returns a dict mapping entity_id → readings. Entities that returned no
+    statistics are included with an empty list. Results are written to cache
+    if provided.
+    """
+    if not entity_ids:
+        return {}
+
+    # Split into cached and uncached
+    result: dict[str, list[dict[str, float]]] = {}
+    need_fetch: set[str] = set()
+    for eid in entity_ids:
+        if cache is not None:
+            cached = cache.get(eid)
+            if cached is not None:
+                result[eid] = cached
+                continue
+        need_fetch.add(eid)
+
+    if need_fetch:
+        try:
+            from homeassistant.components.recorder import get_instance
+            from homeassistant.components.recorder.statistics import (
+                statistics_during_period,
+            )
+        except ImportError:
+            for eid in need_fetch:
+                result[eid] = []
+            return result
+
+        days = history_days if history_days is not None else HISTORY_DEFAULT_DAYS
+        start_time = utcnow() - timedelta(days=days)
+
+        try:
+            stats = await get_instance(hass).async_add_executor_job(
+                statistics_during_period,
+                hass,
+                start_time,
+                None,  # end_time
+                need_fetch,
+                "hour",
+                None,  # units
+                {"mean"},
+            )
+        except Exception:
+            _LOGGER.warning(
+                "Batch statistics fetch failed for %d entities",
+                len(need_fetch),
+                exc_info=True,
+            )
+            for eid in need_fetch:
+                result[eid] = []
+            return result
+
+        for eid in need_fetch:
+            readings = _parse_statistics_entries(stats.get(eid, []))
+            result[eid] = readings
+            if cache is not None:
+                cache.set(eid, readings)
+            if readings:
+                _LOGGER.debug(
+                    "Fetched %d readings from statistics for %s",
+                    len(readings), eid,
+                )
+
+    return result
+
+
 async def _async_get_from_statistics(
     hass: HomeAssistant,
     entity_id: str,
@@ -142,15 +233,7 @@ async def _async_get_from_statistics(
         )
         return []
 
-    entity_stats = stats.get(entity_id, [])
-    readings: list[dict[str, float]] = []
-    for entry in entity_stats:
-        mean = entry.get("mean")
-        if mean is None:
-            continue
-        val = max(0.0, min(100.0, float(mean)))
-        readings.append({"t": entry["start"], "v": val})
-
+    readings = _parse_statistics_entries(stats.get(entity_id, []))
     if readings:
         _LOGGER.debug(
             "Fetched %d readings from statistics for %s", len(readings), entity_id

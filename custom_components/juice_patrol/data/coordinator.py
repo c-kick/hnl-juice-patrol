@@ -64,7 +64,7 @@ from ..engine import (
 )
 from ..engine.compress import compress as sdt_compress
 from .battery_types import BatteryTypeResolver
-from .history import HistoryCache, async_get_readings
+from .history import HistoryCache, async_batch_get_statistics, async_get_readings
 from .store import JuicePatrolStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -200,6 +200,8 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._discovery_debounce_task: asyncio.Task | None = None
         # Maps sibling battery_state entity IDs → source entity IDs (#6)
         self._sibling_to_source: dict[str, str] = {}
+        # First refresh: skip recorder queries to avoid bootstrap timeout
+        self._first_refresh = True
 
     def async_register_new_device_callback(
         self, cb: Callable[[list[str]], None]
@@ -280,9 +282,25 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug("Debounced rediscovery failed", exc_info=True)
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """Periodic update: re-discover devices and save store."""
+        """Periodic update: re-discover devices and save store.
+
+        On the very first call (during async_config_entry_first_refresh),
+        only discovery runs — recorder queries are deferred to a background
+        task so we don't hit HA's bootstrap stage-2 timeout.
+        """
         await self._async_discover_and_subscribe()
         await self.store.async_save()
+
+        if self._first_refresh:
+            self._first_refresh = False
+            _LOGGER.debug(
+                "First refresh: discovered %d entities, deferring full build",
+                len(self.discovered),
+            )
+            # Schedule full data build outside the bootstrap window
+            self.hass.async_create_task(self._async_deferred_full_build())
+            return {}
+
         result = await self._async_build_full_data()
         # Launch retroactive bootstrap after first successful full build
         if (
@@ -294,6 +312,25 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._async_bootstrap_completed_cycles()
             )
         return result
+
+    async def _async_deferred_full_build(self) -> None:
+        """Run the full data build after bootstrap and push to listeners."""
+        try:
+            result = await self._async_build_full_data()
+            # Launch retroactive bootstrap after first successful full build
+            if (
+                not self.store.bootstrap_complete
+                and self._bootstrap_task is None
+                and self.discovered
+            ):
+                self._bootstrap_task = self.hass.async_create_task(
+                    self._async_bootstrap_completed_cycles()
+                )
+            self.async_set_updated_data(result)
+        except Exception:
+            _LOGGER.error("Deferred full build failed", exc_info=True)
+            # Next scheduled update will retry
+
 
     async def _async_discover_and_subscribe(self) -> None:
         """Run discovery and subscribe to state changes for new entities."""
@@ -889,10 +926,19 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_build_full_data(self) -> dict[str, Any]:
         """Build the full data dict for all entities.
 
-        Queries are run sequentially to avoid overwhelming the recorder's
-        SQLite database with dozens of concurrent reads.
+        Pre-fetches statistics for all entities in a single recorder query,
+        then builds each entity's data (cache hits for statistics, individual
+        fallback queries only for entities without state_class).
         """
         async with self._rebuild_lock:
+            # Batch-fetch statistics into cache (1 query instead of N)
+            all_entity_ids = set(self.discovered.keys())
+            await async_batch_get_statistics(
+                self.hass,
+                all_entity_ids,
+                cache=self._history_cache,
+                history_days=self.history_days,
+            )
             data: dict[str, Any] = {}
             failed_count = 0
             for entity_id, battery in self.discovered.items():
