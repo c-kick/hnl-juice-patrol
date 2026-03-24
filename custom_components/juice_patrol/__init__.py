@@ -148,8 +148,14 @@ async def async_setup_entry(
 async def _async_options_updated(
     hass: HomeAssistant, entry: JuicePatrolConfigEntry
 ) -> None:
-    """Handle options update."""
-    await entry.runtime_data.async_request_refresh()
+    """Handle options update — schedule non-blocking refresh.
+
+    Fire-and-forget: avoids blocking reconfigure flows that update
+    options and then immediately reload the entry.  Without this,
+    reconfigure triggers TWO sequential full data rebuilds (one from
+    this listener, one from the reload), which can overwhelm HA.
+    """
+    hass.async_create_task(entry.runtime_data.async_request_refresh())
 
 
 def _register_services(hass: HomeAssistant) -> None:

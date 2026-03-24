@@ -189,19 +189,31 @@ async def async_discover_batteries(
             deduped[entity_id] = battery
         else:
             # Already have one for this device — prefer device_class sensor,
-            # and break ties deterministically by entity_id sort order
+            # then entities with a valid level (filters out battery_state
+            # entities that report text like "charging" instead of a %),
+            # and break ties deterministically by entity_id sort order.
             existing = deduped[existing_eid]
             prefer_new = False
+            new_has_level = battery.current_level is not None
+            existing_has_level = existing.current_level is not None
             if (
                 battery.source_type == SourceType.DEVICE_CLASS_SENSOR
                 and existing.source_type != SourceType.DEVICE_CLASS_SENSOR
             ):
                 prefer_new = True
             elif (
-                battery.source_type == existing.source_type
-                and entity_id < existing_eid
+                existing.source_type == SourceType.DEVICE_CLASS_SENSOR
+                and battery.source_type != SourceType.DEVICE_CLASS_SENSOR
             ):
-                # Same source type — pick lexically first for stability
+                prefer_new = False
+            elif new_has_level and not existing_has_level:
+                # Prefer the entity that actually reports a numeric level
+                prefer_new = True
+            elif not new_has_level and existing_has_level:
+                prefer_new = False
+            elif entity_id < existing_eid:
+                # Same source type and level validity — pick lexically
+                # first for stability
                 prefer_new = True
 
             if prefer_new:

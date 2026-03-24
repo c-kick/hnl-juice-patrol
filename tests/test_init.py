@@ -10,6 +10,7 @@ from homeassistant.exceptions import ServiceValidationError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.juice_patrol import (
+    _async_options_updated,
     _get_coordinator,
     _require_coordinator,
     _require_monitored,
@@ -127,3 +128,25 @@ class TestGetCoordinator:
         """No exception when entity is discovered."""
         mock_coordinator.discovered = {"sensor.battery": MagicMock()}
         _require_monitored(mock_coordinator, "sensor.battery")  # Should not raise
+
+
+class TestAsyncOptionsUpdated:
+    """Test that options update listener is non-blocking."""
+
+    @pytest.mark.asyncio
+    async def test_options_updated_is_fire_and_forget(self):
+        """_async_options_updated should schedule refresh without awaiting it."""
+        hass = MagicMock()
+        hass.async_create_task = MagicMock(
+            side_effect=lambda coro, *a, **kw: coro.close() or MagicMock()
+        )
+        entry = MagicMock()
+        entry.runtime_data = MagicMock()
+        entry.runtime_data.async_request_refresh = AsyncMock()
+
+        await _async_options_updated(hass, entry)
+
+        # The refresh should be scheduled via async_create_task, not awaited
+        hass.async_create_task.assert_called_once()
+        # The coroutine passed to async_create_task should be the refresh
+        entry.runtime_data.async_request_refresh.assert_called_once()
