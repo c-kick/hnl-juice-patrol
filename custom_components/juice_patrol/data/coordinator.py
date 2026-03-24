@@ -198,6 +198,8 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Entity registry listener for real-time new device discovery
         self._unsub_entity_listener: CALLBACK_TYPE | None = None
         self._discovery_debounce_task: asyncio.Task | None = None
+        # Maps sibling battery_state entity IDs → source entity IDs (#6)
+        self._sibling_to_source: dict[str, str] = {}
 
     def async_register_new_device_callback(
         self, cb: Callable[[list[str]], None]
@@ -309,15 +311,29 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 device_id=battery.device_id,
             )
 
+        # Discover sibling battery_state entities for charging state tracking (#6)
+        self._sibling_to_source = {}
+        ent_reg = er.async_get(self.hass)
+        for battery in batteries:
+            if not battery.device_id:
+                continue
+            for entry in er.async_entries_for_device(ent_reg, battery.device_id):
+                if (
+                    "battery_state" in entry.entity_id
+                    and entry.entity_id != battery.entity_id
+                ):
+                    self._sibling_to_source[entry.entity_id] = battery.entity_id
+
         # Replace state listener with one covering all entities
         if self._unsub_state_listener:
             self._unsub_state_listener()
             self._unsub_state_listener = None
 
-        if new_entity_ids:
+        tracked = list(new_entity_ids | set(self._sibling_to_source))
+        if tracked:
             self._unsub_state_listener = async_track_state_change_event(
                 self.hass,
-                list(new_entity_ids),
+                tracked,
                 self._handle_state_change,
             )
         self._tracked_entities = new_entity_ids
@@ -390,6 +406,23 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         state_value = new_state.state
         if state_value in (STATE_UNAVAILABLE, STATE_UNKNOWN, None):
+            return
+
+        # Sibling battery_state entity changed → rebuild the source entity (#6)
+        source_id = self._sibling_to_source.get(entity_id)
+        if source_id is not None:
+            old_state = event.data.get("old_state")
+            old_value = old_state.state if old_state else None
+            if state_value != old_value:
+                battery = self.discovered.get(source_id)
+                if battery is not None:
+                    existing_task = self._pending_rebuilds.pop(source_id, None)
+                    if existing_task and not existing_task.done():
+                        existing_task.cancel()
+                    task = self.hass.async_create_task(
+                        self._async_rebuild_entity(source_id, battery)
+                    )
+                    self._pending_rebuilds[source_id] = task
             return
 
         battery = self.discovered.get(entity_id)
