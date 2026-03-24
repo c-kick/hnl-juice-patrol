@@ -142,7 +142,7 @@ def _exp_slope(t: float, a: float, b: float, _c: float) -> float:
 
 def _weibull_model(t: float, scale: float, lam: float, k: float) -> float:
     """Weibull: pct(t) = scale * exp(-(t / λ)^k)."""
-    if lam <= 0 or t < 0:
+    if lam <= 0 or t <= 0:
         return scale
     ratio = t / lam
     return scale * math.exp(-(ratio ** k))
@@ -223,23 +223,29 @@ class CurveFitResult:
     def predict(self, t_days: float) -> float:
         """Evaluate the fitted model at time t_days."""
         p = self.params
-        if self.model_name == "exponential":
-            return _exp_model(t_days, p["a"], p["b"], p["c"])
-        if self.model_name == "weibull":
-            return _weibull_model(t_days, p["scale"], p["lambda"], p["k"])
-        if self.model_name.startswith("piecewise_linear"):
-            return _piecewise_eval(t_days, p)
+        try:
+            if self.model_name == "exponential":
+                return _exp_model(t_days, p["a"], p["b"], p["c"])
+            if self.model_name == "weibull":
+                return _weibull_model(t_days, p["scale"], p["lambda"], p["k"])
+            if self.model_name.startswith("piecewise_linear"):
+                return _piecewise_eval(t_days, p)
+        except (OverflowError, ValueError, ZeroDivisionError):
+            return 0.0
         return 0.0
 
     def slope_at(self, t_days: float) -> float:
         """Instantaneous slope (%/day) at time t_days."""
         p = self.params
-        if self.model_name == "exponential":
-            return _exp_slope(t_days, p["a"], p["b"], p["c"])
-        if self.model_name == "weibull":
-            return _weibull_slope(t_days, p["scale"], p["lambda"], p["k"])
-        if self.model_name.startswith("piecewise_linear"):
-            return _piecewise_slope_at(t_days, p)
+        try:
+            if self.model_name == "exponential":
+                return _exp_slope(t_days, p["a"], p["b"], p["c"])
+            if self.model_name == "weibull":
+                return _weibull_slope(t_days, p["scale"], p["lambda"], p["k"])
+            if self.model_name.startswith("piecewise_linear"):
+                return _piecewise_slope_at(t_days, p)
+        except (OverflowError, ValueError, ZeroDivisionError):
+            return 0.0
         return 0.0
 
 
@@ -299,7 +305,7 @@ def _fit_exponential(
         a, b, c = params
         try:
             predicted = [_exp_model(ti, a, b, c) for ti in t]
-        except (OverflowError, ValueError):
+        except (OverflowError, ValueError, ZeroDivisionError):
             return 1e20
         return _rss(v, predicted)
 
@@ -312,7 +318,7 @@ def _fit_exponential(
     a, b, c = best_params
     try:
         predicted = [_exp_model(ti, a, b, c) for ti in t]
-    except (OverflowError, ValueError):
+    except (OverflowError, ValueError, ZeroDivisionError):
         return None
 
     return CurveFitResult(
@@ -366,7 +372,7 @@ def _fit_weibull(
             return 1e20
         try:
             predicted = [_weibull_model(ti, scale, lam, k) for ti in t]
-        except (OverflowError, ValueError):
+        except (OverflowError, ValueError, ZeroDivisionError):
             return 1e20
         return _rss(v, predicted)
 
@@ -379,7 +385,7 @@ def _fit_weibull(
     scale, lam, k = best_params
     try:
         predicted = [_weibull_model(ti, scale, lam, k) for ti in t]
-    except (OverflowError, ValueError):
+    except (OverflowError, ValueError, ZeroDivisionError):
         return None
 
     return CurveFitResult(
