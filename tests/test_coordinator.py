@@ -379,6 +379,7 @@ class TestAsyncGetEntityChartData:
         """Returns None when entity is not discovered."""
         coord = make_coordinator()
         coord.discovered = {}
+        coord._initial_build_done.set()
         result = await coord.async_get_entity_chart_data("sensor.unknown")
         assert result is None
 
@@ -386,6 +387,7 @@ class TestAsyncGetEntityChartData:
     async def test_returns_chart_data(self, make_coordinator, mock_hass):
         """Returns chart data dict with readings, prediction, and metadata."""
         coord = make_coordinator()
+        coord._initial_build_done.set()
         battery = MagicMock()
         battery.device_name = "Test Device"
         battery.current_level = 75.0
@@ -448,6 +450,7 @@ class TestAsyncGetEntityChartData:
     ):
         """When coordinator has no data for entity, prediction dict is empty."""
         coord = make_coordinator()
+        coord._initial_build_done.set()
         battery = MagicMock()
         battery.device_name = "Empty Device"
         battery.current_level = None

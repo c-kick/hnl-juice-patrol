@@ -202,6 +202,8 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._sibling_to_source: dict[str, str] = {}
         # First refresh: skip recorder queries to avoid bootstrap timeout
         self._first_refresh = True
+        # Signals when the initial data build completes (chart handler waits on this)
+        self._initial_build_done = asyncio.Event()
 
     def async_register_new_device_callback(
         self, cb: Callable[[list[str]], None]
@@ -304,6 +306,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return {}
 
         result = await self._async_build_full_data()
+        self._initial_build_done.set()
         # Launch retroactive bootstrap after first successful full build
         if (
             not self.store.bootstrap_complete
@@ -332,6 +335,8 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception:
             _LOGGER.error("Deferred full build failed", exc_info=True)
             # Next scheduled update will retry
+        finally:
+            self._initial_build_done.set()
 
 
     async def _async_discover_and_subscribe(self) -> None:
@@ -1234,6 +1239,13 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Uses a short-lived cache to prevent hammering the recorder on
         rapid frontend re-renders.
         """
+        # Wait for the initial data build so we reuse the warm cache
+        # instead of making a redundant cold recorder query.
+        try:
+            await asyncio.wait_for(self._initial_build_done.wait(), timeout=30)
+        except asyncio.TimeoutError:
+            _LOGGER.warning("Chart request before initial build completed")
+
         # Check chart cache first
         cached = self._chart_cache.get(entity_id)
         if cached is not None:
