@@ -13,6 +13,7 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.const import EntityCategory, PERCENTAGE, UnitOfTime
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -26,6 +27,19 @@ _LOGGER = logging.getLogger(__name__)
 PARALLEL_UPDATES = 0
 
 
+def _is_rechargeable(
+    coordinator: JuicePatrolCoordinator,
+    entity_id: str,
+    info: dict[str, Any],
+) -> bool:
+    """Check if a device is rechargeable from coordinator data or store."""
+    if info.get("is_rechargeable"):
+        return True
+    # During deferred build coordinator.data is {}, fall back to store
+    dev = coordinator.store.get_device(entity_id)
+    return dev is not None and dev.is_rechargeable is True
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: JuicePatrolConfigEntry,
@@ -34,6 +48,7 @@ async def async_setup_entry(
     """Set up Juice Patrol sensors."""
     coordinator: JuicePatrolCoordinator = entry.runtime_data
     known: set[str] = set()
+    known_rechargeable: set[str] = set()
 
     def _create_sensors(entity_ids: list[str]) -> None:
         """Create sensor entities for a list of source entity IDs."""
@@ -44,6 +59,7 @@ async def async_setup_entry(
             known.add(entity_id)
             info = (coordinator.data or {}).get(entity_id, {})
             slug = slugify_entity(entity_id)
+            # Universal sensors — always created
             new_entities.append(
                 JuicePatrolDischargeRate(coordinator, entity_id, slug, info)
             )
@@ -53,23 +69,77 @@ async def async_setup_entry(
             new_entities.append(
                 JuicePatrolDaysRemaining(coordinator, entity_id, slug, info)
             )
-            new_entities.append(
-                JuicePatrolSoH(coordinator, entity_id, slug, info)
-            )
-            new_entities.append(
-                JuicePatrolSoHCycling(coordinator, entity_id, slug, info)
-            )
-            new_entities.append(
-                JuicePatrolKneeRisk(coordinator, entity_id, slug, info)
-            )
+            # Rechargeable-only sensors
+            if _is_rechargeable(coordinator, entity_id, info):
+                known_rechargeable.add(entity_id)
+                new_entities.append(
+                    JuicePatrolSoH(coordinator, entity_id, slug, info)
+                )
+                new_entities.append(
+                    JuicePatrolSoHCycling(coordinator, entity_id, slug, info)
+                )
+                new_entities.append(
+                    JuicePatrolKneeRisk(coordinator, entity_id, slug, info)
+                )
         if new_entities:
             async_add_entities(new_entities)
 
-    # Create entities for currently discovered devices
-    _create_sensors(list((coordinator.data or {}).keys()))
+    def _handle_update() -> None:
+        """Add rechargeable sensors when a device's rechargeable flag changes."""
+        new_entities: list[SensorEntity] = []
+        for entity_id, info in (coordinator.data or {}).items():
+            if (
+                info.get("is_rechargeable")
+                and entity_id in known
+                and entity_id not in known_rechargeable
+            ):
+                known_rechargeable.add(entity_id)
+                slug = slugify_entity(entity_id)
+                new_entities.append(
+                    JuicePatrolSoH(coordinator, entity_id, slug, info)
+                )
+                new_entities.append(
+                    JuicePatrolSoHCycling(coordinator, entity_id, slug, info)
+                )
+                new_entities.append(
+                    JuicePatrolKneeRisk(coordinator, entity_id, slug, info)
+                )
+        if new_entities:
+            _LOGGER.debug(
+                "Adding rechargeable sensors for %d newly-rechargeable devices",
+                len(new_entities) // 3,
+            )
+            async_add_entities(new_entities)
+
+    # Create entities for all discovered devices — coordinator.data may
+    # still be empty (deferred build), but discovered entities are available
+    # immediately.  Entities start with empty state and get populated when
+    # the deferred build completes and async_set_updated_data fires.
+    _create_sensors(list(coordinator.discovered.keys()))
 
     # Register callback for dynamically discovered devices
     coordinator.async_register_new_device_callback(_create_sensors)
+
+    # Listen for coordinator updates to catch rechargeable flag changes
+    entry.async_on_unload(coordinator.async_add_listener(_handle_update))
+
+    # Clean up orphaned rechargeable-only sensors for non-rechargeable devices.
+    # These were created unconditionally in earlier versions.
+    _RECHARGEABLE_SUFFIXES = ("_soh", "_soh_cycling", "_knee_risk")
+    ent_reg = er.async_get(hass)
+    for reg_entry in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
+        if reg_entry.domain != "sensor":
+            continue
+        uid = reg_entry.unique_id
+        if any(uid.endswith(s) for s in _RECHARGEABLE_SUFFIXES):
+            # Extract source entity_id from unique_id:
+            # format is "juice_patrol_sensor.xxx_suffix"
+            for suffix in _RECHARGEABLE_SUFFIXES:
+                if uid.endswith(suffix):
+                    source = uid.removeprefix(f"{DOMAIN}_").removesuffix(suffix)
+                    break
+            if source not in known_rechargeable:
+                ent_reg.async_remove(reg_entry.entity_id)
 
     # Summary sensor (only once)
     async_add_entities([JuicePatrolLowestBattery(coordinator)])

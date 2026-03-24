@@ -11,7 +11,11 @@ from homeassistant.components import websocket_api
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
-from homeassistant.helpers import config_validation as cv, device_registry as dr
+from homeassistant.helpers import (
+    config_validation as cv,
+    device_registry as dr,
+    entity_registry as er,
+)
 from homeassistant.helpers.typing import ConfigType
 
 from .const import (
@@ -116,6 +120,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ws_get_entity_chart,
         ws_set_ignored,
         ws_get_ignored,
+        ws_get_loading_status,
     ):
         websocket_api.async_register_command(hass, ws_handler)
     return True
@@ -136,6 +141,15 @@ async def async_setup_entry(
     entry.runtime_data = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Clean up orphaned devices that no longer have any entities.
+    # These accumulate when device identifiers change (e.g. switching from
+    # HA device_id hashes to stable source_entity_id identifiers).
+    ent_registry = er.async_get(hass)
+    dev_registry = dr.async_get(hass)
+    for dev_entry in dr.async_entries_for_config_entry(dev_registry, entry.entry_id):
+        if not er.async_entries_for_device(ent_registry, dev_entry.id):
+            dev_registry.async_remove_device(dev_entry.id)
 
     entry.async_on_unload(
         entry.add_update_listener(_async_options_updated)
@@ -689,6 +703,18 @@ async def ws_get_ignored(hass, connection, msg):
     connection.send_result(msg["id"], {"devices": devices})
 
 
+@websocket_api.websocket_command(
+    {vol.Required("type"): "juice_patrol/get_loading_status"}
+)
+@websocket_api.async_response
+async def ws_get_loading_status(hass, connection, msg):
+    """Return initial build progress for the loading indicator."""
+    coordinator = _ws_get_coordinator(hass, connection, msg["id"])
+    if not coordinator:
+        return
+    connection.send_result(msg["id"], coordinator.get_loading_status())
+
+
 async def async_remove_config_entry_device(
     hass: HomeAssistant,
     config_entry: JuicePatrolConfigEntry,
@@ -699,14 +725,13 @@ async def async_remove_config_entry_device(
     for identifier in device_entry.identifiers:
         if identifier[0] != DOMAIN:
             continue
-        device_id_or_entity = identifier[1]
+        ident_value = identifier[1]
         # The virtual summary device should not be removable
-        if device_id_or_entity == "juice_patrol":
+        if ident_value == "juice_patrol":
             return False
-        # Check if any discovered entity still uses this identifier
-        for battery in coordinator.discovered.values():
-            if (battery.device_id or battery.entity_id) == device_id_or_entity:
-                return False
+        # Device identifiers are source entity_ids
+        if ident_value in coordinator.discovered:
+            return False
     return True
 
 

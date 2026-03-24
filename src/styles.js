@@ -180,6 +180,14 @@ export const panelStyles = css`
   .loading-state ha-spinner {
     margin-bottom: 8px;
   }
+  .jp-loading-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    color: var(--secondary-text-color);
+    font-size: 14px;
+  }
   .jp-dialog-desc {
     font-size: 13px;
     color: var(--secondary-text-color);

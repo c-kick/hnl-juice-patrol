@@ -39,6 +39,8 @@ class JuicePatrolPanel extends LitElement {
       _filters: { state: true },
       _dashboardData: { state: true },
       _dashboardLoading: { state: true },
+      _initialLoading: { state: true },
+      _loadingProgress: { state: true },
     };
   }
 
@@ -69,6 +71,9 @@ class JuicePatrolPanel extends LitElement {
     this._filters = { status: { value: ["active", "low"] } };
     this._dashboardData = null;
     this._dashboardLoading = false;
+    this._initialLoading = true;
+    this._loadingProgress = null;
+    this._loadingPollTimer = null;
     this._sorting = { column: "level", direction: "asc" };
     this._flashCleanupTimer = null;
     this._refreshTimer = null;
@@ -88,6 +93,7 @@ class JuicePatrolPanel extends LitElement {
     // Treat it like a first load to re-fetch config and rebuild state.
     const connectionChanged = !isFirstLoad && hass?.connection && hass.connection !== prevConnection;
     this._processHassUpdate(isFirstLoad || connectionChanged);
+    if (isFirstLoad) this._pollLoadingStatus();
     this._hassInitialized = true;
   }
 
@@ -156,7 +162,7 @@ class JuicePatrolPanel extends LitElement {
 
   disconnectedCallback() {
     super.disconnectedCallback();
-    for (const t of ["_flashCleanupTimer", "_refreshTimer"]) {
+    for (const t of ["_flashCleanupTimer", "_refreshTimer", "_loadingPollTimer"]) {
       if (this[t]) { clearTimeout(this[t]); this[t] = null; }
     }
     if (this._escapeHandler) {
@@ -302,6 +308,10 @@ class JuicePatrolPanel extends LitElement {
       if (this._activeView !== "detail") {
         this._entities = this._entityList;
       }
+      // Clear loading indicator once entities actually appear
+      if (this._initialLoading && this._entityList.length > 0) {
+        this._initialLoading = false;
+      }
     }
 
     if (isFirstLoad) {
@@ -326,6 +336,23 @@ class JuicePatrolPanel extends LitElement {
         }
       }
     }
+  }
+
+  async _pollLoadingStatus() {
+    if (!this._hass?.connection) return;
+    try {
+      const result = await this._hass.connection.sendMessagePromise({
+        type: "juice_patrol/get_loading_status",
+      });
+      this._loadingProgress = result;
+      if (!result.loading) {
+        this._initialLoading = false;
+        return;
+      }
+    } catch {
+      // WS command not registered yet (HA still starting) — retry
+    }
+    this._loadingPollTimer = setTimeout(() => this._pollLoadingStatus(), 2000);
   }
 
   _updateEntities() {
@@ -1252,8 +1279,20 @@ class JuicePatrolPanel extends LitElement {
 
   _renderDevicesView() {
     const filtered = this._getFilteredEntities();
+    const prog = this._loadingProgress;
+    const loadingText = this._initialLoading
+      ? (prog && prog.total > 0
+          ? `Analysing batteries\u2026 ${prog.loaded}/${prog.total}`
+          : "Loading batteries\u2026")
+      : "No devices match the current filter.";
 
     return html`
+      ${this._initialLoading ? html`
+        <div class="jp-loading-bar">
+          <ha-circular-progress indeterminate size="small"></ha-circular-progress>
+          <span>${loadingText}</span>
+        </div>
+      ` : nothing}
       <hass-tabs-subpage-data-table
         .hass=${this._hass}
         .narrow=${this.narrow}
@@ -1264,7 +1303,7 @@ class JuicePatrolPanel extends LitElement {
         .data=${filtered}
         .id=${"sourceEntity"}
         .searchLabel=${"Search " + filtered.length + " devices"}
-        .noDataText=${"No devices match the current filter."}
+        .noDataText=${loadingText}
         clickable
         .initialSorting=${this._sorting}
         has-filters

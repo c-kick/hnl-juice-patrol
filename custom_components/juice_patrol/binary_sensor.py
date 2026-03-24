@@ -51,7 +51,7 @@ async def async_setup_entry(
         if new_entities:
             async_add_entities(new_entities)
 
-    _create_binary_sensors(list((coordinator.data or {}).keys()))
+    _create_binary_sensors(list(coordinator.discovered.keys()))
     coordinator.async_register_new_device_callback(_create_binary_sensors)
     async_add_entities([JuicePatrolAttentionNeeded(coordinator)])
 

@@ -202,6 +202,10 @@ class TestSetupEntry:
             "sensor.motion_battery": _make_device_info(device_name="Motion"),
             "sensor.door_battery": _make_device_info(device_name="Door"),
         }
+        mock_coordinator.discovered = {
+            "sensor.motion_battery": MagicMock(),
+            "sensor.door_battery": MagicMock(),
+        }
 
         entry = MagicMock()
         entry.runtime_data = mock_coordinator

@@ -17,6 +17,7 @@ DEFAULT_STALE_TIMEOUT = 48  # hours
 DEFAULT_PREDICTION_HORIZON = 7  # days
 DEFAULT_HISTORY_DAYS = 1095  # 3 years
 DEFAULT_SCAN_INTERVAL = 3600  # seconds (1 hour)
+DEFAULT_REBUILD_COOLDOWN = 300  # seconds (5 min) — min interval between state-triggered rebuilds per entity
 
 # Prediction
 MIN_READINGS_FOR_PREDICTION = 3

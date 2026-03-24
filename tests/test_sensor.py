@@ -101,15 +101,57 @@ SOURCE_ENTITY = "sensor.living_room_motion_battery"
 SLUG = "living_room_motion_battery"
 
 
+def _setup_store_rechargeable(mock_coordinator, entity_id, is_rechargeable):
+    """Configure mock store to return a specific is_rechargeable value."""
+    dev = MagicMock()
+    dev.is_rechargeable = is_rechargeable
+    mock_coordinator.store.get_device.side_effect = (
+        lambda eid: dev if eid == entity_id else None
+    )
+
+
 class TestAsyncSetupEntry:
     """Tests for the async_setup_entry platform function."""
 
     @pytest.mark.asyncio
-    async def test_creates_per_device_and_summary_sensors(
+    async def test_creates_universal_sensors_for_non_rechargeable(
         self, mock_coordinator
     ) -> None:
-        """Setup creates 6 per-device sensors + 1 summary sensor."""
+        """Non-rechargeable device gets 3 universal sensors + 1 summary."""
         mock_coordinator.data = {SOURCE_ENTITY: _make_device_info()}
+        mock_coordinator.discovered = {SOURCE_ENTITY: MagicMock()}
+        _setup_store_rechargeable(mock_coordinator, SOURCE_ENTITY, None)
+
+        entry = MagicMock()
+        entry.runtime_data = mock_coordinator
+
+        added: list = []
+
+        def capture_add(entities, **kwargs):
+            added.extend(entities)
+
+        await async_setup_entry(MagicMock(), entry, capture_add)
+
+        # 3 per-device + 1 summary
+        assert len(added) == 4
+        types = {type(e) for e in added}
+        assert types == {
+            JuicePatrolDischargeRate,
+            JuicePatrolPredictedEmpty,
+            JuicePatrolDaysRemaining,
+            JuicePatrolLowestBattery,
+        }
+
+    @pytest.mark.asyncio
+    async def test_creates_all_sensors_for_rechargeable(
+        self, mock_coordinator
+    ) -> None:
+        """Rechargeable device gets all 6 sensors + 1 summary."""
+        mock_coordinator.data = {
+            SOURCE_ENTITY: _make_device_info(is_rechargeable=True)
+        }
+        mock_coordinator.discovered = {SOURCE_ENTITY: MagicMock()}
+        _setup_store_rechargeable(mock_coordinator, SOURCE_ENTITY, True)
 
         entry = MagicMock()
         entry.runtime_data = mock_coordinator
@@ -135,11 +177,40 @@ class TestAsyncSetupEntry:
         }
 
     @pytest.mark.asyncio
+    async def test_rechargeable_from_store_during_deferred_build(
+        self, mock_coordinator
+    ) -> None:
+        """When coordinator.data is empty, is_rechargeable falls back to store."""
+        mock_coordinator.data = {}  # deferred build — no data yet
+        mock_coordinator.discovered = {SOURCE_ENTITY: MagicMock()}
+        _setup_store_rechargeable(mock_coordinator, SOURCE_ENTITY, True)
+
+        entry = MagicMock()
+        entry.runtime_data = mock_coordinator
+
+        added: list = []
+
+        def capture_add(entities, **kwargs):
+            added.extend(entities)
+
+        await async_setup_entry(MagicMock(), entry, capture_add)
+
+        # 6 per-device + 1 summary (store says rechargeable)
+        assert len(added) == 7
+        rechargeable_types = {
+            type(e)
+            for e in added
+            if type(e) in {JuicePatrolSoH, JuicePatrolSoHCycling, JuicePatrolKneeRisk}
+        }
+        assert len(rechargeable_types) == 3
+
+    @pytest.mark.asyncio
     async def test_registers_callback_for_new_devices(
         self, mock_coordinator
     ) -> None:
         """Setup registers a new-device callback on the coordinator."""
         mock_coordinator.data = {}
+        mock_coordinator.store.get_device.return_value = None
         entry = MagicMock()
         entry.runtime_data = mock_coordinator
 
@@ -153,6 +224,7 @@ class TestAsyncSetupEntry:
     ) -> None:
         """The registered callback creates sensors when new devices appear."""
         mock_coordinator.data = {}
+        mock_coordinator.store.get_device.return_value = None
         entry = MagicMock()
         entry.runtime_data = mock_coordinator
 
@@ -174,8 +246,8 @@ class TestAsyncSetupEntry:
         mock_coordinator.data = {SOURCE_ENTITY: _make_device_info()}
         callback([SOURCE_ENTITY])
 
-        # Should now have 1 summary + 6 per-device = 7
-        assert len(added) == 7
+        # Should now have 1 summary + 3 per-device (non-rechargeable) = 4
+        assert len(added) == 4
 
     @pytest.mark.asyncio
     async def test_callback_skips_already_known_devices(
@@ -183,6 +255,8 @@ class TestAsyncSetupEntry:
     ) -> None:
         """The callback does not create duplicate sensors for known devices."""
         mock_coordinator.data = {SOURCE_ENTITY: _make_device_info()}
+        mock_coordinator.discovered = {SOURCE_ENTITY: MagicMock()}
+        mock_coordinator.store.get_device.return_value = None
         entry = MagicMock()
         entry.runtime_data = mock_coordinator
 
@@ -192,7 +266,7 @@ class TestAsyncSetupEntry:
             added.extend(entities)
 
         await async_setup_entry(MagicMock(), entry, capture_add)
-        assert len(added) == 7  # 6 per-device + 1 summary
+        assert len(added) == 4  # 3 per-device + 1 summary
 
         # Call the callback again with the same entity
         callback = (
@@ -201,7 +275,44 @@ class TestAsyncSetupEntry:
         callback([SOURCE_ENTITY])
 
         # No new entities should be added
+        assert len(added) == 4
+
+    @pytest.mark.asyncio
+    async def test_listener_adds_rechargeable_sensors_when_flag_changes(
+        self, mock_coordinator
+    ) -> None:
+        """Coordinator listener creates rechargeable sensors when device becomes rechargeable."""
+        mock_coordinator.data = {SOURCE_ENTITY: _make_device_info()}
+        mock_coordinator.discovered = {SOURCE_ENTITY: MagicMock()}
+        mock_coordinator.store.get_device.return_value = None
+
+        entry = MagicMock()
+        entry.runtime_data = mock_coordinator
+
+        added: list = []
+
+        def capture_add(entities, **kwargs):
+            added.extend(entities)
+
+        await async_setup_entry(MagicMock(), entry, capture_add)
+        assert len(added) == 4  # 3 universal + 1 summary
+
+        # Simulate the device becoming rechargeable via coordinator update
+        mock_coordinator.data = {
+            SOURCE_ENTITY: _make_device_info(is_rechargeable=True)
+        }
+        # Call the listener registered via async_add_listener
+        listener = mock_coordinator.async_add_listener.call_args[0][0]
+        listener()
+
+        # Should add 3 rechargeable-only sensors
         assert len(added) == 7
+        new_types = {type(e) for e in added[4:]}
+        assert new_types == {
+            JuicePatrolSoH,
+            JuicePatrolSoHCycling,
+            JuicePatrolKneeRisk,
+        }
 
 
 class TestDischargeRate:

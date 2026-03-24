@@ -23,6 +23,7 @@ from ..const import (
     DEFAULT_HISTORY_DAYS,
     DEFAULT_LOW_THRESHOLD,
     DEFAULT_PREDICTION_HORIZON,
+    DEFAULT_REBUILD_COOLDOWN,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_STALE_TIMEOUT,
     DOMAIN,
@@ -204,12 +205,27 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._first_refresh = True
         # Signals when the initial data build completes (chart handler waits on this)
         self._initial_build_done = asyncio.Event()
+        # Build progress: (built, total) — exposed via WS for loading UI
+        self._build_progress: tuple[int, int] | None = None
+        # Per-entity cooldown: last rebuild timestamp to limit state-triggered rebuilds
+        self._last_rebuild_ts: dict[str, float] = {}
+        self._rebuild_cooldown = DEFAULT_REBUILD_COOLDOWN
 
     def async_register_new_device_callback(
         self, cb: Callable[[list[str]], None]
     ) -> None:
         """Register a callback for when new devices are discovered."""
         self._new_device_callbacks.append(cb)
+
+    def get_loading_status(self) -> dict[str, Any]:
+        """Return build progress for the loading indicator."""
+        loading = not self._initial_build_done.is_set()
+        progress = self._build_progress
+        return {
+            "loading": loading,
+            "loaded": progress[0] if progress else 0,
+            "total": progress[1] if progress else len(self.discovered),
+        }
 
     @property
     def low_threshold(self) -> int:
@@ -319,9 +335,22 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return result
 
     async def _async_deferred_full_build(self) -> None:
-        """Run the full data build after bootstrap and push to listeners."""
+        """Run the full data build after bootstrap and push to listeners.
+
+        Sensor/binary_sensor entities are created from coordinator.discovered
+        during async_forward_entry_setups (before this task runs).  They start
+        with empty state.  async_set_updated_data pushes the built data to
+        those existing entities, populating their state.
+        """
         try:
+            _LOGGER.debug(
+                "Deferred build starting: %d discovered entities",
+                len(self.discovered),
+            )
             result = await self._async_build_full_data()
+            _LOGGER.debug(
+                "Deferred build complete: %d entities built", len(result),
+            )
             # Launch retroactive bootstrap after first successful full build
             if (
                 not self.store.bootstrap_complete
@@ -396,22 +425,12 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._fired_stale.discard(entity_id)
             self._fired_predicted_low.discard(entity_id)
 
-        # Clean up devices for entities that have disappeared (deduplicate by identifier)
+        # Clean up devices for entities that have disappeared
         if disappeared:
-            identifiers_to_remove: dict[str, list[str]] = {}
-            for entity_id in disappeared:
-                dev_data = self.store.get_device(entity_id)
-                identifier = (
-                    dev_data.device_id
-                    if dev_data and dev_data.device_id
-                    else entity_id
-                )
-                identifiers_to_remove.setdefault(identifier, []).append(entity_id)
-
             dev_reg = dr.async_get(self.hass)
-            for identifier, entity_ids in identifiers_to_remove.items():
+            for entity_id in disappeared:
                 device = dev_reg.async_get_device(
-                    identifiers={(DOMAIN, identifier)}
+                    identifiers={(DOMAIN, entity_id)}
                 )
                 if device:
                     dev_reg.async_update_device(
@@ -419,8 +438,8 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         remove_config_entry_id=self.config_entry.entry_id,
                     )
                     _LOGGER.info(
-                        "Removed stale device for disappeared entities %s",
-                        entity_ids,
+                        "Removed stale device for disappeared entity %s",
+                        entity_id,
                     )
 
     def _pre_populate_event_dedup(self, data: dict[str, Any]) -> None:
@@ -546,6 +565,15 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # every attribute update triggers a full prediction recalculation.
         if level == old_level and not replaced:
             return
+
+        # Per-entity cooldown: skip rebuild if one ran recently.
+        # Replacements bypass the cooldown — they need immediate recalculation.
+        now = time.time()
+        if not replaced:
+            last_ts = self._last_rebuild_ts.get(entity_id, 0.0)
+            if now - last_ts < self._rebuild_cooldown:
+                return
+        self._last_rebuild_ts[entity_id] = now
 
         # Cancel any pending rebuild for this entity (debounce rapid updates)
         existing_task = self._pending_rebuilds.pop(entity_id, None)
@@ -948,6 +976,8 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             data: dict[str, Any] = {}
             failed_count = 0
+            total = len(self.discovered)
+            built = 0
             for entity_id, battery in self.discovered.items():
                 try:
                     data[entity_id] = await self._async_build_entity_data(
@@ -958,7 +988,13 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "Failed to build data for %s", entity_id, exc_info=True
                     )
                     failed_count += 1
-                    continue
+                built += 1
+                self._build_progress = (built, total)
+                # Yield to the event loop between entity builds so HA
+                # stays responsive during the CPU-bound prediction math.
+                await asyncio.sleep(0)
+
+            self._build_progress = (total, total)
 
             if failed_count:
                 _LOGGER.warning(
@@ -1197,7 +1233,13 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Reject fits that predict an increase at t=now for non-rechargeable
         # devices — this means the model is fitting noise, not discharge.
-        if fit.slope_at(now_days) > 0.0:
+        # Exception: when the battery is already near-dead (≤5%), a slight
+        # positive slope is a model-floor artifact (e.g. exponential rebound),
+        # not real charging.  The monotonic-decrease enforcement below (line
+        # ~1223) flattens the visual curve regardless, so the fit is still
+        # useful for showing the discharge shape.
+        last_v = compressed[-1]["v"]
+        if fit.slope_at(now_days) > 0.0 and last_v > 5.0:
             return None
 
         # End point: predicted empty or +30 days
