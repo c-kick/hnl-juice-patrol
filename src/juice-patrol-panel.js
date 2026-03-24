@@ -117,6 +117,18 @@ class JuicePatrolPanel extends LitElement {
   connectedCallback() {
     super.connectedCallback();
     this.requestUpdate();
+    // Suppress "Subscription not found" unhandled rejections.
+    // During WS reconnection, home-assistant-js-websocket tries to
+    // unsubscribe stale subscription IDs on the new connection. The server
+    // rejects these (the IDs don't exist on the new connection), and the
+    // library doesn't catch the rejection — so it surfaces as a console
+    // error. This is a benign framework-level race, not a real failure.
+    this._subscriptionErrorHandler = (e) => {
+      if (e.reason?.code === "not_found" && e.reason?.message === "Subscription not found.") {
+        e.preventDefault();
+      }
+    };
+    window.addEventListener("unhandledrejection", this._subscriptionErrorHandler);
     this._escapeHandler = (e) => {
       if (e.key === "Escape") this._closeOverlays();
     };
@@ -176,6 +188,10 @@ class JuicePatrolPanel extends LitElement {
     if (this._locationChangedHandler) {
       window.removeEventListener("location-changed", this._locationChangedHandler);
       this._locationChangedHandler = null;
+    }
+    if (this._subscriptionErrorHandler) {
+      window.removeEventListener("unhandledrejection", this._subscriptionErrorHandler);
+      this._subscriptionErrorHandler = null;
     }
     if (this._visibilityHandler) {
       document.removeEventListener("visibilitychange", this._visibilityHandler);
