@@ -74,18 +74,13 @@ const x=globalThis,w=e=>e,$=x.trustedTypes,k=$?$.createPolicy("lit-html",{create
 
   /* Hero responsive */
   @container hero (max-width: 480px) {
-    .hero-row { flex-direction: column; }
     .hero-left {
-      border-right: none; border-bottom: 1px solid var(--border);
-      padding: 14px 16px; flex-direction: row; gap: 8px;
-      min-width: unset; justify-content: flex-start; align-items: baseline;
+      padding: 14px 12px; min-width: 100px;
     }
     .hero-big { font-size: 32px; }
-    .hero-unit { margin-top: 0; }
-    .hero-right { padding: 12px 16px; }
+    .hero-right { padding: 10px 12px; }
     .hero-name { font-size: 15px; }
     .hero-bar-row { margin-top: 8px; }
-    .hero-stats { flex-wrap: wrap; }
     .hero-stat { flex: 1 1 calc(50% - 1px); padding: 8px 10px; }
     .hero-stat:nth-child(odd):not(:first-child) { border-left: none; }
     .hero-stat:nth-child(1), .hero-stat:nth-child(2) {
@@ -1220,13 +1215,17 @@ const x=globalThis,w=e=>e,$=x.trustedTypes,k=$?$.createPolicy("lit-html",{create
       </ha-expansion-panel>
     </ha-card>
   `}(e,i)}
-    ${function(e){const t=e._detailEntity;if(!t)return I;const i=e._chartData,a=i?.replacement_history||[],n=i?.suspected_replacements||[],s=[...[...a].map(e=>({type:"confirmed",timestamp:e})),...n.map(e=>({type:"suspected",timestamp:e.timestamp,old_level:e.old_level,new_level:e.new_level}))].sort((e,t)=>t.timestamp-e.timestamp);return 0===s.length?I:U`
+    ${function(e){const t=e._detailEntity;if(!t)return I;const i=e._chartData,a=i?.replacement_history||[],n=i?.suspected_replacements||[],s=[...[...a].map(e=>({type:"confirmed",timestamp:e})),...n.map(e=>({type:"suspected",timestamp:e.timestamp,old_level:e.old_level,new_level:e.new_level}))].sort((e,t)=>t.timestamp-e.timestamp);if(0===s.length)return I;const r=s.filter(e=>"confirmed"===e.type).length,o=s.filter(e=>"suspected"===e.type).length,l=[];r&&l.push(`${r} battery replacement${1!==r?"s":""}`);o&&l.push(`${o} suspected replacement${1!==o?"s":""} found in history`);const c=l.join(", ")+" — click to expand";return U`
     <ha-card style="margin-bottom:16px">
       <ha-expansion-panel>
-        <div slot="header" style="display:flex;align-items:center;gap:8px;width:100%">
+        <div slot="header" style="display:flex;align-items:center;gap:8px;width:100%" title="${c}">
           <ha-icon icon="mdi:history" style="--mdc-icon-size:20px;color:${Fe}"></ha-icon>
           <span style="flex:1;font-weight:500">Replacement History</span>
-          <span class="jp-badge neutral">${s.length}</span>
+          ${r?U`<span class="jp-badge neutral">${r}</span>`:I}
+          ${o?U`
+            ${r?U`<span style="color:${Fe};font-size:12px">+</span>`:I}
+            <span class="jp-badge warning">${o}</span>
+          `:I}
         </div>
         <div class="expansion-content"><div class="replacement-table">
         <div class="replacement-table-header">

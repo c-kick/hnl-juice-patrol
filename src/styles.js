@@ -55,18 +55,13 @@ export const panelStyles = css`
 
   /* Hero responsive */
   @container hero (max-width: 480px) {
-    .hero-row { flex-direction: column; }
     .hero-left {
-      border-right: none; border-bottom: 1px solid var(--border);
-      padding: 14px 16px; flex-direction: row; gap: 8px;
-      min-width: unset; justify-content: flex-start; align-items: baseline;
+      padding: 14px 12px; min-width: 100px;
     }
     .hero-big { font-size: 32px; }
-    .hero-unit { margin-top: 0; }
-    .hero-right { padding: 12px 16px; }
+    .hero-right { padding: 10px 12px; }
     .hero-name { font-size: 15px; }
     .hero-bar-row { margin-top: 8px; }
-    .hero-stats { flex-wrap: wrap; }
     .hero-stat { flex: 1 1 calc(50% - 1px); padding: 8px 10px; }
     .hero-stat:nth-child(odd):not(:first-child) { border-left: none; }
     .hero-stat:nth-child(1), .hero-stat:nth-child(2) {

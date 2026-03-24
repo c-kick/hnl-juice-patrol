@@ -354,13 +354,25 @@ function renderReplacementHistory(panel) {
 
   if (entries.length === 0) return nothing;
 
+  const confirmedCount = entries.filter((e) => e.type === "confirmed").length;
+  const suspectedCount = entries.filter((e) => e.type === "suspected").length;
+
+  const tooltipParts = [];
+  if (confirmedCount) tooltipParts.push(`${confirmedCount} battery replacement${confirmedCount !== 1 ? "s" : ""}`);
+  if (suspectedCount) tooltipParts.push(`${suspectedCount} suspected replacement${suspectedCount !== 1 ? "s" : ""} found in history`);
+  const tooltip = tooltipParts.join(", ") + " \u2014 click to expand";
+
   return html`
     <ha-card style="margin-bottom:16px">
       <ha-expansion-panel>
-        <div slot="header" style="display:flex;align-items:center;gap:8px;width:100%">
+        <div slot="header" style="display:flex;align-items:center;gap:8px;width:100%" title="${tooltip}">
           <ha-icon icon="mdi:history" style="--mdc-icon-size:20px;color:${CSS_SECONDARY_TEXT}"></ha-icon>
           <span style="flex:1;font-weight:500">Replacement History</span>
-          <span class="jp-badge neutral">${entries.length}</span>
+          ${confirmedCount ? html`<span class="jp-badge neutral">${confirmedCount}</span>` : nothing}
+          ${suspectedCount ? html`
+            ${confirmedCount ? html`<span style="color:${CSS_SECONDARY_TEXT};font-size:12px">+</span>` : nothing}
+            <span class="jp-badge warning">${suspectedCount}</span>
+          ` : nothing}
         </div>
         <div class="expansion-content"><div class="replacement-table">
         <div class="replacement-table-header">
