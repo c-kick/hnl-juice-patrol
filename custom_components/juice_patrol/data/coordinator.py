@@ -240,7 +240,9 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def async_setup(self) -> None:
         """Set up the coordinator: load store and run initial discovery."""
         await self.store.async_load()
-        await self.type_resolver.async_load_library()
+        # Fetch Battery Notes library in background — resolve_type() degrades
+        # gracefully to attribute-only lookup while the fetch is in progress.
+        self.hass.async_create_task(self.type_resolver.async_load_library())
         # Populate class models from stored completed cycles
         self._load_class_models_from_store()
         # Listen for new entities to discover battery devices promptly

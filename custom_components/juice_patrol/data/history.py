@@ -187,7 +187,10 @@ async def async_batch_get_statistics(
         for eid in need_fetch:
             readings = _parse_statistics_entries(stats.get(eid, []))
             result[eid] = readings
-            if cache is not None:
+            if cache is not None and readings:
+                # Only cache non-empty results — entities without state_class
+                # return [] from statistics and must fall through to the raw
+                # history path in async_get_readings().
                 cache.set(eid, readings)
             if readings:
                 _LOGGER.debug(
