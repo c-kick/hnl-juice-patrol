@@ -137,6 +137,9 @@ class TestAsyncOptionsUpdated:
     async def test_options_updated_is_fire_and_forget(self):
         """_async_options_updated should schedule refresh without awaiting it."""
         hass = MagicMock()
+        hass.async_create_task = MagicMock(
+            side_effect=lambda coro, *a, **kw: coro.close() or MagicMock()
+        )
         entry = MagicMock()
         entry.runtime_data = MagicMock()
         entry.runtime_data.async_request_refresh = AsyncMock()

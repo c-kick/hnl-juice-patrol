@@ -109,6 +109,13 @@ class TestExtractCurrentSegment:
 # ── Coordinator construction helper ──────────────────────────────────────
 
 
+def _consume_coroutine(coro, *_args, **_kwargs):
+    """Close coroutine to prevent 'never awaited' RuntimeWarnings."""
+    if hasattr(coro, "close"):
+        coro.close()
+    return MagicMock()
+
+
 @pytest.fixture
 def mock_hass():
     """Minimal mock HomeAssistant for coordinator construction."""
@@ -116,7 +123,7 @@ def mock_hass():
     hass.config.path = MagicMock(return_value="/config")
     hass.bus = MagicMock()
     hass.states = MagicMock()
-    hass.async_create_task = MagicMock()
+    hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
     return hass
 
 
@@ -554,12 +561,14 @@ class TestEntityRegistryListener:
         """Rapid create events cancel the previous debounce task."""
         coord = make_coordinator()
 
-        # First event
+        # First event — return a controllable mock task
         event1 = MagicMock()
         event1.data = {"action": "create", "entity_id": "sensor.battery_1"}
         mock_task = MagicMock()
         mock_task.done.return_value = False
-        coord.hass.async_create_task.return_value = mock_task
+        coord.hass.async_create_task.side_effect = (
+            lambda coro, *a, **kw: (coro.close(), mock_task)[-1]
+        )
 
         coord._handle_entity_registry_update(event1)
         assert coord._discovery_debounce_task is mock_task
