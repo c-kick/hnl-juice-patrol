@@ -1,4 +1,4 @@
-"""Rolling median smoothing for noisy battery readings.
+"""Smoothing algorithms for noisy battery readings.
 
 Pure Python — no HA imports, no numpy/scipy.
 """
@@ -6,6 +6,7 @@ Pure Python — no HA imports, no numpy/scipy.
 from __future__ import annotations
 
 import bisect
+import math
 
 
 def rolling_median(
@@ -47,6 +48,74 @@ def rolling_median(
         else:
             median = (window_vals[wn // 2 - 1] + window_vals[wn // 2]) / 2.0
         result.append({"t": t, "v": round(median, 2)})
+
+    return result
+
+
+def gaussian_smooth(
+    readings: list[dict[str, float]],
+    n_output: int = 150,
+    bandwidth_frac: float = 0.03,
+    min_bandwidth_days: float = 3.0,
+) -> list[dict[str, float]]:
+    """Gaussian kernel smoother for battery readings.
+
+    Produces *n_output* evenly-spaced points using Gaussian-weighted local
+    averaging.  Unlike rolling median, the output has no step transitions —
+    the Gaussian kernel inherently interpolates through discontinuities.
+
+    Args:
+        readings: sorted list of {"t": unix_ts, "v": pct}.
+        n_output: number of evenly-spaced output points.
+        bandwidth_frac: sigma as a fraction of total duration.
+        min_bandwidth_days: minimum sigma in days (prevents under-smoothing
+            on short cycles).
+
+    Returns:
+        List of {"t", "v"} with *n_output* evenly-spaced, smoothed points.
+    """
+    if len(readings) < 3:
+        return list(readings)
+
+    timestamps = [r["t"] for r in readings]
+    values = [r["v"] for r in readings]
+
+    t_start = timestamps[0]
+    t_end = timestamps[-1]
+    duration = t_end - t_start
+    if duration <= 0:
+        return list(readings)
+
+    sigma = max(duration * bandwidth_frac, min_bandwidth_days * 86400.0)
+    cutoff = 3.0 * sigma  # truncate at 3σ for performance
+    inv_2sigma2 = 1.0 / (2.0 * sigma * sigma)
+
+    step = duration / max(n_output - 1, 1)
+    result: list[dict[str, float]] = []
+
+    for i in range(n_output):
+        t = t_start + i * step
+
+        # Binary search for points within ±3σ
+        lo = bisect.bisect_left(timestamps, t - cutoff)
+        hi = bisect.bisect_right(timestamps, t + cutoff)
+
+        if lo >= hi:
+            # No points in window — find nearest
+            idx = min(bisect.bisect_left(timestamps, t), len(timestamps) - 1)
+            result.append({"t": t, "v": round(values[idx], 2)})
+            continue
+
+        total_w = 0.0
+        total_wv = 0.0
+        for j in range(lo, hi):
+            dt = timestamps[j] - t
+            w = math.exp(-(dt * dt) * inv_2sigma2)
+            total_w += w
+            total_wv += w * values[j]
+
+        v = total_wv / total_w if total_w > 0 else values[lo]
+        result.append({"t": t, "v": round(v, 2)})
 
     return result
 

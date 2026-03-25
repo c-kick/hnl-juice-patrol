@@ -62,7 +62,7 @@ from ..engine import (
     predict_charge,
     predict_discharge,
     predict_discharge_multisession,
-    rolling_median,
+    gaussian_smooth,
     soh_from_cycles,
 )
 from ..engine.compress import compress as sdt_compress
@@ -1651,10 +1651,12 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if prediction_curve:
             pred_dict["prediction_curve"] = prediction_curve
 
-        # Compute smoothed readings for non-rechargeable chart overlay.
+        # Gaussian-smoothed readings for non-rechargeable chart overlay.
+        # Uses current-segment readings (not full history) so the curve
+        # matches what the prediction engine works with.
         smoothed_readings: list[dict[str, float]] | None = None
-        if not is_rechargeable and all_readings:
-            smoothed_readings = rolling_median(all_readings, window_hours=48.0)
+        if not is_rechargeable and len(readings) >= 6:
+            smoothed_readings = gaussian_smooth(readings)
 
         # Prediction plume (non-rechargeable only, from predict_primary)
         plume_curves: dict | None = None
@@ -1681,6 +1683,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "session_count": entity_data.get("session_count"),
             "chemistry": entity_data.get("chemistry"),
             "plume_curves": plume_curves,
+            "observation_boundary": readings[-1]["t"] if readings else None,
         }
 
         # Cache the result for short-lived reuse

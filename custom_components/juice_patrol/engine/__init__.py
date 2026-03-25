@@ -38,7 +38,7 @@ from .primary import (
     predict_primary,
     predict_primary_incremental,
 )
-from .smooth import cycle_relative_smooth, rolling_median
+from .smooth import cycle_relative_smooth, gaussian_smooth, rolling_median
 from .sessions import CompletedCycle, extract_completed_cycles, extract_discharge_sessions
 from .utils import detect_step_size
 

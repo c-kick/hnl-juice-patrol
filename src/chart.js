@@ -243,33 +243,75 @@ export async function initChart(panel, chartData) {
     }
   }
 
-  // Split observed data into normal (above threshold) and low (at/below threshold)
-  // segments. Each segment shares boundary points for seamless rendering.
-  const normalData = [];
-  const lowData = [];
-  for (let i = 0; i < observed.length; i++) {
-    const [t, v] = observed[i];
-    const isLow = v <= threshold;
-    normalData.push(isLow ? [t, null] : [t, v]);
-    lowData.push(isLow ? [t, v] : [t, null]);
-    // Add boundary point at threshold crossing to connect the segments
-    if (i > 0) {
-      const [pt, pv] = observed[i - 1];
-      const prevLow = pv <= threshold;
-      if (prevLow !== isLow) {
-        // Interpolate crossing point
-        const ratio = (threshold - pv) / (v - pv);
-        const crossT = pt + (t - pt) * ratio;
-        // Insert crossing point in both series (before current point)
-        normalData.splice(-1, 0, [crossT, threshold]);
-        lowData.splice(-1, 0, [crossT, threshold]);
+  // Helper: split a sorted [[t,v],...] array into normal/low segments
+  // at the given threshold, with boundary interpolation at crossings.
+  const _splitAtThreshold = (data) => {
+    const normal = [];
+    const low = [];
+    for (let i = 0; i < data.length; i++) {
+      const [t, v] = data[i];
+      const isLow = v <= threshold;
+      normal.push(isLow ? [t, null] : [t, v]);
+      low.push(isLow ? [t, v] : [t, null]);
+      if (i > 0) {
+        const [pt, pv] = data[i - 1];
+        if ((pv <= threshold) !== isLow) {
+          const ratio = (threshold - pv) / (v - pv);
+          const crossT = pt + (t - pt) * ratio;
+          normal.splice(-1, 0, [crossT, threshold]);
+          low.splice(-1, 0, [crossT, threshold]);
+        }
       }
     }
-  }
+    return { normal, low };
+  };
 
-  const showSymbol = observed.length <= 50;
-  const series = [
-    {
+  const hasSmoothed = chartData.smoothed_readings
+    && chartData.smoothed_readings.length > 0;
+
+  const series = [];
+
+  if (hasSmoothed) {
+    // Smoothed curve replaces raw data entirely (no raw line shown).
+    // Named "Battery Level" since it IS the primary data visualization.
+    const smoothed = chartData.smoothed_readings
+      .slice()
+      .sort((a, b) => a.t - b.t)
+      .filter((r, i, arr) => i === 0 || r.t > arr[i - 1].t)
+      .map((r) => [r.t * 1000, r.v]);
+    const { normal: smoothNormal, low: smoothLow } = _splitAtThreshold(smoothed);
+
+    series.push({
+      name: "Battery Level",
+      type: "line",
+      data: smoothNormal,
+      smooth: true,
+      symbol: "none",
+      connectNulls: false,
+      lineStyle: { width: 2.5, color: colorLevel },
+      itemStyle: { color: colorLevel },
+      areaStyle: { color: colorLevel, opacity: 0.05 },
+      z: 2,
+    });
+    if (smoothLow.some(([, v]) => v != null)) {
+      series.push({
+        name: "Battery Level",
+        type: "line",
+        data: smoothLow,
+        smooth: true,
+        symbol: "none",
+        connectNulls: false,
+        lineStyle: { width: 2.5, color: colorThreshold },
+        itemStyle: { color: colorThreshold },
+        areaStyle: { color: colorThreshold, opacity: 0.08 },
+        z: 2,
+      });
+    }
+  } else {
+    // No smoothed data (rechargeable or insufficient readings): original rendering
+    const { normal: normalData, low: lowData } = _splitAtThreshold(observed);
+    const showSymbol = observed.length <= 50;
+    series.push({
       name: "Battery Level",
       type: "line",
       data: normalData,
@@ -280,8 +322,8 @@ export async function initChart(panel, chartData) {
       lineStyle: { width: 2, color: colorLevel },
       itemStyle: { color: colorLevel },
       areaStyle: { color: colorLevel, opacity: 0.07 },
-    },
-    {
+    });
+    series.push({
       name: "Battery Level",
       type: "line",
       data: lowData,
@@ -292,8 +334,8 @@ export async function initChart(panel, chartData) {
       lineStyle: { width: 2, color: colorThreshold },
       itemStyle: { color: colorThreshold },
       areaStyle: { color: colorThreshold, opacity: 0.1 },
-    },
-  ];
+    });
+  }
 
   // Charging period highlights rendered as filled area series (markArea doesn't
   // work through ha-chart-base). Each area is a 4-point polygon from 0% to 100%.
@@ -310,42 +352,132 @@ export async function initChart(panel, chartData) {
         areaStyle: { color: colorCharge, opacity: 0.18, origin: 0 },
         silent: true,
         tooltip: { show: false },
+        z: 0,
       });
     }
   }
 
-  // Smoothed readings overlay (non-rechargeable devices only).
-  // Shows the rolling-median line that the prediction engine uses,
-  // making it easier to see the real trend through Zigbee noise.
-  const smoothedReadings = chartData.smoothed_readings;
-  if (smoothedReadings && smoothedReadings.length > 0) {
-    const smoothedData = smoothedReadings
+  // Observation boundary: where real data ends and prediction begins.
+  // Use Date.now() — Zigbee sensors may lag behind by hours.
+  const obsBoundary = Date.now();
+
+  // Anchor prediction to smoothed curve endpoint (Problem 2).
+  // The prediction curve is fitted independently and may not match the
+  // smoothed data at the observation boundary. Shift the extrapolated
+  // portion so it connects seamlessly.
+  if (hasSmoothed && fitted.length > 0) {
+    const smoothed = chartData.smoothed_readings
       .slice()
-      .sort((a, b) => a.t - b.t)
-      .filter((r, i, arr) => i === 0 || r.t > arr[i - 1].t)
-      .map((r) => [r.t * 1000, r.v]);
-    series.push({
-      name: "Smoothed",
-      type: "line",
-      data: smoothedData,
-      smooth: false,
-      symbol: "none",
-      lineStyle: { width: 2, color: colorCharge, opacity: 0.7 },
-      itemStyle: { color: colorCharge },
-      z: 5,
-    });
+      .sort((a, b) => a.t - b.t);
+    const smoothedEndV = smoothed[smoothed.length - 1].v;
+
+    // Find prediction value at obsBoundary by interpolation
+    let predAtBoundary = null;
+    for (let i = 1; i < fitted.length; i++) {
+      if (fitted[i][0] >= obsBoundary) {
+        const [t0, v0] = fitted[i - 1];
+        const [t1, v1] = fitted[i];
+        const frac = t1 > t0 ? (obsBoundary - t0) / (t1 - t0) : 0;
+        predAtBoundary = v0 + frac * (v1 - v0);
+        break;
+      }
+    }
+    // If obsBoundary is beyond all fitted points, use last fitted value
+    if (predAtBoundary === null && fitted.length > 0) {
+      predAtBoundary = fitted[fitted.length - 1][1];
+    }
+    if (predAtBoundary !== null) {
+      const offset = smoothedEndV - predAtBoundary;
+      if (Math.abs(offset) > 0.5) {
+        fitted = fitted.map(([t, v]) => [t, Math.max(0, Math.min(100, v + offset))]);
+      }
+    }
   }
 
   if (fitted.length > 0) {
+    const fittedObserved = fitted.filter(([t]) => t <= obsBoundary);
+    const fittedExtrapolated = fitted.filter(([t]) => t >= obsBoundary);
+
+    // Solid line over observed range
+    if (fittedObserved.length > 0) {
+      series.push({
+        name: "Discharge prediction",
+        type: "line",
+        data: fittedObserved,
+        smooth: true,
+        symbol: "none",
+        lineStyle: { width: 2, color: colorPredicted },
+        itemStyle: { color: colorPredicted },
+        z: 4,
+      });
+    }
+    // Dashed line for extrapolation (beyond observation boundary)
+    if (fittedExtrapolated.length > 0) {
+      series.push({
+        name: "Discharge prediction",
+        type: "line",
+        data: fittedExtrapolated,
+        smooth: true,
+        symbol: "none",
+        lineStyle: { width: 2, type: "dashed", color: colorPredicted },
+        itemStyle: { color: colorPredicted },
+        z: 4,
+      });
+    }
+  }
+
+  // Observation boundary vertical marker (Problem 3).
+  // Subtle dashed line showing where observed data ends.
+  if (!isCharging) {
     series.push({
-      name: "Discharge prediction",
+      name: "_obs_boundary",
       type: "line",
-      data: fitted,
-      smooth: false,
+      data: [[obsBoundary, 0], [obsBoundary, 100]],
       symbol: "none",
-      lineStyle: { width: 2, type: "dashed", color: colorPredicted },
-      itemStyle: { color: colorPredicted },
+      lineStyle: { width: 1, type: "dashed", color: colorAxis, opacity: 0.3 },
+      itemStyle: { color: colorAxis },
+      silent: true,
+      tooltip: { show: false },
+      z: 0,
     });
+  }
+
+  // Prediction plume (uncertainty fan between best and worst case)
+  const plume = chartData.plume_curves;
+  if (plume && plume.best && plume.best.length > 0 && plume.worst && plume.worst.length > 0) {
+    const clamp = (v) => Math.max(0, Math.min(100, v));
+    const worstData = plume.worst.map((p) => [p.t * 1000, clamp(p.v)]);
+    const bestData = plume.best.map((p) => [p.t * 1000, clamp(p.v)]);
+    // Stacked area: upper series data is delta (best - worst), ECharts adds it on top of lower
+    const bestMinusWorst = bestData.map((pt, i) => {
+      const worstV = i < worstData.length ? worstData[i][1] : pt[1];
+      return [pt[0], Math.max(0, pt[1] - worstV)];
+    });
+    series.push(
+      {
+        name: "_plume_lower",
+        type: "line",
+        data: worstData,
+        symbol: "none",
+        lineStyle: { width: 1, type: "dashed", color: colorPredicted, opacity: 0.25 },
+        itemStyle: { color: colorPredicted },
+        stack: "plume",
+        z: 2,
+        silent: true,
+      },
+      {
+        name: "Prediction range",
+        type: "line",
+        data: bestMinusWorst,
+        symbol: "none",
+        lineStyle: { width: 1, type: "dashed", color: colorPredicted, opacity: 0.25 },
+        itemStyle: { color: colorPredicted },
+        areaStyle: { color: colorPredicted, opacity: 0.08 },
+        stack: "plume",
+        z: 2,
+        silent: true,
+      },
+    );
   }
 
   // Shared label style for chart markers (threshold crossing, replacements, charge)
@@ -503,6 +635,7 @@ export async function initChart(panel, chartData) {
       lineStyle: { width: 1, type: "dotted", color: colorThreshold },
       itemStyle: { color: colorThreshold },
       tooltip: { show: false },
+      z: 5,
     });
   }
 
@@ -557,6 +690,7 @@ export async function initChart(panel, chartData) {
         lineStyle: { width: 1, type: isConfirmed ? "dashed" : "dotted", color },
         itemStyle: { color },
         tooltip: { show: false },
+        z: 5,
       });
     }
   }
@@ -597,7 +731,7 @@ export async function initChart(panel, chartData) {
         let h = `<b>${dateStr}</b><br>`;
         const seen = new Set();
         for (const p of params) {
-          if (p.seriesName?.startsWith("Replaced") || p.seriesName === "Low battery") continue;
+          if (p.seriesName?.startsWith("Replaced") || p.seriesName === "Low battery" || p.seriesName?.startsWith("_plume") || p.seriesName?.startsWith("_obs")) continue;
           if (p.value[1] == null) continue;
           if (seen.has(p.seriesName)) continue;
           seen.add(p.seriesName);
@@ -611,12 +745,13 @@ export async function initChart(panel, chartData) {
     legend: {
       bottom: 0,
       left: "center",
-      data: ["Battery Level", "Discharge prediction"],
+      data: ["Battery Level", "Discharge prediction", "Prediction range"],
       textStyle: { color: colorLegend, fontSize: isNarrow ? 10 : 12 },
       itemGap: isNarrow ? 6 : 12,
       selected: {
         "Discharge prediction": !isCharging,
         "Charge prediction": isCharging,
+        "Prediction range": !isCharging,
       },
     },
     dataZoom: [
