@@ -45,6 +45,25 @@ class DeviceData:
     # and from_dict handles missing keys gracefully via .get()).
     chemistry_override: str | None = None
 
+    # Primary prediction cache (v5)
+    primary_cache_version: int = 0
+    completed_cycle_curves: list[dict] = field(default_factory=list)
+    # Each: {"smoothed": [{"t": float, "v": float}, ...],
+    #        "fit_model": str, "fit_params": dict,
+    #        "duration_days": float, "start_t": float, "end_t": float}
+    shape_prior: dict | None = None
+    # {"median_params": dict, "param_spread": dict, "n_cycles": int}
+    current_cycle_smoothed: list[dict] = field(default_factory=list)
+    # [{"t": float, "v": float}, ...] — SDT-compressed smoothed readings
+    current_cycle_raw_tail: list[dict] = field(default_factory=list)
+    # Raw readings for the last window-duration — sliding buffer for exact smoothing
+    current_cycle_last_raw_t: float | None = None
+    # Timestamp of the last raw reading incorporated
+    cache_chemistry: str | None = None
+    # Chemistry used for cached smoothing (invalidation check)
+    cache_window_frac: float = 0.05
+    # Window fraction used (invalidation check)
+
     @property
     def last_replaced(self) -> float | None:
         """Return the most recent replacement timestamp, or None."""
@@ -71,6 +90,14 @@ class DeviceData:
             device_id=data.get("device_id"),
             completed_cycles=data.get("completed_cycles", []),
             chemistry_override=data.get("chemistry_override"),
+            primary_cache_version=data.get("primary_cache_version", 0),
+            completed_cycle_curves=data.get("completed_cycle_curves", []),
+            shape_prior=data.get("shape_prior"),
+            current_cycle_smoothed=data.get("current_cycle_smoothed", []),
+            current_cycle_raw_tail=data.get("current_cycle_raw_tail", []),
+            current_cycle_last_raw_t=data.get("current_cycle_last_raw_t"),
+            cache_chemistry=data.get("cache_chemistry"),
+            cache_window_frac=data.get("cache_window_frac", 0.05),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -93,6 +120,23 @@ class DeviceData:
             result["completed_cycles"] = self.completed_cycles
         if self.chemistry_override is not None:
             result["chemistry_override"] = self.chemistry_override
+        # Primary prediction cache fields — only persist when populated
+        if self.primary_cache_version:
+            result["primary_cache_version"] = self.primary_cache_version
+        if self.completed_cycle_curves:
+            result["completed_cycle_curves"] = self.completed_cycle_curves
+        if self.shape_prior is not None:
+            result["shape_prior"] = self.shape_prior
+        if self.current_cycle_smoothed:
+            result["current_cycle_smoothed"] = self.current_cycle_smoothed
+        if self.current_cycle_raw_tail:
+            result["current_cycle_raw_tail"] = self.current_cycle_raw_tail
+        if self.current_cycle_last_raw_t is not None:
+            result["current_cycle_last_raw_t"] = self.current_cycle_last_raw_t
+        if self.cache_chemistry is not None:
+            result["cache_chemistry"] = self.cache_chemistry
+        if self.cache_window_frac != 0.05:
+            result["cache_window_frac"] = self.cache_window_frac
         return result
 
 
@@ -175,6 +219,16 @@ class JuicePatrolStore:
                     # v3 → v4: add completed_cycles
                     if old_version < 4:
                         dev_data.setdefault("completed_cycles", [])
+                    # v4 → v5: add primary prediction cache fields (all default)
+                    if old_version < 5:
+                        dev_data.setdefault("primary_cache_version", 0)
+                        dev_data.setdefault("completed_cycle_curves", [])
+                        dev_data.setdefault("shape_prior", None)
+                        dev_data.setdefault("current_cycle_smoothed", [])
+                        dev_data.setdefault("current_cycle_raw_tail", [])
+                        dev_data.setdefault("current_cycle_last_raw_t", None)
+                        dev_data.setdefault("cache_chemistry", None)
+                        dev_data.setdefault("cache_window_frac", 0.05)
                 self._dirty = True
 
             self._data = StoreData(

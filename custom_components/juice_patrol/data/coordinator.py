@@ -61,9 +61,11 @@ from ..engine import (
     predict_charge,
     predict_discharge,
     predict_discharge_multisession,
+    rolling_median,
     soh_from_cycles,
 )
 from ..engine.compress import compress as sdt_compress
+from ..engine.primary import predict_primary
 from .battery_types import BatteryTypeResolver
 from .history import HistoryCache, async_batch_get_statistics, async_get_readings
 from .store import JuicePatrolStore
@@ -778,14 +780,8 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             r_squared=None,
                         )
         else:
-            prediction = predict_discharge(
-                readings,
-                target_level=0.0,
-                half_life_days=None,
-                min_readings=MIN_READINGS_FOR_PREDICTION,
-                min_timespan_hours=min_span,
-                class_prior=class_prior,
-                chemistry=chemistry,
+            prediction = self._predict_non_rechargeable(
+                readings, all_readings, dev, min_span, class_prior, chemistry,
             )
         # Sanity-check predictions against actual current level.
         # Copy before mutating to avoid corrupting shared state.
@@ -828,10 +824,11 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # If the device reports it's actively charging, override prediction status.
         # The mathematical slope may still be negative (e.g. recent charge didn't
         # exceed the 20% segment-split threshold), but the device knows best.
-        # Copy before mutating to avoid corrupting shared state.
+        # Non-rechargeable devices never charge — skip this override for them.
         from dataclasses import replace as _replace
         if (
             is_charging
+            and is_rechargeable_hint
             and prediction.status == PredictionStatus.NORMAL
         ):
             prediction = _replace(
@@ -841,14 +838,6 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 estimated_days_remaining=None,
                 estimated_hours_remaining=None,
             )
-
-        # Non-rechargeable devices can't charge — a positive slope is sensor noise
-        # or slow drift. Reclassify CHARGING → FLAT to avoid misleading status.
-        if (
-            not is_rechargeable_hint
-            and prediction.status == PredictionStatus.CHARGING
-        ):
-            prediction = _replace(prediction, status=PredictionStatus.FLAT)
 
         analysis = analyze_battery(
             readings,
@@ -1201,6 +1190,33 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for entity_id, info in data.items():
             self._fire_events_for_entity(entity_id, info)
 
+    def _predict_non_rechargeable(
+        self,
+        segment_readings: list[dict[str, float]],
+        all_readings: list[dict[str, float]],
+        dev: Any,
+        min_span: float,
+        class_prior: Any,
+        chemistry: str | None,
+    ) -> PredictionResult:
+        """Predict discharge for a non-rechargeable battery.
+
+        Uses the cycle-aware primary prediction pipeline: isolates cycles
+        from replacement history, learns a shape prior from completed
+        cycles, and predicts the current cycle with plume bounds.
+        """
+        replacement_timestamps = dev.replacement_history if dev else []
+        result = predict_primary(
+            all_readings=all_readings,
+            replacement_timestamps=replacement_timestamps,
+            chemistry=chemistry,
+            class_prior=class_prior,
+        )
+        # Store plume data for chart websocket (transient, not persisted)
+        if dev is not None:
+            dev._prediction_plume = result.plume_curves  # type: ignore[attr-defined]
+        return result.prediction
+
     @staticmethod
     def _generate_prediction_curve(
         readings: list[dict[str, float]],
@@ -1269,6 +1285,20 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             curve.append([ts_ms, round(v, 2)])
             if v <= 0:
                 break
+
+        # When the curve fit asymptotes above 0% (e.g. exponential floor),
+        # the sampled points won't reach 0 even though the prediction engine
+        # (using tail-slope fallback) says the battery will be empty.
+        # Extend the curve to 0% at the predicted-empty timestamp so the
+        # visual line reaches the same endpoint the prediction reports.
+        if (
+            curve
+            and curve[-1][1] > 0
+            and prediction.estimated_empty_timestamp is not None
+        ):
+            empty_ms = prediction.estimated_empty_timestamp * 1000
+            if empty_ms >= curve[-1][0]:
+                curve.append([empty_ms, 0.0])
 
         return curve if len(curve) >= 2 else None
 
@@ -1452,9 +1482,20 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if prediction_curve:
             pred_dict["prediction_curve"] = prediction_curve
 
+        # Compute smoothed readings for non-rechargeable chart overlay.
+        smoothed_readings: list[dict[str, float]] | None = None
+        if not is_rechargeable and all_readings:
+            smoothed_readings = rolling_median(all_readings, window_hours=48.0)
+
+        # Prediction plume (non-rechargeable only, from predict_primary)
+        plume_curves: dict | None = None
+        if dev is not None and hasattr(dev, "_prediction_plume"):
+            plume_curves = dev._prediction_plume  # type: ignore[attr-defined]
+
         result = {
             "readings": readings,
             "all_readings": all_readings,
+            "smoothed_readings": smoothed_readings,
             "prediction": pred_dict,
             "charge_prediction": charge_pred_dict,
             "threshold": threshold,
@@ -1470,6 +1511,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "charging_state": entity_data.get("charging_state"),
             "session_count": entity_data.get("session_count"),
             "chemistry": entity_data.get("chemistry"),
+            "plume_curves": plume_curves,
         }
 
         # Cache the result for short-lived reuse

@@ -28,6 +28,15 @@ from .predictions import (
     predict_discharge_multisession,
 )
 from .models import ClassPrior, DeviceClassModels
+from .primary import (
+    PrimaryCycle,
+    PrimaryPredictionResult,
+    ShapePrior,
+    isolate_primary_cycles,
+    learn_discharge_shape,
+    predict_primary,
+)
+from .smooth import cycle_relative_smooth, rolling_median
 from .sessions import CompletedCycle, extract_completed_cycles, extract_discharge_sessions
 from .utils import detect_step_size
 
@@ -59,6 +68,13 @@ __all__ = [
     "predict_charge",
     "predict_discharge",
     "predict_discharge_multisession",
+    "cycle_relative_smooth",
+    "isolate_primary_cycles",
+    "learn_discharge_shape",
+    "predict_primary",
+    "PrimaryCycle",
+    "PrimaryPredictionResult",
     "sdt_compress",
+    "ShapePrior",
     "soh_from_cycles",
 ]

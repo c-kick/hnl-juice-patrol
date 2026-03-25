@@ -295,3 +295,180 @@ class TestJuicePatrolStore:
 
     def test_remove_device_missing(self, store):
         assert store.remove_device("sensor.missing") is False
+
+
+class TestPrimaryCacheFields:
+    """Test primary prediction cache fields on DeviceData."""
+
+    def test_defaults(self):
+        d = DeviceData()
+        assert d.primary_cache_version == 0
+        assert d.completed_cycle_curves == []
+        assert d.shape_prior is None
+        assert d.current_cycle_smoothed == []
+        assert d.current_cycle_raw_tail == []
+        assert d.current_cycle_last_raw_t is None
+        assert d.cache_chemistry is None
+        assert d.cache_window_frac == 0.05
+
+    def test_from_dict_with_cache(self):
+        raw = {
+            "source_entity": "sensor.test",
+            "primary_cache_version": 1,
+            "completed_cycle_curves": [
+                {"smoothed": [{"t": 1.0, "v": 100.0}], "fit_model": "exponential",
+                 "fit_params": {"a": 1.0}, "duration_days": 300.0,
+                 "start_t": 0.0, "end_t": 300.0}
+            ],
+            "shape_prior": {"median_params": {"a": 1.0}, "param_spread": {"a": 0.1}, "n_cycles": 1},
+            "current_cycle_smoothed": [{"t": 500.0, "v": 95.0}],
+            "current_cycle_raw_tail": [{"t": 499.0, "v": 96.0}],
+            "current_cycle_last_raw_t": 500.0,
+            "cache_chemistry": "alkaline",
+            "cache_window_frac": 0.03,
+        }
+        d = DeviceData.from_dict(raw, "sensor.test")
+        assert d.primary_cache_version == 1
+        assert len(d.completed_cycle_curves) == 1
+        assert d.completed_cycle_curves[0]["fit_model"] == "exponential"
+        assert d.shape_prior["n_cycles"] == 1
+        assert len(d.current_cycle_smoothed) == 1
+        assert len(d.current_cycle_raw_tail) == 1
+        assert d.current_cycle_last_raw_t == 500.0
+        assert d.cache_chemistry == "alkaline"
+        assert d.cache_window_frac == 0.03
+
+    def test_from_dict_missing_cache_fields(self):
+        """Old v4 data without cache fields should get defaults."""
+        d = DeviceData.from_dict({"source_entity": "sensor.test"}, "sensor.test")
+        assert d.primary_cache_version == 0
+        assert d.completed_cycle_curves == []
+        assert d.shape_prior is None
+        assert d.current_cycle_last_raw_t is None
+        assert d.cache_chemistry is None
+        assert d.cache_window_frac == 0.05
+
+    def test_to_dict_omits_empty_cache(self):
+        """Empty/default cache fields should not appear in serialized output."""
+        d = DeviceData(source_entity="sensor.test")
+        result = d.to_dict()
+        assert "primary_cache_version" not in result
+        assert "completed_cycle_curves" not in result
+        assert "shape_prior" not in result
+        assert "current_cycle_smoothed" not in result
+        assert "current_cycle_raw_tail" not in result
+        assert "current_cycle_last_raw_t" not in result
+        assert "cache_chemistry" not in result
+        assert "cache_window_frac" not in result
+
+    def test_to_dict_includes_populated_cache(self):
+        d = DeviceData(
+            source_entity="sensor.test",
+            primary_cache_version=1,
+            completed_cycle_curves=[{"smoothed": [], "fit_model": "linear",
+                                      "fit_params": {}, "duration_days": 100.0,
+                                      "start_t": 0.0, "end_t": 100.0}],
+            shape_prior={"median_params": {}, "param_spread": {}, "n_cycles": 1},
+            current_cycle_smoothed=[{"t": 1.0, "v": 90.0}],
+            current_cycle_raw_tail=[{"t": 1.0, "v": 90.0}],
+            current_cycle_last_raw_t=1.0,
+            cache_chemistry="alkaline",
+            cache_window_frac=0.10,
+        )
+        result = d.to_dict()
+        assert result["primary_cache_version"] == 1
+        assert len(result["completed_cycle_curves"]) == 1
+        assert result["shape_prior"]["n_cycles"] == 1
+        assert result["current_cycle_last_raw_t"] == 1.0
+        assert result["cache_chemistry"] == "alkaline"
+        assert result["cache_window_frac"] == 0.10
+
+    def test_roundtrip_with_cache(self):
+        original = DeviceData(
+            source_entity="sensor.test",
+            primary_cache_version=1,
+            completed_cycle_curves=[{"smoothed": [{"t": 0.0, "v": 100.0}],
+                                      "fit_model": "exp", "fit_params": {"k": 0.01},
+                                      "duration_days": 200.0,
+                                      "start_t": 0.0, "end_t": 200.0}],
+            shape_prior={"median_params": {"k": 0.01}, "param_spread": {"k": 0.005}, "n_cycles": 1},
+            current_cycle_smoothed=[{"t": 300.0, "v": 80.0}],
+            current_cycle_raw_tail=[{"t": 295.0, "v": 81.0}, {"t": 300.0, "v": 80.0}],
+            current_cycle_last_raw_t=300.0,
+            cache_chemistry="coin_cell",
+            cache_window_frac=0.07,
+        )
+        restored = DeviceData.from_dict(original.to_dict(), "sensor.test")
+        assert restored.primary_cache_version == original.primary_cache_version
+        assert restored.completed_cycle_curves == original.completed_cycle_curves
+        assert restored.shape_prior == original.shape_prior
+        assert restored.current_cycle_smoothed == original.current_cycle_smoothed
+        assert restored.current_cycle_raw_tail == original.current_cycle_raw_tail
+        assert restored.current_cycle_last_raw_t == original.current_cycle_last_raw_t
+        assert restored.cache_chemistry == original.cache_chemistry
+        assert restored.cache_window_frac == original.cache_window_frac
+
+
+class TestStoreMigrationV5:
+    """Test v4 → v5 migration (primary prediction cache fields)."""
+
+    @pytest.mark.asyncio
+    async def test_v4_to_v5_migration(self, store):
+        """v4 store data gets cache fields set to defaults during migration."""
+        store._store.async_load = AsyncMock(return_value={
+            "version": 4,
+            "devices": {
+                "sensor.test": {
+                    "replacement_history": [1000.0],
+                    "denied_replacements": [],
+                    "ignored": False,
+                    "replacement_confirmed": True,
+                    "source_entity": "sensor.test",
+                    "device_id": "dev1",
+                    "completed_cycles": [{"start_t": 0, "end_t": 100}],
+                }
+            },
+        })
+        await store.async_load()
+        dev = store.devices["sensor.test"]
+        # Existing fields preserved
+        assert dev.replacement_history == [1000.0]
+        assert dev.completed_cycles == [{"start_t": 0, "end_t": 100}]
+        # New cache fields at defaults
+        assert dev.primary_cache_version == 0
+        assert dev.completed_cycle_curves == []
+        assert dev.shape_prior is None
+        assert dev.current_cycle_smoothed == []
+        assert dev.current_cycle_raw_tail == []
+        assert dev.current_cycle_last_raw_t is None
+        assert dev.cache_chemistry is None
+        assert dev.cache_window_frac == 0.05
+        # Store marked dirty for re-save
+        assert store._dirty is True
+
+    @pytest.mark.asyncio
+    async def test_v5_data_loads_without_migration(self, store):
+        """v5 store data with cache fields loads directly."""
+        store._store.async_load = AsyncMock(return_value={
+            "version": 5,
+            "devices": {
+                "sensor.test": {
+                    "replacement_history": [],
+                    "denied_replacements": [],
+                    "ignored": False,
+                    "replacement_confirmed": True,
+                    "source_entity": "sensor.test",
+                    "device_id": None,
+                    "primary_cache_version": 1,
+                    "cache_chemistry": "alkaline",
+                    "current_cycle_last_raw_t": 42.0,
+                }
+            },
+        })
+        await store.async_load()
+        dev = store.devices["sensor.test"]
+        assert dev.primary_cache_version == 1
+        assert dev.cache_chemistry == "alkaline"
+        assert dev.current_cycle_last_raw_t == 42.0
+        # Not dirty — no migration needed
+        assert store._dirty is False
