@@ -37,6 +37,7 @@ EVENT_DEVICE_REPLACED = f"{DOMAIN}_device_replaced"
 STORE_KEY = f"{DOMAIN}.metadata"
 STORE_VERSION = 2  # Major version for HA Store class (do not bump without migration func)
 STORE_MINOR_VERSION = 5  # Internal data schema version (5: primary prediction cache)
+PRIMARY_CACHE_VERSION = 1  # Bump to invalidate all cached primary prediction data
 
 # Recorder history
 HISTORY_CACHE_TTL = 1800  # 30 min cache for recorder queries

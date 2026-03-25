@@ -64,6 +64,44 @@ class DeviceData:
     cache_window_frac: float = 0.05
     # Window fraction used (invalidation check)
 
+    def clear_primary_cache(self) -> None:
+        """Reset all primary prediction cache fields to defaults."""
+        self.primary_cache_version = 0
+        self.completed_cycle_curves = []
+        self.shape_prior = None
+        self.current_cycle_smoothed = []
+        self.current_cycle_raw_tail = []
+        self.current_cycle_last_raw_t = None
+        self.cache_chemistry = None
+        self.cache_window_frac = 0.05
+
+    def archive_current_cycle(self) -> None:
+        """Move current cycle smoothed data to completed_cycle_curves.
+
+        Called on mark_replaced: archives the ongoing cycle and clears
+        current cycle fields so the next refresh starts fresh.
+        """
+        if self.current_cycle_smoothed:
+            self.completed_cycle_curves.append({
+                "smoothed": self.current_cycle_smoothed,
+                "fit_model": "",
+                "fit_params": {},
+                "duration_days": 0.0,
+                "start_t": (
+                    self.current_cycle_smoothed[0]["t"]
+                    if self.current_cycle_smoothed else 0.0
+                ),
+                "end_t": (
+                    self.current_cycle_smoothed[-1]["t"]
+                    if self.current_cycle_smoothed else 0.0
+                ),
+            })
+        # Clear current cycle — shape_prior will be recomputed on next refresh
+        self.current_cycle_smoothed = []
+        self.current_cycle_raw_tail = []
+        self.current_cycle_last_raw_t = None
+        self.shape_prior = None
+
     @property
     def last_replaced(self) -> float | None:
         """Return the most recent replacement timestamp, or None."""
@@ -508,6 +546,24 @@ class JuicePatrolStore:
         # Cap at max, evict oldest
         if len(dev.completed_cycles) > MAX_CYCLES_PER_DEVICE:
             dev.completed_cycles = dev.completed_cycles[-MAX_CYCLES_PER_DEVICE:]
+        self._dirty = True
+        return True
+
+    def clear_primary_cache(self, entity_id: str) -> bool:
+        """Clear primary prediction cache for a device. Returns False if not found."""
+        dev = self._data.devices.get(entity_id)
+        if dev is None:
+            return False
+        dev.clear_primary_cache()
+        self._dirty = True
+        return True
+
+    def archive_current_cycle(self, entity_id: str) -> bool:
+        """Archive current cycle to completed and clear current. Returns False if not found."""
+        dev = self._data.devices.get(entity_id)
+        if dev is None:
+            return False
+        dev.archive_current_cycle()
         self._dirty = True
         return True
 

@@ -136,7 +136,9 @@ export async function initChart(panel, chartData) {
   const historyStartMs = observed[0]?.[0] || Date.now();
   const autoTMin = sessionStartMs < historyStartMs ? historyStartMs : sessionStartMs;
   const nowMs = Date.now();
-  let autoTMax;
+
+  // Compute estimated-full timestamp for charging devices (used by multiple ranges).
+  let chargeFullMs = 0;
   if (isCharging && chargePred && chargePred.segment_start_timestamp != null) {
     const segStartV = chargePred.segment_start_level;
     const currentLevel = chartData.level;
@@ -146,14 +148,16 @@ export async function initChart(panel, chartData) {
         ? (currentLevel - segStartV) / ((nowMs / 1000 - chargePred.segment_start_timestamp) / 3600)
         : 0;
     if (slopeH > 0) {
-      const fullT = hasChargePred
+      chargeFullMs = hasChargePred
         ? chargePred.estimated_full_timestamp * 1000
         : nowMs + ((100 - currentLevel) / slopeH) * 3600000;
-      const pad = (fullT - autoTMin) * 0.1;
-      autoTMax = fullT + pad;
-    } else {
-      autoTMax = nowMs + (nowMs - autoTMin) * 0.2;
     }
+  }
+
+  let autoTMax;
+  if (chargeFullMs > 0) {
+    const pad = (chargeFullMs - autoTMin) * 0.1;
+    autoTMax = chargeFullMs + pad;
   } else if (isCharging) {
     autoTMax = nowMs + (nowMs - autoTMin) * 0.2;
   } else {
@@ -194,8 +198,11 @@ export async function initChart(panel, chartData) {
   } else {
     const dur = rangeDurations[range] || 30 * 86400000;
     tMin = nowMs - dur;
+    // tMax: start from now, extend to include prediction endpoints if they
+    // exist.  Don't blindly add +dur into the future — that creates empty
+    // space when there's nothing to show.
     const predEnd = fitted.length ? fitted[fitted.length - 1][0] : nowMs;
-    tMax = Math.max(nowMs + dur, predEnd);
+    tMax = Math.max(nowMs, predEnd, chargeFullMs);
   }
 
   // Detect charging periods for rechargeable devices.
@@ -305,6 +312,28 @@ export async function initChart(panel, chartData) {
         tooltip: { show: false },
       });
     }
+  }
+
+  // Smoothed readings overlay (non-rechargeable devices only).
+  // Shows the rolling-median line that the prediction engine uses,
+  // making it easier to see the real trend through Zigbee noise.
+  const smoothedReadings = chartData.smoothed_readings;
+  if (smoothedReadings && smoothedReadings.length > 0) {
+    const smoothedData = smoothedReadings
+      .slice()
+      .sort((a, b) => a.t - b.t)
+      .filter((r, i, arr) => i === 0 || r.t > arr[i - 1].t)
+      .map((r) => [r.t * 1000, r.v]);
+    series.push({
+      name: "Smoothed",
+      type: "line",
+      data: smoothedData,
+      smooth: false,
+      symbol: "none",
+      lineStyle: { width: 2, color: colorCharge, opacity: 0.7 },
+      itemStyle: { color: colorCharge },
+      z: 5,
+    });
   }
 
   if (fitted.length > 0) {

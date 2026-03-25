@@ -167,6 +167,14 @@ class ShapePrior:
     median_duration: float           # Median cycle duration in days
 
 
+@dataclass
+class _LearnResult:
+    """Internal result from learn_discharge_shape with curve data."""
+
+    shape: ShapePrior | None
+    curves: list[CompletedCycleCurve]
+
+
 def learn_discharge_shape(
     completed_cycles: list[PrimaryCycle],
     chemistry: str | None = None,
@@ -185,14 +193,25 @@ def learn_discharge_shape(
     Returns:
         ShapePrior if at least one cycle produced a valid fit, else None.
     """
+    result = _learn_discharge_shape_full(completed_cycles, chemistry, window_frac)
+    return result.shape
+
+
+def _learn_discharge_shape_full(
+    completed_cycles: list[PrimaryCycle],
+    chemistry: str | None = None,
+    window_frac: float = 0.05,
+) -> _LearnResult:
+    """Learn discharge shape and return per-cycle curve data for caching."""
     if not completed_cycles:
-        return None
+        return _LearnResult(shape=None, curves=[])
 
     from .predictions import _candidate_models  # avoid circular at module level
 
     candidates = _candidate_models(chemistry)
     fits: list[CurveFitResult] = []
     durations: list[float] = []
+    curves: list[CompletedCycleCurve] = []
 
     for cycle in completed_cycles:
         if len(cycle.readings) < 3:
@@ -207,9 +226,17 @@ def learn_discharge_shape(
         duration_days = (cycle.end_t - cycle.start_t) / 86400.0
         fits.append(fit)
         durations.append(duration_days)
+        curves.append(CompletedCycleCurve(
+            smoothed=compressed,
+            fit_model=fit.model_name,
+            fit_params=dict(fit.params),
+            duration_days=duration_days,
+            start_t=cycle.start_t,
+            end_t=cycle.end_t,
+        ))
 
     if not fits:
-        return None
+        return _LearnResult(shape=None, curves=curves)
 
     # Group fits by the most common model name
     model_counts: dict[str, int] = {}
@@ -242,12 +269,13 @@ def learn_discharge_shape(
         else:
             param_spread[name] = 0.0
 
-    return ShapePrior(
+    shape = ShapePrior(
         median_params=median_params,
         param_spread=param_spread,
         n_cycles=len(model_fits),
         median_duration=statistics.median(durations),
     )
+    return _LearnResult(shape=shape, curves=curves)
 
 
 def shape_prior_to_class_prior(
@@ -282,13 +310,32 @@ def _quartiles(values: list[float]) -> tuple[float, float]:
 # ---------------------------------------------------------------------------
 
 @dataclass
+class CompletedCycleCurve:
+    """Cached fit result for a completed discharge cycle."""
+
+    smoothed: list[dict[str, float]]  # SDT-compressed smoothed readings
+    fit_model: str
+    fit_params: dict[str, float]
+    duration_days: float
+    start_t: float
+    end_t: float
+
+
+@dataclass
 class PrimaryPredictionResult:
-    """Wraps PredictionResult with plume bounds."""
+    """Wraps PredictionResult with plume bounds and cache intermediates."""
 
     prediction: "PredictionResult"  # Median — the "official" prediction
     best_case_days: float | None    # Optimistic bound
     worst_case_days: float | None   # Pessimistic bound
     plume_curves: dict | None       # {"median": [...], "best": [...], "worst": [...]}
+
+    # Cache intermediates — populated by predict_primary for coordinator to persist
+    completed_cycle_curves: list[CompletedCycleCurve] | None = None
+    shape_prior_data: ShapePrior | None = None
+    current_cycle_smoothed: list[dict[str, float]] | None = None
+    current_cycle_raw_tail: list[dict[str, float]] | None = None
+    current_cycle_last_raw_t: float | None = None
 
 
 def predict_primary(
@@ -356,14 +403,13 @@ def predict_primary(
             _no_prediction(PredictionStatus.INSUFFICIENT_DATA, len(readings), chemistry=chemistry)
         )
 
-    # Learn shape from completed cycles
-    shape = learn_discharge_shape(completed, chemistry=chemistry) if completed else None
+    # Learn shape from completed cycles (with curve data for caching)
+    learn_result = _learn_discharge_shape_full(completed, chemistry=chemistry) if completed else _LearnResult(shape=None, curves=[])
+    shape = learn_result.shape
 
     # Merge class_prior with shape_prior (shape takes precedence when available)
     effective_prior = class_prior
     if shape is not None:
-        # Determine the best model name for the prior
-        # Use the model from learn_discharge_shape's winning model
         model_name = _infer_model_name(shape, chemistry)
         effective_prior = shape_prior_to_class_prior(shape, model_name)
 
@@ -371,6 +417,24 @@ def predict_primary(
     result = _predict_current_cycle(
         ongoing, shape, effective_prior, chemistry, target_level, dead_at_ts,
     )
+
+    # Populate cache intermediates on the result
+    result.completed_cycle_curves = learn_result.curves
+    result.shape_prior_data = shape
+    if ongoing.readings:
+        window_frac = 0.05
+        # Current cycle smoothed: re-smooth and compress for caching
+        smoothed = cycle_relative_smooth(ongoing.readings, window_frac=window_frac)
+        result.current_cycle_smoothed = compress(smoothed)
+        # Raw tail: keep last window_frac worth of raw readings
+        span = ongoing.readings[-1]["t"] - ongoing.readings[0]["t"]
+        window_s = span * window_frac
+        cutoff = ongoing.readings[-1]["t"] - window_s
+        result.current_cycle_raw_tail = [
+            r for r in ongoing.readings if r["t"] >= cutoff
+        ]
+        result.current_cycle_last_raw_t = ongoing.readings[-1]["t"]
+
     return result
 
 

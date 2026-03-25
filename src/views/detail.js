@@ -47,7 +47,9 @@ function renderHeroCard(panel, dev) {
   const subText = getDeviceSubText(dev);
 
   const bigNumber = hasPrediction ? formatDaysRemaining(dev) : formatLevel(dev.level);
-  const unitLabel = hasPrediction ? "days remaining" : "battery level";
+  const unitLabel = hasPrediction
+    ? (dev.daysRemaining != null && dev.daysRemaining <= 1 ? "remaining" : "days remaining")
+    : "battery level";
   const barPct = dev.level != null ? Math.max(0, Math.min(100, Math.ceil(dev.level))) : 0;
   const barRightText = formatLevel(dev.level);
   const barRightColor = levelColor;

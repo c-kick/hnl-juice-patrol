@@ -304,6 +304,8 @@ async def ws_set_battery_type(hass, connection, msg):
     battery_type = msg.get("battery_type")
     if coordinator.store.set_battery_type(entity_id, battery_type):
         coordinator.type_resolver.invalidate_cache(entity_id)
+        # Battery type change affects chemistry → invalidate primary cache
+        coordinator.store.clear_primary_cache(entity_id)
         await coordinator.async_request_refresh()
         connection.send_result(msg["id"], {"ok": True})
     else:
@@ -348,6 +350,8 @@ async def ws_set_chemistry_override(hass, connection, msg):
     entity_id = msg["entity_id"]
     value = msg.get("chemistry")
     if coordinator.store.set_chemistry_override(entity_id, value):
+        # Chemistry change invalidates all cached predictions
+        coordinator.store.clear_primary_cache(entity_id)
         await coordinator.async_request_refresh()
         connection.send_result(msg["id"], {"ok": True})
     else:

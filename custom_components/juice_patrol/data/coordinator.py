@@ -29,6 +29,7 @@ from ..const import (
     DOMAIN,
     MIN_READINGS_FOR_PREDICTION,
     MIN_TIMESPAN_HOURS,
+    PRIMARY_CACHE_VERSION,
     REPLACEMENT_LOW_MULTIPLIER,
     EVENT_BATTERY_LOW,
     EVENT_BATTERY_PREDICTED_LOW,
@@ -65,7 +66,7 @@ from ..engine import (
     soh_from_cycles,
 )
 from ..engine.compress import compress as sdt_compress
-from ..engine.primary import predict_primary
+from ..engine.primary import CompletedCycleCurve, ShapePrior, predict_primary
 from .battery_types import BatteryTypeResolver
 from .history import HistoryCache, async_batch_get_statistics, async_get_readings
 from .store import JuicePatrolStore
@@ -660,6 +661,49 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return False
 
+    async def _async_get_readings_incremental(
+        self, entity_id: str, dev: Any,
+    ) -> list[dict[str, float]]:
+        """Fetch readings incrementally when primary cache is warm.
+
+        Fetches only readings newer than dev.current_cycle_last_raw_t from
+        the recorder, then merges with the cached raw tail to reconstruct
+        full history for the current cycle. Falls back to full fetch on
+        any error.
+        """
+        from datetime import datetime, timezone
+
+        last_t = dev.current_cycle_last_raw_t
+        since_dt = datetime.fromtimestamp(last_t, tz=timezone.utc)
+
+        new_readings = await async_get_readings(
+            self.hass, entity_id, since=since_dt, cache=None,
+            history_days=self.history_days,
+        )
+
+        if not new_readings:
+            # No new readings — use the HistoryCache or full fetch
+            return await async_get_readings(
+                self.hass, entity_id, since=None, cache=self._history_cache,
+                history_days=self.history_days,
+            )
+
+        # Merge: cached raw tail + deduped new readings
+        # The raw tail covers the smoothing window; new readings extend it
+        existing = dev.current_cycle_raw_tail or []
+        existing_ts = {r["t"] for r in existing}
+        merged = list(existing)
+        for r in new_readings:
+            if r["t"] not in existing_ts:
+                merged.append(r)
+        merged.sort(key=lambda r: r["t"])
+
+        # Also update the HistoryCache so other code paths benefit
+        if merged:
+            self._history_cache.set(entity_id, merged)
+
+        return merged
+
     async def _async_build_entity_data(
         self, entity_id: str, battery: DiscoveredBattery
     ) -> dict[str, Any]:
@@ -780,6 +824,18 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             r_squared=None,
                         )
         else:
+            # Incremental fetch: when primary cache is warm and HistoryCache
+            # has expired, fetch only new readings and merge with cached tail.
+            if (
+                dev is not None
+                and self._primary_cache_is_warm(dev, chemistry)
+                and self._history_cache.get(entity_id) is None
+            ):
+                incremental = await self._async_get_readings_incremental(
+                    entity_id, dev,
+                )
+                if incremental:
+                    all_readings = incremental
             prediction = self._predict_non_rechargeable(
                 readings, all_readings, dev, min_span, class_prior, chemistry,
             )
@@ -1025,6 +1081,8 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not self.store.mark_replaced(entity_id):
             return False
         self._history_cache.invalidate(entity_id)
+        # Archive current cycle data → completed_cycle_curves, clear current
+        self.store.archive_current_cycle(entity_id)
         self.hass.async_create_task(self.async_request_refresh())
         return True
 
@@ -1039,6 +1097,8 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not self.store.mark_replaced_at(entity_id, timestamp):
             return False
         self._history_cache.invalidate(entity_id)
+        # Archive current cycle data → completed_cycle_curves, clear current
+        self.store.archive_current_cycle(entity_id)
         self.hass.async_create_task(self.async_request_refresh())
         return True
 
@@ -1064,6 +1124,8 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not self.store.restore_denied_replacement(entity_id, timestamp):
             return False
         self._history_cache.invalidate(entity_id)
+        # Restoring a denied replacement changes cycle boundaries
+        self.store.clear_primary_cache(entity_id)
         self.hass.async_create_task(self.async_request_refresh())
         return True
 
@@ -1083,6 +1145,8 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         elif not self.store.undo_replacement(entity_id):
             return False
         self._history_cache.invalidate(entity_id)
+        # Undo changes cycle boundaries — full cache rebuild needed
+        self.store.clear_primary_cache(entity_id)
         self.hass.async_create_task(self.async_request_refresh())
         return True
 
@@ -1095,6 +1159,8 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not battery:
             return False
         self._history_cache.invalidate(entity_id)
+        # Manual recalculate — full cache rebuild
+        self.store.clear_primary_cache(entity_id)
         await self._async_rebuild_entity(entity_id, battery)
         return True
 
@@ -1204,6 +1270,9 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Uses the cycle-aware primary prediction pipeline: isolates cycles
         from replacement history, learns a shape prior from completed
         cycles, and predicts the current cycle with plume bounds.
+
+        Saves intermediate results (completed cycle curves, shape prior,
+        smoothed data, raw tail) to the device's store entry for caching.
         """
         replacement_timestamps = dev.replacement_history if dev else []
         result = predict_primary(
@@ -1215,7 +1284,69 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Store plume data for chart websocket (transient, not persisted)
         if dev is not None:
             dev._prediction_plume = result.plume_curves  # type: ignore[attr-defined]
+            # Persist cache intermediates to store
+            self._save_primary_cache(dev, result, chemistry)
         return result.prediction
+
+    def _primary_cache_is_warm(self, dev: Any, chemistry: str | None) -> bool:
+        """Check if primary prediction cache is warm and chemistry matches."""
+        if dev is None:
+            return False
+        return (
+            dev.primary_cache_version == PRIMARY_CACHE_VERSION
+            and dev.current_cycle_last_raw_t is not None
+            and dev.cache_chemistry == chemistry
+        )
+
+    def _save_primary_cache(
+        self,
+        dev: Any,
+        result: Any,
+        chemistry: str | None,
+    ) -> None:
+        """Persist primary prediction cache intermediates to the device store entry."""
+        changed = False
+
+        if result.completed_cycle_curves is not None:
+            dev.completed_cycle_curves = [
+                {
+                    "smoothed": c.smoothed,
+                    "fit_model": c.fit_model,
+                    "fit_params": c.fit_params,
+                    "duration_days": c.duration_days,
+                    "start_t": c.start_t,
+                    "end_t": c.end_t,
+                }
+                for c in result.completed_cycle_curves
+            ]
+            changed = True
+
+        if result.shape_prior_data is not None:
+            dev.shape_prior = {
+                "median_params": result.shape_prior_data.median_params,
+                "param_spread": result.shape_prior_data.param_spread,
+                "n_cycles": result.shape_prior_data.n_cycles,
+                "median_duration": result.shape_prior_data.median_duration,
+            }
+            changed = True
+
+        if result.current_cycle_smoothed is not None:
+            dev.current_cycle_smoothed = result.current_cycle_smoothed
+            changed = True
+
+        if result.current_cycle_raw_tail is not None:
+            dev.current_cycle_raw_tail = result.current_cycle_raw_tail
+            changed = True
+
+        if result.current_cycle_last_raw_t is not None:
+            dev.current_cycle_last_raw_t = result.current_cycle_last_raw_t
+            changed = True
+
+        dev.cache_chemistry = chemistry
+        dev.primary_cache_version = PRIMARY_CACHE_VERSION
+
+        if changed:
+            self.store.mark_dirty()
 
     @staticmethod
     def _generate_prediction_curve(

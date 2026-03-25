@@ -29,6 +29,7 @@ from .predictions import (
 )
 from .models import ClassPrior, DeviceClassModels
 from .primary import (
+    CompletedCycleCurve,
     PrimaryCycle,
     PrimaryPredictionResult,
     ShapePrior,
@@ -53,6 +54,7 @@ __all__ = [
     "chemistry_from_battery_type",
     "ClassPrior",
     "CompletedCycle",
+    "CompletedCycleCurve",
     "damage_score",
     "compress",
     "compute_reliability",
