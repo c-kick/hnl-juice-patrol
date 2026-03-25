@@ -36,6 +36,7 @@ from .primary import (
     isolate_primary_cycles,
     learn_discharge_shape,
     predict_primary,
+    predict_primary_incremental,
 )
 from .smooth import cycle_relative_smooth, rolling_median
 from .sessions import CompletedCycle, extract_completed_cycles, extract_discharge_sessions
@@ -74,6 +75,7 @@ __all__ = [
     "isolate_primary_cycles",
     "learn_discharge_shape",
     "predict_primary",
+    "predict_primary_incremental",
     "PrimaryCycle",
     "PrimaryPredictionResult",
     "sdt_compress",

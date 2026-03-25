@@ -438,6 +438,114 @@ def predict_primary(
     return result
 
 
+def predict_primary_incremental(
+    cached_smoothed: list[dict[str, float]],
+    raw_tail: list[dict[str, float]],
+    new_readings: list[dict[str, float]],
+    shape_prior: ShapePrior | None = None,
+    chemistry: str | None = None,
+    class_prior: ClassPrior | None = None,
+    target_level: float = 0.0,
+    window_frac: float = 0.05,
+) -> PrimaryPredictionResult | None:
+    """Incremental primary prediction using cached smoothed cycle data.
+
+    Instead of re-running the full pipeline (cycle isolation + smoothing on
+    all history), this extends the cached smoothed cycle with newly smoothed
+    readings and predicts from that.
+
+    Returns None when the caller should fall back to predict_primary():
+    - Replacement detected in new readings (large upward jump)
+    - Cached data is too small to be useful
+    """
+    from .predictions import PredictionStatus, _no_prediction
+
+    if not cached_smoothed or len(cached_smoothed) < 2:
+        return None
+
+    # Merge raw_tail + new_readings (dedup by timestamp)
+    tail_ts = {r["t"] for r in raw_tail}
+    merged_raw = list(raw_tail)
+    for r in new_readings:
+        if r["t"] not in tail_ts:
+            merged_raw.append(r)
+    merged_raw.sort(key=lambda r: r["t"])
+
+    if not merged_raw:
+        return None
+
+    # Detect replacement in new data: a jump ≥ _JUMP_THRESHOLD_PCT upward
+    # means a battery swap happened — fall back to full pipeline.
+    for i in range(1, len(merged_raw)):
+        jump = merged_raw[i]["v"] - merged_raw[i - 1]["v"]
+        if jump >= _JUMP_THRESHOLD_PCT:
+            return None  # Signal caller to use full predict_primary
+
+    # Re-smooth the merged tail using the full cycle span for window sizing.
+    # The cycle spans from the first cached smoothed point to the last raw
+    # point — this keeps the smoothing window proportional to the real cycle.
+    full_cycle_duration = merged_raw[-1]["t"] - cached_smoothed[0]["t"]
+    if full_cycle_duration <= 0:
+        return None
+
+    tail_smoothed = cycle_relative_smooth(
+        merged_raw, window_frac=window_frac,
+        cycle_duration=full_cycle_duration,
+    )
+
+    # Splice: cached smoothed up to the start of the tail, then the freshly
+    # smoothed tail.  The tail overlaps with the end of cached_smoothed; cut
+    # the cached portion at the splice point to avoid duplicates.
+    splice_t = tail_smoothed[0]["t"] if tail_smoothed else merged_raw[0]["t"]
+    prefix = [r for r in cached_smoothed if r["t"] < splice_t]
+    full_smoothed = prefix + tail_smoothed
+
+    if len(full_smoothed) < 3:
+        return _wrap_no_prediction(
+            _no_prediction(PredictionStatus.INSUFFICIENT_DATA, len(full_smoothed), chemistry=chemistry)
+        )
+
+    # Build a PrimaryCycle from the reconstructed smoothed data so we can
+    # reuse _predict_current_cycle (which does compress → fit → extrapolate).
+    # Note: _predict_current_cycle will re-smooth, but its input is already
+    # smoothed — the second smooth is a near-no-op on clean data.  The
+    # alternative (splitting _predict_current_cycle) would duplicate a lot
+    # of code for marginal benefit.
+    ongoing = PrimaryCycle(
+        readings=full_smoothed,
+        start_t=full_smoothed[0]["t"],
+        end_t=full_smoothed[-1]["t"],
+        is_completed=False,
+    )
+
+    # Reconstruct effective prior from cached shape (same logic as predict_primary)
+    effective_prior = class_prior
+    if shape_prior is not None:
+        model_name = _infer_model_name(shape_prior, chemistry)
+        effective_prior = shape_prior_to_class_prior(shape_prior, model_name)
+
+    result = _predict_current_cycle(
+        ongoing, shape_prior, effective_prior, chemistry, target_level,
+        dead_at_ts=None,
+    )
+
+    # Update cache intermediates for the coordinator to persist.
+    # Re-compress the full smoothed data for the cache (not the compressed
+    # version from _predict_current_cycle — that uses step_size gating).
+    result.current_cycle_smoothed = compress(full_smoothed)
+    # New raw tail: last window_frac of the merged raw readings
+    span = merged_raw[-1]["t"] - merged_raw[0]["t"] if len(merged_raw) > 1 else 0
+    # Use full cycle span for the tail window, not just the merged span
+    window_s = full_cycle_duration * window_frac
+    cutoff = merged_raw[-1]["t"] - window_s
+    result.current_cycle_raw_tail = [r for r in merged_raw if r["t"] >= cutoff]
+    result.current_cycle_last_raw_t = merged_raw[-1]["t"]
+    # Shape prior is unchanged on incremental path
+    result.shape_prior_data = shape_prior
+
+    return result
+
+
 def _predict_current_cycle(
     ongoing: PrimaryCycle,
     shape: ShapePrior | None,
@@ -588,8 +696,8 @@ def _predict_current_cycle(
             chemistry=chemistry,
         )
         if dead_at_ts is not None:
-            pred = _replace_fields(pred, estimated_empty_timestamp=round(dead_at_ts, 0),
-                                   estimated_days_remaining=0.0, estimated_hours_remaining=0.0)
+            pred = _dc_replace(pred, estimated_empty_timestamp=round(dead_at_ts, 0),
+                               estimated_days_remaining=0.0, estimated_hours_remaining=0.0)
         # Cold-start plume from Theil-Sen — no model-spread, just scale slope
         plume = _build_plume_cold_theil_sen(readings, slope, t0, now, target_level)
         return PrimaryPredictionResult(

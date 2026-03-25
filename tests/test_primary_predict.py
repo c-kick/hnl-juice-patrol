@@ -8,6 +8,7 @@ import time
 from custom_components.juice_patrol.engine.primary import (
     PrimaryPredictionResult,
     predict_primary,
+    predict_primary_incremental,
 )
 from custom_components.juice_patrol.engine.predictions import (
     Confidence,
@@ -290,3 +291,128 @@ def test_three_cycles_prediction():
     result = predict_primary(all_readings, [rep1_t, rep2_t], chemistry="alkaline")
     pred = result.prediction
     assert pred.status != PredictionStatus.INSUFFICIENT_DATA
+
+
+# --- Incremental prediction ---
+
+
+def _simulate_cache(all_readings, replacement_timestamps, chemistry):
+    """Run full predict_primary and extract the cache fields it would produce."""
+    result = predict_primary(all_readings, replacement_timestamps, chemistry=chemistry)
+    return {
+        "smoothed": result.current_cycle_smoothed,
+        "raw_tail": result.current_cycle_raw_tail,
+        "last_raw_t": result.current_cycle_last_raw_t,
+        "shape_prior": result.shape_prior_data,
+    }
+
+
+def test_incremental_matches_full():
+    """Incremental prediction should approximate the full prediction."""
+    readings = _make_alkaline_curve(n_days=200, readings_per_day=2)
+
+    # Run full prediction to get the baseline and cache
+    full_result = predict_primary(readings, [], chemistry="alkaline")
+    cache = _simulate_cache(readings, [], "alkaline")
+
+    # Split: simulate cache built from first 180 days, new readings = last 20
+    split_day = 180
+    split_idx = split_day * 2  # readings_per_day=2
+    early = readings[:split_idx]
+    new = readings[split_idx:]
+
+    early_cache = _simulate_cache(early, [], "alkaline")
+    assert early_cache["smoothed"] is not None
+    assert early_cache["raw_tail"] is not None
+
+    incr_result = predict_primary_incremental(
+        cached_smoothed=early_cache["smoothed"],
+        raw_tail=early_cache["raw_tail"],
+        new_readings=new,
+        shape_prior=early_cache["shape_prior"],
+        chemistry="alkaline",
+    )
+    assert incr_result is not None
+    assert incr_result.prediction.status == full_result.prediction.status
+    # Predictions should be in the same ballpark (within 50% — different
+    # smoothing paths will diverge somewhat)
+    full_days = full_result.prediction.estimated_days_remaining
+    incr_days = incr_result.prediction.estimated_days_remaining
+    if full_days is not None and incr_days is not None and full_days > 0:
+        ratio = incr_days / full_days
+        assert 0.5 < ratio < 2.0, (
+            f"Incremental ({incr_days:.1f}d) too far from full ({full_days:.1f}d)"
+        )
+
+
+def test_incremental_detects_replacement():
+    """Large upward jump in new readings should return None (replacement detected)."""
+    readings = _make_alkaline_curve(n_days=200, readings_per_day=2)
+    cache = _simulate_cache(readings, [], "alkaline")
+
+    # New readings with a 30pp upward jump — replacement
+    last_t = cache["last_raw_t"]
+    new = [
+        {"t": last_t + 1 * DAY, "v": 15.0},
+        {"t": last_t + 2 * DAY, "v": 10.0},
+        {"t": last_t + 3 * DAY, "v": 95.0},  # jump!
+        {"t": last_t + 4 * DAY, "v": 94.0},
+    ]
+    result = predict_primary_incremental(
+        cached_smoothed=cache["smoothed"],
+        raw_tail=cache["raw_tail"],
+        new_readings=new,
+        chemistry="alkaline",
+    )
+    assert result is None, "Should return None on replacement detection"
+
+
+def test_incremental_empty_cache():
+    """Empty cached smoothed → returns None (fall back to full)."""
+    result = predict_primary_incremental(
+        cached_smoothed=[],
+        raw_tail=[{"t": time.time(), "v": 80.0}],
+        new_readings=[{"t": time.time() + DAY, "v": 79.0}],
+        chemistry="alkaline",
+    )
+    assert result is None
+
+
+def test_incremental_no_new_readings():
+    """No new readings → still predicts from cached smoothed data."""
+    readings = _make_alkaline_curve(n_days=200, readings_per_day=2)
+    cache = _simulate_cache(readings, [], "alkaline")
+
+    result = predict_primary_incremental(
+        cached_smoothed=cache["smoothed"],
+        raw_tail=cache["raw_tail"],
+        new_readings=[],
+        chemistry="alkaline",
+    )
+    # Should still produce a prediction from existing cached data
+    assert result is not None
+    pred = result.prediction
+    assert pred.status != PredictionStatus.INSUFFICIENT_DATA
+
+
+def test_incremental_updates_cache_fields():
+    """Result should contain updated cache intermediates for the coordinator to persist."""
+    readings = _make_alkaline_curve(n_days=200, readings_per_day=2)
+    cache = _simulate_cache(readings, [], "alkaline")
+    last_t = cache["last_raw_t"]
+
+    new = [
+        {"t": last_t + 1 * DAY, "v": readings[-1]["v"] - 0.3},
+        {"t": last_t + 2 * DAY, "v": readings[-1]["v"] - 0.6},
+    ]
+    result = predict_primary_incremental(
+        cached_smoothed=cache["smoothed"],
+        raw_tail=cache["raw_tail"],
+        new_readings=new,
+        chemistry="alkaline",
+    )
+    assert result is not None
+    assert result.current_cycle_smoothed is not None
+    assert len(result.current_cycle_smoothed) >= len(cache["smoothed"])
+    assert result.current_cycle_raw_tail is not None
+    assert result.current_cycle_last_raw_t == new[-1]["t"]

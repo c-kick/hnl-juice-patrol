@@ -66,7 +66,12 @@ from ..engine import (
     soh_from_cycles,
 )
 from ..engine.compress import compress as sdt_compress
-from ..engine.primary import CompletedCycleCurve, ShapePrior, predict_primary
+from ..engine.primary import (
+    CompletedCycleCurve,
+    ShapePrior,
+    predict_primary,
+    predict_primary_incremental,
+)
 from .battery_types import BatteryTypeResolver
 from .history import HistoryCache, async_batch_get_statistics, async_get_readings
 from .store import JuicePatrolStore
@@ -661,18 +666,17 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return False
 
-    async def _async_get_readings_incremental(
+    async def _async_get_new_readings(
         self, entity_id: str, dev: Any,
     ) -> list[dict[str, float]] | None:
-        """Fetch readings incrementally when primary cache is warm.
+        """Fetch only new readings since the last cached raw timestamp.
 
-        Fetches only readings newer than dev.current_cycle_last_raw_t from
-        the recorder, then merges with the cached raw tail to reconstruct
-        the current cycle's readings. Returns None on failure so the caller
-        can fall back to a full fetch.
+        Returns the new readings (not merged with tail — that happens in
+        predict_primary_incremental).  Returns None when no new readings
+        exist so the caller knows nothing changed.
 
-        Does NOT write to HistoryCache — the merged result is partial data
-        (current cycle tail only), not full history.
+        Does NOT write to HistoryCache — this is a lightweight per-entity
+        query separate from the batch statistics fetch.
         """
         from datetime import datetime, timezone
 
@@ -685,20 +689,10 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
         if not new_readings:
-            # No new readings since last cache — signal caller to full-fetch
             return None
 
-        # Merge: cached raw tail + deduped new readings
-        # The raw tail covers the smoothing window; new readings extend it
-        existing = dev.current_cycle_raw_tail or []
-        existing_ts = {r["t"] for r in existing}
-        merged = list(existing)
-        for r in new_readings:
-            if r["t"] not in existing_ts:
-                merged.append(r)
-        merged.sort(key=lambda r: r["t"])
-
-        return merged if merged else None
+        # Deduplicate: only return readings strictly newer than last_t
+        return [r for r in new_readings if r["t"] > last_t] or None
 
     async def _async_build_entity_data(
         self, entity_id: str, battery: DiscoveredBattery
@@ -706,28 +700,27 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Build the data dict for a single entity (async — queries recorder)."""
         dev = self.store.get_device(entity_id)
 
-        # Incremental fetch: when primary cache is warm, fetch only new
-        # readings and merge with the cached raw tail.  This avoids a full
-        # recorder query on every update cycle.  Falls back to full fetch
-        # when incremental returns None (no new data or error).
-        # Chemistry isn't resolved yet, so skip the chemistry match — it
-        # will be validated later by _primary_cache_is_warm in the prediction
-        # path.  Here we only check that the cache has data at all.
-        all_readings: list[dict[str, float]] | None = None
+        # Always get full readings from the batch-cached statistics.
+        # The batch fetch in _async_build_full_data pre-populates
+        # _history_cache, so this is a cache hit — no extra query.
+        all_readings = await async_get_readings(
+            self.hass, entity_id, since=None, cache=self._history_cache,
+            history_days=self.history_days,
+        )
+
+        # Incremental fetch: when primary cache is warm, also fetch only
+        # new readings since last_raw_t.  These are passed to the
+        # incremental prediction path (which extends the cached smoothed
+        # cycle) so we avoid re-running the full pipeline.
+        incremental_readings: list[dict[str, float]] | None = None
         if (
             dev is not None
             and dev.is_rechargeable is not True
             and dev.primary_cache_version == PRIMARY_CACHE_VERSION
             and dev.current_cycle_last_raw_t is not None
         ):
-            all_readings = await self._async_get_readings_incremental(
+            incremental_readings = await self._async_get_new_readings(
                 entity_id, dev,
-            )
-
-        if all_readings is None:
-            all_readings = await async_get_readings(
-                self.hass, entity_id, since=None, cache=self._history_cache,
-                history_days=self.history_days,
             )
 
         # Update last known level from readings
@@ -842,6 +835,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         else:
             prediction = self._predict_non_rechargeable(
                 readings, all_readings, dev, min_span, class_prior, chemistry,
+                incremental_readings=incremental_readings,
             )
         # Sanity-check predictions against actual current level.
         # Copy before mutating to avoid corrupting shared state.
@@ -1268,6 +1262,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         min_span: float,
         class_prior: Any,
         chemistry: str | None,
+        incremental_readings: list[dict[str, float]] | None = None,
     ) -> PredictionResult:
         """Predict discharge for a non-rechargeable battery.
 
@@ -1275,16 +1270,53 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         from replacement history, learns a shape prior from completed
         cycles, and predicts the current cycle with plume bounds.
 
+        When *incremental_readings* is provided and the cache is warm,
+        uses the fast incremental path (extend cached smoothed cycle)
+        instead of re-running the full pipeline on all history.
+
         Saves intermediate results (completed cycle curves, shape prior,
         smoothed data, raw tail) to the device's store entry for caching.
         """
-        replacement_timestamps = dev.replacement_history if dev else []
-        result = predict_primary(
-            all_readings=all_readings,
-            replacement_timestamps=replacement_timestamps,
-            chemistry=chemistry,
-            class_prior=class_prior,
-        )
+        result = None
+
+        # Try incremental path when cache is warm
+        if (
+            incremental_readings is not None
+            and dev is not None
+            and self._primary_cache_is_warm(dev, chemistry)
+            and dev.current_cycle_smoothed
+        ):
+            # Deserialize stored shape prior
+            shape_prior = None
+            sp = getattr(dev, "shape_prior", None)
+            if sp and isinstance(sp, dict):
+                shape_prior = ShapePrior(
+                    median_params=sp["median_params"],
+                    param_spread=sp["param_spread"],
+                    n_cycles=sp["n_cycles"],
+                    median_duration=sp["median_duration"],
+                )
+
+            result = predict_primary_incremental(
+                cached_smoothed=dev.current_cycle_smoothed,
+                raw_tail=dev.current_cycle_raw_tail or [],
+                new_readings=incremental_readings,
+                shape_prior=shape_prior,
+                chemistry=chemistry,
+                class_prior=class_prior,
+            )
+            # result is None when incremental detects a replacement or
+            # can't produce a prediction — fall through to full path.
+
+        if result is None:
+            replacement_timestamps = dev.replacement_history if dev else []
+            result = predict_primary(
+                all_readings=all_readings,
+                replacement_timestamps=replacement_timestamps,
+                chemistry=chemistry,
+                class_prior=class_prior,
+            )
+
         # Store plume data for chart websocket (transient, not persisted)
         if dev is not None:
             dev._prediction_plume = result.plume_curves  # type: ignore[attr-defined]

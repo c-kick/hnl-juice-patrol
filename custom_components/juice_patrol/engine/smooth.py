@@ -55,6 +55,7 @@ def cycle_relative_smooth(
     readings: list[dict[str, float]],
     window_frac: float = 0.05,
     min_window_points: int = 3,
+    cycle_duration: float | None = None,
 ) -> list[dict[str, float]]:
     """Apply a cycle-relative rolling median to battery readings.
 
@@ -70,6 +71,8 @@ def cycle_relative_smooth(
         readings: sorted list of {"t": unix_ts, "v": pct}.
         window_frac: window as a fraction of total cycle duration.
         min_window_points: minimum number of points in each window.
+        cycle_duration: override for the auto-detected cycle span (seconds).
+            Use when smoothing a tail fragment that is part of a longer cycle.
 
     Returns:
         New list of {"t", "v"} with the same timestamps but smoothed values.
@@ -81,7 +84,8 @@ def cycle_relative_smooth(
     values = [r["v"] for r in readings]
     n = len(readings)
 
-    cycle_duration = timestamps[-1] - timestamps[0]
+    if cycle_duration is None:
+        cycle_duration = timestamps[-1] - timestamps[0]
     half_window = (window_frac * cycle_duration) / 2.0
 
     result: list[dict[str, float]] = []
