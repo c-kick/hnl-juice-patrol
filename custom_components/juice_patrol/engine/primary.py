@@ -12,6 +12,8 @@ import statistics
 import time
 from dataclasses import dataclass
 
+from dataclasses import replace as _dc_replace
+
 from .compress import compress
 from .curve_fit import CurveFitResult, extrapolate_to_threshold, fit_discharge_curve
 from .models import ClassPrior
@@ -385,6 +387,8 @@ def _predict_current_cycle(
         Confidence,
         PredictionResult,
         PredictionStatus,
+        _CLIFF_CHEMISTRIES,
+        _CLIFF_RATIO_THRESHOLD,
         _calendar_penalty,
         _candidate_models,
         _classify_confidence,
@@ -535,6 +539,7 @@ def _predict_current_cycle(
     slope = fit.slope_at(now_days)
     r_squared = fit.r_squared
     intercept_val = fit.predict(0.0)
+    current_fit_val = fit.predict(now_days)
 
     # Overall slope for FLAT/CHARGING classification
     first_v = readings[0]["v"]
@@ -603,18 +608,17 @@ def _predict_current_cycle(
     )
 
     # Cliff override for primary cells
-    _cliff_chemistries = {"alkaline", "lithium_primary", "coin_cell"}
     use_tail_slope = (
-        chemistry in _cliff_chemistries
+        chemistry in _CLIFF_CHEMISTRIES
         and tcr is not None
-        and tcr > 2.5
+        and tcr > _CLIFF_RATIO_THRESHOLD
     )
     if (
         use_tail_slope
         and days_remaining is not None
         and not fit.model_name.startswith("piecewise_linear")
     ):
-        current_val = fit.predict(now_days) - cal_soc_lost
+        current_val = current_fit_val - cal_soc_lost
         # Tail slope from last 5 readings
         tail = readings[-5:]
         tt0 = tail[0]["t"]
@@ -628,7 +632,7 @@ def _predict_current_cycle(
 
     # Linear fallback if curve doesn't reach target
     if days_remaining is None:
-        current_val = fit.predict(now_days) - cal_soc_lost
+        current_val = current_fit_val - cal_soc_lost
         if slope < -0.001:
             days_remaining = (target_level - current_val) / slope
             if days_remaining < 0:
@@ -665,11 +669,11 @@ def _predict_current_cycle(
     )
 
     if dead_at_ts is not None:
-        pred = _replace_fields(pred, estimated_empty_timestamp=round(dead_at_ts, 0),
-                               estimated_days_remaining=0.0, estimated_hours_remaining=0.0)
+        pred = _dc_replace(pred, estimated_empty_timestamp=round(dead_at_ts, 0),
+                           estimated_days_remaining=0.0, estimated_hours_remaining=0.0)
 
     # Build plume
-    plume = _build_plume(fit, shape, readings, t0, now, target_level, chemistry)
+    plume = _build_plume(fit, shape, compressed, t0, now, now_days, target_level, chemistry)
 
     return PrimaryPredictionResult(
         prediction=pred,
@@ -686,9 +690,10 @@ def _predict_current_cycle(
 def _build_plume(
     fit: CurveFitResult,
     shape: ShapePrior | None,
-    readings: list[dict[str, float]],
+    compressed: list[dict[str, float]],
     t0: float,
     now: float,
+    now_days: float,
     target_level: float,
     chemistry: str | None,
 ) -> dict:
@@ -696,10 +701,7 @@ def _build_plume(
 
     Returns dict with keys: best_days, worst_days, curves.
     """
-    from .predictions import _candidate_models
-
-    now_days = (now - t0) / 86400.0
-    last_obs_days = (readings[-1]["t"] - t0) / 86400.0
+    last_obs_days = (compressed[-1]["t"] - t0) / 86400.0
 
     # Median extrapolation
     median_days = extrapolate_to_threshold(fit, now_days, target_level)
@@ -712,7 +714,7 @@ def _build_plume(
     else:
         # Cold-start plume: spread across candidate models
         best_days, worst_days = _plume_from_candidates(
-            readings, t0, now, target_level, chemistry,
+            compressed, t0, now_days, target_level, chemistry,
         )
 
     # Generate curve points for chart rendering
@@ -763,28 +765,22 @@ def _plume_from_prior(
 
 
 def _plume_from_candidates(
-    readings: list[dict[str, float]],
+    compressed: list[dict[str, float]],
     t0: float,
-    now: float,
+    now_days: float,
     target_level: float,
     chemistry: str | None,
 ) -> tuple[float | None, float | None]:
     """Cold-start plume: spread across all candidate model predictions."""
     from .predictions import _candidate_models
 
-    now_days = (now - t0) / 86400.0
-    candidates = _candidate_models(chemistry)
-
-    smoothed = cycle_relative_smooth(readings)
-    compressed = compress(smoothed)
     if len(compressed) < 3:
         return None, None
 
-    # Try each candidate model independently
-    if candidates is None:
-        model_names = ["exponential", "piecewise_linear_2", "piecewise_linear_3"]
-    else:
-        model_names = candidates
+    candidates = _candidate_models(chemistry)
+    model_names = candidates if candidates is not None else [
+        "exponential", "piecewise_linear_2", "piecewise_linear_3",
+    ]
 
     predictions: list[float] = []
     for model in model_names:
@@ -915,7 +911,7 @@ def _wrap_no_prediction(pred: "PredictionResult") -> PrimaryPredictionResult:
 def _infer_model_name(shape: ShapePrior, chemistry: str | None) -> str:
     """Infer the best model name from a ShapePrior's parameters."""
     # Check for piecewise parameters (bp1, bp2, s1, s2, etc.)
-    if any(k.startswith("bp") or k.startswith("s") and k[1:].isdigit()
+    if any(k.startswith("bp") or (k.startswith("s") and k[1:].isdigit())
            for k in shape.median_params):
         n_breakpoints = sum(1 for k in shape.median_params if k.startswith("bp"))
         if n_breakpoints >= 2:
@@ -928,10 +924,3 @@ def _infer_model_name(shape: ShapePrior, chemistry: str | None) -> str:
     return "exponential"
 
 
-def _replace_fields(pred: "PredictionResult", **kwargs) -> "PredictionResult":
-    """Return a copy of PredictionResult with specified fields replaced."""
-    from dataclasses import fields as dc_fields
-    d = {f.name: getattr(pred, f.name) for f in dc_fields(pred)}
-    d.update(kwargs)
-    from .predictions import PredictionResult
-    return PredictionResult(**d)
