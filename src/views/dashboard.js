@@ -1,6 +1,6 @@
 import { html, nothing } from "lit";
-import { getLevelColor, formatRate, getDeviceSubText, displayLevel } from "../helpers.js";
-import { resolveColor } from "../chart.js";
+import { getLevelColor, getDeviceSubText, displayLevel } from "../helpers.js";
+import { resolveColor } from "../chart-utils.js";
 import {
   COLOR_PRIMARY, COLOR_RECHARGEABLE, COLOR_SUCCESS, COLOR_WARNING, COLOR_ERROR,
   COLOR_DISABLED, COLOR_SECONDARY_TEXT, COLOR_PRIMARY_TEXT, COLOR_CARD_BG,
@@ -11,36 +11,10 @@ import {
 
 /** Level buckets for fleet/type composition charts. */
 const LEVEL_BUCKETS = [
-  { key: "critical", min: 0, max: 10, label: "0–10%", color: COLOR_ERROR },
-  { key: "warning", min: 11, max: 50, label: "10–50%", color: COLOR_WARNING },
-  { key: "healthy", min: 51, max: 100, label: "50–100%", color: COLOR_SUCCESS },
+  { key: "critical", min: 0, max: 10, label: "0\u201310%", color: COLOR_ERROR },
+  { key: "warning", min: 11, max: 50, label: "10\u201350%", color: COLOR_WARNING },
+  { key: "healthy", min: 51, max: 100, label: "50\u2013100%", color: COLOR_SUCCESS },
 ];
-
-/** Anomaly description lookup keyed by `anomaly|stability` combo. */
-const ANOMALY_DESCRIPTIONS = {
-  "cliff|stable": "Non-linear discharge curve. Battery likely to fail abruptly once it crosses the knee threshold — prediction unreliable.",
-  "cliff|moderate": "Non-linear discharge curve with moderate noise. Expect sudden failure once the cliff threshold is reached.",
-  "cliff|erratic": "Cliff-drop discharge pattern combined with erratic readings. Both the timing and threshold of failure are unpredictable.",
-  "rapid|stable": "Discharge rate is significantly elevated for this device type. Likely hardware defect or excessive polling/advertising interval.",
-  "rapid|moderate": "Rapid drain with moderate sensor noise. Investigate hardware or radio environment.",
-  "rapid|erratic": "Rapid drain combined with erratic readings. Possible intermittent connectivity issue compounding a hardware problem.",
-  "normal|erratic": "Readings fluctuate irregularly. Possible intermittent ZHA connectivity or faulty voltage ADC on device.",
-  "normal|moderate": "Slightly irregular readings but within tolerance. May stabilize with more data.",
-};
-
-function getAnomalyDescription(anomaly, stability) {
-  return ANOMALY_DESCRIPTIONS[`${anomaly}|${stability}`]
-    || ANOMALY_DESCRIPTIONS[`${anomaly}|stable`]
-    || "Unusual behavior detected. Check device connectivity and battery contact.";
-}
-
-function getAnomalyBadge(anomaly, stability) {
-  if (anomaly === "cliff") return { label: "CLIFF DROP", cls: "error" };
-  if (anomaly === "rapid" && stability === "erratic") return { label: "RAPID + NOISY", cls: "warning" };
-  if (anomaly === "rapid") return { label: "RAPID", cls: "warning" };
-  if (stability === "erratic") return { label: "ERRATIC", cls: "warning" };
-  return { label: "ANOMALY", cls: "warning" };
-}
 
 /**
  * Compute fleet composition buckets including stale and unavailable.
@@ -79,58 +53,14 @@ function computeFleetComposition(entities) {
 }
 
 /**
- * Get the 5 devices with the shortest remaining life, sorted ascending.
- * Only includes non-rechargeable devices with a known daysRemaining.
+ * Get the 5 devices with the lowest battery, sorted ascending.
+ * Only includes non-rechargeable devices with a known level.
  */
-function getAttentionEntities(entities) {
+function getLowestBatteryEntities(entities) {
   return entities
-    .filter(e => e.level != null && !e.isRechargeable && e.daysRemaining != null)
-    .sort((a, b) => a.daysRemaining - b.daysRemaining)
+    .filter(e => e.level != null && !e.isRechargeable && !e.isStale)
+    .sort((a, b) => a.level - b.level)
     .slice(0, 5);
-}
-
-/**
- * Select top "most wanted" devices — worst offenders that deserve detailed cards.
- * Prioritizes: rapid drain with replacements > cliff drops > lowest battery.
- */
-function getMostWanted(entities, dashboardData) {
-  const replData = dashboardData?.replacement_data || {};
-  const candidates = [];
-
-  for (const e of entities) {
-    if (e.level == null || e.isRechargeable) continue;
-    let score = 0;
-    const rd = replData[e.sourceEntity];
-    const replCount = rd?.replacement_history?.length ?? 0;
-
-    // High drain rate
-    if (e.dischargeRate != null && Math.abs(e.dischargeRate) > 5) score += 30;
-    else if (e.dischargeRate != null && Math.abs(e.dischargeRate) > 1) score += 15;
-
-    // Low battery
-    if (e.isLow) score += 25;
-    else if (e.level < 40) score += 10;
-
-    // Anomalies
-    if (e.anomaly === "cliff") score += 20;
-    if (e.anomaly === "rapid") score += 25;
-    if (e.stability === "erratic") score += 15;
-
-    // Frequent replacements
-    if (replCount >= 3) score += 30;
-    else if (replCount >= 2) score += 15;
-
-    // Short remaining
-    if (e.daysRemaining != null && e.daysRemaining <= 7) score += 20;
-    else if (e.daysRemaining != null && e.daysRemaining <= 30) score += 10;
-
-    if (score > 0) {
-      candidates.push({ entity: e, score, replCount, replData: rd });
-    }
-  }
-
-  candidates.sort((a, b) => b.score - a.score);
-  return candidates.slice(0, 3);
 }
 
 /**
@@ -145,7 +75,6 @@ function computeHealthByType(entities) {
     if (e.isRechargeable) {
       typeKey = "Rechargeable";
     } else {
-      // Normalize: "2× CR2032" → "CR2032"
       const m = e.batteryType?.match(/^(?:\d+\s*[×x]\s*)?(.+)$/i);
       typeKey = m ? m[1].trim() : (e.batteryType || "Unknown");
     }
@@ -156,10 +85,8 @@ function computeHealthByType(entities) {
     typeMap[typeKey].devices.push(e);
   }
 
-  // Sort by device count descending
   const types = Object.values(typeMap).sort((a, b) => b.devices.length - a.devices.length);
 
-  // For each type, compute level distribution buckets
   for (const t of types) {
     t.buckets = {};
     for (const b of LEVEL_BUCKETS) t.buckets[b.key] = 0;
@@ -201,27 +128,6 @@ function computeFleetScores(entities) {
   return { readiness, aboveThreshold, totalDisposable, avgLevel };
 }
 
-/**
- * Compute replacement stats for a device.
- */
-function computeReplacementStats(history) {
-  if (!history || history.length < 2) {
-    return { count: history?.length ?? 0, intervals: [], avgDays: null, accelerating: false };
-  }
-  const sorted = [...history].sort((a, b) => a - b);
-  const intervals = [];
-  for (let i = 1; i < sorted.length; i++) {
-    intervals.push((sorted[i] - sorted[i - 1]) / 86400);
-  }
-  const avgDays = Math.round(intervals.reduce((s, v) => s + v, 0) / intervals.length);
-  const lastInterval = intervals[intervals.length - 1];
-  const priorAvg = intervals.length > 1
-    ? intervals.slice(0, -1).reduce((s, v) => s + v, 0) / (intervals.length - 1)
-    : avgDays;
-  const accelerating = intervals.length >= 2 && lastInterval < priorAvg * 0.5;
-  return { count: sorted.length, intervals, avgDays, accelerating };
-}
-
 
 // ── Render functions ──
 
@@ -233,8 +139,7 @@ export function renderDashboard(panel) {
 
   const fleet = computeFleetComposition(entities);
   panel._fleetData = fleet;
-  const attention = getAttentionEntities(entities);
-  const mostWanted = getMostWanted(entities, panel._dashboardData);
+  const lowestBattery = getLowestBatteryEntities(entities);
   const healthByType = computeHealthByType(entities);
   panel._healthByTypeData = healthByType;
   const scores = computeFleetScores(entities);
@@ -243,18 +148,9 @@ export function renderDashboard(panel) {
     <div class="jp-dashboard">
       ${renderOverview(fleet, scores)}
       <div class="db-bottom-row">
-        ${renderAttentionTable(panel, attention)}
+        ${renderLowestBatteryTable(panel, lowestBattery)}
         ${renderHealthByType(healthByType)}
       </div>
-      ${mostWanted.length ? html`
-        <div class="db-card-header" style="padding:0;border:none">
-          <span class="db-card-title">Requires Attention</span>
-          <span class="jp-badge warning">${mostWanted.length} device${mostWanted.length !== 1 ? "s" : ""}</span>
-        </div>
-        <div class="db-mid-row">
-          ${mostWanted.map(w => renderWantedCard(panel, w))}
-        </div>
-      ` : nothing}
     </div>
   `;
 }
@@ -271,12 +167,10 @@ export async function initFleetChart(panel) {
   }
   if (!customElements.get("ha-chart-base")) return;
 
-  // Fleet composition chart
   if (panel._fleetData) {
     _initStackedBar(panel, "jp-fleet-chart", _buildFleetSeries(panel), "_fleetChartEl", true);
   }
 
-  // Health by type charts — all share the same xMax so bar widths are comparable
   const typeData = panel._healthByTypeData;
   if (typeData && typeData.length) {
     const typeXMax = Math.max(...typeData.map(t => t.devices.length));
@@ -291,13 +185,18 @@ function _slugify(s) {
 }
 
 /**
- * Shared: init a horizontal stacked bar chart in a container.
+ * Resolve a CSS custom property to a concrete color value.
  */
+function _resolveColor(panel, varName, fallback) {
+  const v = getComputedStyle(panel).getPropertyValue(varName).trim();
+  return v || fallback;
+}
+
 function _initStackedBar(panel, containerId, { categories, series, total, xMax, clickHandler }, cacheKey, showLegend) {
   const container = panel.shadowRoot?.getElementById(containerId);
   if (!container) return;
 
-  const rc = (v, fb) => resolveColor(panel, v, fb);
+  const rc = (v, fb) => _resolveColor(panel, v, fb);
   const colorSecondary = rc(COLOR_SECONDARY_TEXT.var, COLOR_SECONDARY_TEXT.fallback);
   const colorBg = rc(COLOR_CARD_BG.var, rc("--card-background-color", COLOR_CARD_BG.fallback));
   const colorText = rc(COLOR_PRIMARY_TEXT.var, COLOR_PRIMARY_TEXT.fallback);
@@ -359,12 +258,9 @@ function _initStackedBar(panel, containerId, { categories, series, total, xMax, 
   });
 }
 
-/**
- * Build series data for the fleet composition chart.
- */
 function _buildFleetSeries(panel) {
   const fleet = panel._fleetData;
-  const rc = (v, fb) => resolveColor(panel, v, fb);
+  const rc = (v, fb) => _resolveColor(panel, v, fb);
   const colorText = rc(COLOR_PRIMARY_TEXT.var, COLOR_PRIMARY_TEXT.fallback);
 
   const categories = [
@@ -411,11 +307,8 @@ function _buildFleetSeries(panel) {
   return { categories, series, total: fleet.total, clickHandler };
 }
 
-/**
- * Build series data for a single battery type health chart.
- */
 function _buildTypeSeries(panel, typeData, xMax) {
-  const rc = (v, fb) => resolveColor(panel, v, fb);
+  const rc = (v, fb) => _resolveColor(panel, v, fb);
   const colorText = rc(COLOR_PRIMARY_TEXT.var, COLOR_PRIMARY_TEXT.fallback);
 
   const n = LEVEL_BUCKETS.length;
@@ -451,7 +344,6 @@ function _buildTypeSeries(panel, typeData, xMax) {
   }));
 
   const clickHandler = (cat) => {
-    // Navigate with both level range AND battery type filter
     panel._navigateToDevicesWithLevelFilter(cat.levelMin, cat.levelMax, {
       batteryType: { value: [typeData.type] },
     });
@@ -498,17 +390,17 @@ function renderOverview(fleet, scores) {
 }
 
 
-// ── Attention table (shortest life remaining) ──
+// ── Lowest Battery table ──
 
-function renderAttentionTable(panel, attention) {
-  if (!attention.length) {
+function renderLowestBatteryTable(panel, lowestBattery) {
+  if (!lowestBattery.length) {
     return html`
       <ha-card>
         <div class="db-card-header">
-          <span class="db-card-title">Shortest Life Remaining</span>
-          <span class="jp-badge neutral">No predictions yet</span>
+          <span class="db-card-title">Lowest Battery</span>
+          <span class="jp-badge neutral">No devices</span>
         </div>
-        <div class="empty-state" style="padding:24px">No devices have discharge predictions yet.</div>
+        <div class="empty-state" style="padding:24px">No battery devices found.</div>
       </ha-card>
     `;
   }
@@ -516,18 +408,15 @@ function renderAttentionTable(panel, attention) {
   return html`
     <ha-card>
       <div class="db-card-header">
-        <span class="db-card-title">Shortest Life Remaining</span>
+        <span class="db-card-title">Lowest Battery</span>
       </div>
       <div class="card-content" style="padding-top:0">
         <table class="att-table">
-          <thead><tr><th>Device</th><th>Level</th><th>Remaining</th></tr></thead>
+          <thead><tr><th>Device</th><th>Level</th><th>Type</th></tr></thead>
           <tbody>
-            ${attention.map(e => {
+            ${lowestBattery.map(e => {
               const lvl = displayLevel(e.level);
               const color = getLevelColor(e.level, e.threshold ?? 20);
-              const left = e.daysRemaining <= 1
-                ? Math.round(e.daysRemaining * 24) + "h"
-                : Math.round(e.daysRemaining * 10) / 10 + "d";
               return html`
                 <tr class="att-row" @click=${() => panel._openDetail(e.sourceEntity)}>
                   <td class="name-cell">${e.name}</td>
@@ -539,7 +428,7 @@ function renderAttentionTable(panel, attention) {
                       </div>
                     </div>
                   </td>
-                  <td class="dim">${left}</td>
+                  <td class="dim">${e.batteryType || "\u2014"}</td>
                 </tr>
               `;
             })}
@@ -548,127 +437,6 @@ function renderAttentionTable(panel, attention) {
       </div>
     </ha-card>
   `;
-}
-
-
-// ── Most Wanted cards ──
-
-function renderWantedCard(panel, { entity: e, replCount, replData }) {
-  const color = getLevelColor(e.level, e.threshold ?? 20);
-  const lvl = displayLevel(e.level);
-  const subText = getDeviceSubText(e);
-
-  // Stats grid
-  const rateText = e.dischargeRate != null ? formatRate(e) : "—";
-  const remainText = e.daysRemaining != null
-    ? (e.daysRemaining <= 1 ? Math.round(e.daysRemaining * 24) + " hours" : Math.round(e.daysRemaining * 10) / 10 + " days")
-    : (e.hoursRemaining != null ? e.hoursRemaining + " hours" : "Unknown");
-  const remainColor = e.daysRemaining != null && e.daysRemaining <= 7
-    ? CSS_ERROR : "";
-
-  // Replacement stats
-  let replText = replCount > 0 ? `${replCount}×` : "0";
-  const replHistory = replData?.replacement_history || [];
-  if (replHistory.length >= 2) {
-    const stats = computeReplacementStats(replHistory);
-    if (stats.avgDays) {
-      const months = Math.round((Date.now() / 1000 - replHistory[0]) / (86400 * 30));
-      replText = `${replCount}× in ${months}mo`;
-    }
-  }
-  const replColor = replCount >= 3 ? CSS_ERROR
-    : replCount >= 2 ? CSS_WARNING : "";
-
-  // Reliability
-  const reliabilityText = e.reliability != null ? `${e.reliability}%` : "—";
-
-  // Badges
-  const badges = [];
-  if (e.isLow) badges.push({ label: "LOW", cls: "error" });
-  if (e.anomaly === "cliff") badges.push({ label: "CLIFF DROP", cls: "error" });
-  if (e.anomaly === "rapid") badges.push({ label: "RAPID", cls: "error" });
-  if (e.stability === "erratic") badges.push({ label: "ERRATIC", cls: "warning" });
-  if (e.predictionStatus === "flat") badges.push({ label: "FLAT", cls: "neutral" });
-  if (e.predictionStatus === "normal" && !e.isLow && e.anomaly !== "rapid")
-    badges.push({ label: "NORMAL DISCHARGE", cls: "neutral" });
-
-  // Verdict
-  const verdict = buildVerdict(e, replCount, replHistory);
-
-  const threshold = e.threshold ?? 20;
-
-  return html`
-    <ha-card class="wanted-card" @click=${() => panel._openDetail(e.sourceEntity)}>
-      <div class="wanted-top">
-        <div class="wanted-identity">
-          <div class="wanted-name">${e.name}</div>
-          ${subText ? html`<div class="wanted-sub">${subText}</div>` : nothing}
-        </div>
-        <div class="wanted-level" style="color:${color}">${lvl}%</div>
-      </div>
-      <div class="wanted-stats">
-        <div class="ws"><div class="ws-label">Battery</div><div class="ws-value">${e.batteryType || "Unknown"}</div></div>
-        <div class="ws"><div class="ws-label">Remaining</div><div class="ws-value" style="color:${remainColor}">${remainText}</div></div>
-        <div class="ws"><div class="ws-label">Drain Rate</div><div class="ws-value">${rateText}</div></div>
-        <div class="ws"><div class="ws-label">Replacements</div><div class="ws-value" style="color:${replColor}">${replText}</div></div>
-        <div class="ws"><div class="ws-label">Reliability</div><div class="ws-value">${reliabilityText}</div></div>
-        <div class="ws"><div class="ws-label">Anomaly</div><div class="ws-value"${
-          e.anomaly && e.anomaly !== "normal"
-            ? ` style="color:${CSS_ERROR}"`
-            : ""
-        }>${e.anomaly === "cliff" ? "Cliff Drop" : e.anomaly === "rapid" ? "Rapid" : e.stability === "erratic" ? "Erratic" : "None"}</div></div>
-      </div>
-      <div class="wanted-gauge">
-        <div class="gauge-label">Battery Level</div>
-        <div class="gauge-track">
-          <div class="gauge-fill" style="width:${lvl}%;background:${
-            lvl <= threshold
-              ? CSS_ERROR
-              : `linear-gradient(90deg, ${CSS_ERROR}, ${color})`
-          }"></div>
-          <div class="gauge-threshold" style="left:${threshold}%"></div>
-        </div>
-        <div class="gauge-axis"><span>0%</span><span>threshold</span><span>100%</span></div>
-      </div>
-      ${badges.length ? html`
-        <div class="wanted-badges">
-          ${badges.map(b => html`<span class="jp-badge ${b.cls}">${b.label}</span>`)}
-        </div>
-      ` : nothing}
-      <div class="wanted-verdict">
-        <strong>Verdict:</strong> ${verdict}
-      </div>
-    </ha-card>
-  `;
-}
-
-function buildVerdict(e, replCount, replHistory) {
-  if (e.anomaly === "cliff") {
-    return "Non-linear cliff discharge. Reports stable level until abrupt collapse. Actual remaining life unpredictable — could be days or weeks. Prediction model unreliable for this device.";
-  }
-  if (e.anomaly === "rapid" && replCount >= 3) {
-    const stats = computeReplacementStats(replHistory);
-    const battType = e.batteryType || "battery";
-    const accel = stats.accelerating ? " with shrinking intervals" : "";
-    return `Eating batteries at an alarming rate. ${replCount} ${battType} cells consumed${accel}. Either the device's radio advertising interval is too aggressive or the hardware is defective.`;
-  }
-  if (e.anomaly === "rapid") {
-    return "Discharge rate is significantly elevated. Investigate hardware, radio environment, or excessive polling interval.";
-  }
-  if (e.isLow && e.daysRemaining != null) {
-    const battType = e.batteryType || "battery";
-    return `At end-of-life. ${battType} replacement needed soon. ${e.daysRemaining <= 1 ? "Less than a day remaining." : `Predicted empty in ${Math.round(e.daysRemaining)} days.`}`;
-  }
-  if (e.isLow) {
-    return "Battery is below the low threshold. Replacement recommended.";
-  }
-  if (e.stability === "erratic") {
-    return "Readings fluctuate irregularly. Possible intermittent connectivity or faulty voltage ADC.";
-  }
-  if (e.daysRemaining != null && e.daysRemaining <= 7) {
-    return `Predicted to die within ${Math.round(e.daysRemaining)} days. Replace soon.`;
-  }
-  return "Warrants monitoring — review the detail chart for discharge pattern.";
 }
 
 

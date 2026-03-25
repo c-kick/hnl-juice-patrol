@@ -18,17 +18,13 @@ async def async_get_config_entry_diagnostics(
 
     devices_diag: dict[str, Any] = {}
     for entity_id, info in (coordinator.data or {}).items():
-        prediction = info.get("prediction")
         devices_diag[entity_id] = {
             "level": info.get("level"),
-            "reading_count": info.get("reading_count", 0),
-            "discharge_rate": info.get("discharge_rate"),
+            "battery_type": info.get("battery_type"),
+            "is_rechargeable": info.get("is_rechargeable"),
+            "is_low": info.get("is_low"),
+            "is_stale": info.get("is_stale"),
             "last_replaced": info.get("last_replaced"),
-            "prediction_confidence": prediction.confidence if prediction else None,
-            "prediction_days_remaining": (
-                prediction.estimated_days_remaining if prediction else None
-            ),
-            "prediction_status": prediction.status if prediction else None,
         }
 
     return {

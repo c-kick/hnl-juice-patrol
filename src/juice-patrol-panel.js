@@ -2,12 +2,10 @@ import { LitElement, html, css, nothing } from "lit";
 import { ICON_BATTERY, ICON_SHOPPING, ICON_DASHBOARD } from "./constants.js";
 import {
   formatLevel, displayLevel, wsErrorMessage, getBatteryIcon, getLevelColor,
-  isActivelyCharging, isFastDischarge, predictionReason, predictionReasonDetail,
-  formatRate, formatTimeRemaining, formatDate, parseBatteryType, formatBatteryType,
-  erraticTooltip, showToast, getDeviceSubText,
+  isActivelyCharging, formatDate, parseBatteryType, formatBatteryType,
+  showToast, getDeviceSubText,
 } from "./helpers.js";
 import { panelStyles } from "./styles.js";
-import { initChart } from "./chart.js";
 import { buildColumns } from "./columns.js";
 import { renderDetailView } from "./views/detail.js";
 import { renderShoppingList } from "./views/shopping.js";
@@ -29,13 +27,9 @@ class JuicePatrolPanel extends LitElement {
       _shoppingData: { state: true },
       _shoppingLoading: { state: true },
       _detailEntity: { state: true },
-      _chartData: { state: true },
-      _chartLoading: { state: true },
-      _chartStale: { state: true },
       _flashGeneration: { state: true },
       _refreshing: { state: true },
       _ignoredEntities: { state: true },
-      _chartRange: { state: true },
       _filters: { state: true },
       _dashboardData: { state: true },
       _dashboardLoading: { state: true },
@@ -57,15 +51,8 @@ class JuicePatrolPanel extends LitElement {
     this._shoppingData = null;
     this._shoppingLoading = false;
     this._detailEntity = null;
-    this._chartData = null;
-    this._chartLoading = false;
-    this._chartStale = false;
-    this._chartEl = null;
-    this._chartLastLevel = null;
-    this._chartLastPredictedEmpty = null;
     this._flashGeneration = 0;
     this._ignoredEntities = null;
-    this._chartRange = "auto";
     this._filters = { status: { value: ["active", "low"] } };
     this._dashboardData = null;
     this._dashboardLoading = false;
@@ -129,19 +116,6 @@ class JuicePatrolPanel extends LitElement {
     this._visibilityHandler = () => {
       if (document.visibilityState === "visible" && this._hass) {
         this._processHassUpdate(false);
-        if (this._activeView === "detail" && this._detailEntity) {
-          // Only reload chart if data is stale (>5 min) or missing
-          const staleMs = 5 * 60 * 1000;
-          const age = this._chartData?.last_calculated
-            ? Date.now() - this._chartData.last_calculated * 1000
-            : Infinity;
-          this._chartLoading = false;
-          if (age > staleMs) {
-            // Delay slightly to let HA re-establish the WS connection
-            // after iOS/Android app returns from background
-            setTimeout(() => this._loadChartData(this._detailEntity), 500);
-          }
-        }
         if (this._activeView === "shopping") {
           this._loadShoppingList();
         }
@@ -196,9 +170,6 @@ class JuicePatrolPanel extends LitElement {
       const entityId = decodeURIComponent(path.slice(detailPrefix.length));
       if (entityId && entityId !== this._detailEntity) {
         this._detailEntity = entityId;
-        this._chartData = null;
-        this._chartEl = null;
-        this._loadChartData(entityId);
       }
       this._activeView = "detail";
       return;
@@ -208,9 +179,6 @@ class JuicePatrolPanel extends LitElement {
         || path === `${this._basePath}/dashboard` || path === `${this._basePath}/dashboard/`) {
       if (this._activeView === "detail") {
         this._detailEntity = null;
-        this._chartData = null;
-        this._chartEl = null;
-        this._chartRetried = false;
       }
       if (this._activeView !== "dashboard") {
         this._activeView = "dashboard";
@@ -224,9 +192,6 @@ class JuicePatrolPanel extends LitElement {
     if (path === `${this._basePath}/shopping` || path === `${this._basePath}/shopping/`) {
       if (this._activeView === "detail") {
         this._detailEntity = null;
-        this._chartData = null;
-        this._chartEl = null;
-        this._chartRetried = false;
       }
       if (this._activeView !== "shopping") {
         this._activeView = "shopping";
@@ -238,18 +203,12 @@ class JuicePatrolPanel extends LitElement {
     // Devices view (explicit path or fallback for unknown paths)
     if (this._activeView === "detail") {
       this._detailEntity = null;
-      this._chartData = null;
-      this._chartEl = null;
-      this._chartRetried = false;
     }
     this._activeView = "devices";
     this._entities = this._entityList;
   }
 
   updated(changed) {
-    if ((changed.has("_chartData") || changed.has("_chartRange")) && this._chartData) {
-      requestAnimationFrame(() => initChart(this, this._chartData));
-    }
     // Init fleet/type charts when dashboard is active
     if (this._activeView === "dashboard" && this._fleetData &&
         (changed.has("_entities") || changed.has("_activeView"))) {
@@ -308,24 +267,6 @@ class JuicePatrolPanel extends LitElement {
       this._loadConfig();
       this._loadIgnored();
     }
-
-    // When in detail view and the prediction changes significantly, show a
-    // stale notice instead of redrawing the chart — avoids annoying mid-view
-    // redraws from hourly scans or erratic sensors.
-    // "Significant" is relative to time remaining: a 1-day shift matters when
-    // the battery dies in 2 days, not when it has 2 years left.
-    if (this._activeView === "detail" && this._detailEntity && !this._chartLoading && this._chartData) {
-      const dev = this._getDevice(this._detailEntity);
-      // Skip for stale devices: their prediction goes to null ("unknown"),
-      // which isn't a meaningful chart update worth prompting the user about.
-      if (dev && !dev.isStale) {
-        const newPredTs = dev.predictedEmpty ? new Date(dev.predictedEmpty).getTime() : null;
-        const oldPredTs = this._chartLastPredictedEmpty;
-        if (this._isPredictionSignificantlyChanged(oldPredTs, newPredTs)) {
-          this._chartStale = true;
-        }
-      }
-    }
   }
 
   _updateEntities() {
@@ -341,9 +282,7 @@ class JuicePatrolPanel extends LitElement {
       if (entityId.includes("lowest_battery") || entityId.includes("attention_needed")) continue;
 
       const hasSuffix =
-        entityId.includes("_discharge_rate") ||
-        entityId.includes("_days_remaining") ||
-        entityId.includes("_predicted_empty") ||
+        entityId.includes("_battery_level") ||
         entityId.includes("_battery_low") ||
         entityId.includes("_stale");
       if (!hasSuffix) continue;
@@ -353,11 +292,6 @@ class JuicePatrolPanel extends LitElement {
           sourceEntity,
           name: attrs.source_name || sourceEntity,
           level: null,
-          dischargeRate: null,
-          dischargeRateHour: null,
-          daysRemaining: null,
-          hoursRemaining: null,
-          predictedEmpty: null,
           isLow: false,
           isStale: false,
           batteryType: null,
@@ -368,16 +302,6 @@ class JuicePatrolPanel extends LitElement {
           isRechargeable: false,
           rechargeableReason: null,
           chargingState: null,
-          chemistry: null,
-          chemistryOverride: null,
-          anomaly: null,
-          dropSize: null,
-          stability: null,
-          stabilityCv: null,
-          meanLevel: null,
-          predictionStatus: null,
-          reliability: null,
-          lastCalculated: null,
           manufacturer: null,
           model: null,
           platform: null,
@@ -388,11 +312,9 @@ class JuicePatrolPanel extends LitElement {
       const dev = devices.get(sourceEntity);
 
       // Extract data from each sensor type
-      if (entityId.includes("_discharge_rate")) {
+      if (entityId.includes("_battery_level")) {
         const val = parseFloat(state.state);
-        dev.dischargeRate = isNaN(val) ? null : val;
-        dev.dischargeRateHour = attrs.discharge_rate_hour ?? null;
-        dev.level = attrs.level != null ? parseFloat(attrs.level) : null;
+        dev.level = isNaN(val) ? null : val;
         dev.batteryType = attrs.battery_type || null;
         dev.batteryTypeSource = attrs.battery_type_source || null;
         dev.threshold = attrs.threshold != null ? parseFloat(attrs.threshold) : null;
@@ -401,26 +323,9 @@ class JuicePatrolPanel extends LitElement {
         dev.isRechargeable = attrs.is_rechargeable ?? false;
         dev.rechargeableReason = attrs.rechargeable_reason ?? null;
         dev.chargingState = attrs.charging_state ?? null;
-        dev.chemistry = attrs.chemistry ?? null;
-        dev.chemistryOverride = attrs.chemistry_override ?? null;
-        dev.anomaly = attrs.discharge_anomaly ?? null;
-        dev.dropSize = attrs.drop_size ?? null;
-        dev.stability = attrs.stability ?? null;
-        dev.stabilityCv = attrs.stability_cv ?? null;
-        dev.meanLevel = attrs.mean_level ?? null;
-        dev.lastCalculated = attrs.last_calculated ?? null;
         dev.manufacturer = attrs.manufacturer ?? null;
         dev.model = attrs.model ?? null;
         dev.platform = attrs.platform ?? null;
-      } else if (entityId.includes("_days_remaining")) {
-        const val = parseFloat(state.state);
-        dev.daysRemaining = isNaN(val) ? null : val;
-        dev.reliability = attrs.reliability ?? null;
-        dev.predictionStatus = attrs.status || null;
-        dev.hoursRemaining = attrs.hours_remaining ?? null;
-      } else if (entityId.includes("_predicted_empty")) {
-        dev.predictedEmpty =
-          state.state !== "unknown" && state.state !== "unavailable" ? state.state : null;
       } else if (entityId.includes("_battery_low")) {
         dev.isLow = state.state === "on";
       } else if (entityId.includes("_stale")) {
@@ -478,20 +383,18 @@ class JuicePatrolPanel extends LitElement {
     }
 
     this._entityList = list;
-    this._entityHash = list.map((d) => `${d.sourceEntity}:${d.level}:${d.isLow}:${d.isStale}:${d.dischargeRate}:${d.daysRemaining}:${d.predictedEmpty}:${d.replacementPending}:${d.chargingState}:${d.batteryType}:${d.anomaly}:${d.stability}:${d.reliability}`).join("|");
+    this._entityHash = list.map((d) => `${d.sourceEntity}:${d.level}:${d.isLow}:${d.isStale}:${d.replacementPending}:${d.chargingState}:${d.batteryType}`).join("|");
   }
 
   _getFilteredEntities() {
     const statusValues = this._filters.status?.value || [];
-    const predValues = this._filters.prediction?.value || [];
     const batteryValues = this._filters.battery?.value || [];
     const typeValues = this._filters.batteryType?.value || [];
     const levelRange = this._filters.levelRange?.value;
     const hasLevelRange = levelRange && (levelRange.min != null || levelRange.max != null);
-    if (statusValues.length === 0 && predValues.length === 0 && batteryValues.length === 0 && typeValues.length === 0 && !hasLevelRange) return this._entities;
+    if (statusValues.length === 0 && batteryValues.length === 0 && typeValues.length === 0 && !hasLevelRange) return this._entities;
     return this._entities.filter((d) => {
       if (statusValues.length > 0 && !statusValues.includes(d._statusFilter)) return false;
-      if (predValues.length > 0 && !predValues.includes(d.predictionStatus || "")) return false;
       if (batteryValues.length > 0) {
         const type = d.isRechargeable ? "rechargeable" : "disposable";
         if (!batteryValues.includes(type)) return false;
@@ -536,28 +439,6 @@ class JuicePatrolPanel extends LitElement {
     this._syncViewFromUrl();
   }
 
-  /**
-   * Check if the predicted-empty timestamp changed significantly.
-   *
-   * "Significant" is relative to the time remaining: a 1-day shift is
-   * meaningful when the battery dies in 2 days (50%), but not when it
-   * has 2 years left (0.1%).  Uses a 10% relative threshold.
-   *
-   * Also triggers on state transitions: prediction appearing/disappearing.
-   */
-  _isPredictionSignificantlyChanged(oldTs, newTs) {
-    // State transitions: no-prediction ↔ prediction is always significant
-    if ((oldTs == null) !== (newTs == null)) return true;
-    // Both null — no change
-    if (oldTs == null && newTs == null) return false;
-
-    const now = Date.now();
-    const timeRemaining = Math.max(Math.max(oldTs, newTs) - now, 3_600_000); // floor: 1h
-    const shift = Math.abs(newTs - oldTs);
-    // Significant if the shift exceeds 10% of time remaining
-    return shift / timeRemaining > 0.10;
-  }
-
   // ── Helpers (thin wrappers that delegate to imported functions) ──
 
   _getDevice(entityId) {
@@ -588,7 +469,6 @@ class JuicePatrolPanel extends LitElement {
       this._settingsValues = {
         low_threshold: settings.low_threshold,
         stale_timeout: settings.stale_timeout,
-        prediction_horizon: settings.prediction_horizon,
       };
     } catch (e) {
       console.warn("Juice Patrol: failed to load config", e);
@@ -629,9 +509,6 @@ class JuicePatrolPanel extends LitElement {
       if (timestamp != null) wsMsg.timestamp = timestamp;
       await this._hass.callWS(wsMsg);
       this._showToast("Battery marked as replaced");
-      if (this._detailEntity === entityId) {
-        setTimeout(() => this._loadChartData(entityId), 500);
-      }
     } catch (e) {
       this._showToast("Failed to mark as replaced");
     }
@@ -658,9 +535,6 @@ class JuicePatrolPanel extends LitElement {
         entity_id: entityId,
       });
       this._showToast("Replacement undone");
-      if (this._detailEntity === entityId) {
-        setTimeout(() => this._loadChartData(entityId), 500);
-      }
     } catch (e) {
       this._showToast("Failed to undo replacement");
     }
@@ -681,9 +555,6 @@ class JuicePatrolPanel extends LitElement {
             timestamp,
           });
           this._showToast("Replacement removed");
-          if (this._detailEntity === entityId) {
-            setTimeout(() => this._loadChartData(entityId), 500);
-          }
         } catch (e) {
           this._showToast("Failed to remove replacement");
         }
@@ -698,9 +569,6 @@ class JuicePatrolPanel extends LitElement {
         entity_id: entityId,
       });
       this._showToast("Replacement confirmed");
-      if (this._detailEntity === entityId) {
-        setTimeout(() => this._loadChartData(entityId), 500);
-      }
     } catch (e) {
       this._showToast("Failed to confirm");
     }
@@ -714,9 +582,6 @@ class JuicePatrolPanel extends LitElement {
         timestamp,
       });
       this._showToast("Replacement confirmed");
-      if (this._detailEntity === entityId) {
-        setTimeout(() => this._loadChartData(entityId), 500);
-      }
     } catch (e) {
       this._showToast("Failed to confirm replacement");
     }
@@ -733,9 +598,6 @@ class JuicePatrolPanel extends LitElement {
         text: "Undo",
         action: () => this._restoreDeniedReplacement(entityId, timestamp),
       });
-      if (this._detailEntity === entityId) {
-        setTimeout(() => this._loadChartData(entityId), 500);
-      }
     } catch (e) {
       this._showToast("Failed to dismiss suggestion");
     }
@@ -749,32 +611,8 @@ class JuicePatrolPanel extends LitElement {
         timestamp,
       });
       this._showToast("Suggestion restored");
-      if (this._detailEntity === entityId) {
-        setTimeout(() => this._loadChartData(entityId), 500);
-      }
     } catch (e) {
       this._showToast("Failed to restore suggestion");
-    }
-  }
-
-  _zoomToTimestamp(timestamp) {
-    // Zoom chart to ±3 days around the given Unix timestamp (seconds)
-    this._chartZoomTarget = timestamp;
-    this._chartRange = "zoom";
-    // Scroll chart into view so the user sees the result
-    const chartEl = this.shadowRoot?.getElementById("jp-chart");
-    if (chartEl) chartEl.scrollIntoView({ behavior: "smooth", block: "center" });
-  }
-
-  async _recalculate(entityId) {
-    try {
-      await this._hass.callWS({
-        type: "juice_patrol/recalculate",
-        entity_id: entityId,
-      });
-      this._showToast("Prediction recalculated");
-    } catch (e) {
-      this._showToast(wsErrorMessage(e, "recalculation"));
     }
   }
 
@@ -782,11 +620,11 @@ class JuicePatrolPanel extends LitElement {
     showConfirmDialog(this, {
       title: "Force refresh",
       bodyHtml: `
-        <p>Juice Patrol automatically updates predictions whenever a battery level changes and runs a full scan every hour.</p>
-        <p>A manual refresh clears all cached recorder data and recalculates every device from scratch. This is only needed if:</p>
+        <p>Juice Patrol automatically updates whenever a battery level changes and runs a full scan every hour.</p>
+        <p>A manual refresh clears all cached data and re-evaluates every device from scratch. This is only needed if:</p>
         <ul style="margin:8px 0;padding-left:20px">
           <li>You changed a battery type or threshold and want immediate results</li>
-          <li>Predictions seem stale or incorrect after a HA restart</li>
+          <li>Data seems stale or incorrect after a HA restart</li>
           <li>You imported historical recorder data</li>
         </ul>
         <p style="color:var(--secondary-text-color);font-size:13px">This may take a moment depending on the number of devices.</p>
@@ -801,7 +639,7 @@ class JuicePatrolPanel extends LitElement {
     this._refreshing = true;
     try {
       await this._hass.callWS({ type: "juice_patrol/refresh" });
-      this._showToast("Predictions refreshed");
+      this._showToast("Data refreshed");
       // Reload view-specific data after refresh completes
       if (this._activeView === "shopping") {
         setTimeout(() => this._loadShoppingList(), 500);
@@ -810,8 +648,6 @@ class JuicePatrolPanel extends LitElement {
           this._loadShoppingList();
           this._loadDashboardData();
         }, 500);
-      } else if (this._activeView === "detail" && this._detailEntity) {
-        setTimeout(() => this._loadChartData(this._detailEntity), 500);
       }
     } catch (e) {
       this._showToast("Refresh failed");
@@ -911,40 +747,6 @@ class JuicePatrolPanel extends LitElement {
     this._dashboardLoading = false;
   }
 
-  async _loadChartData(entityId) {
-    if (!this._hass || this._chartLoading) return;
-    this._chartLoading = true;
-    // Keep existing _chartData visible while loading — don't flash to empty
-    try {
-      const data = await this._hass.callWS({
-        type: "juice_patrol/get_entity_chart",
-        entity_id: entityId,
-      });
-      this._chartLastLevel = data?.level ?? null;
-      // Snapshot the entity's current prediction — this is the same source
-      // that _processHassUpdate compares against, so they can never diverge.
-      const dev = this._getDevice(entityId);
-      this._chartLastPredictedEmpty =
-        dev?.predictedEmpty ? new Date(dev.predictedEmpty).getTime() : null;
-      this._chartData = data;
-      this._chartStale = false;
-    } catch (e) {
-      // On mobile apps, WS may be temporarily dead after returning from
-      // background. Retry once after a short delay before showing error.
-      if (!this._chartRetried) {
-        this._chartRetried = true;
-        this._chartLoading = false;
-        setTimeout(() => this._loadChartData(entityId), 1000);
-        return;
-      }
-      // Don't reset _chartRetried here — it's cleared when leaving detail view.
-      // Resetting it would allow infinite retry loops on persistent errors.
-      console.error("Juice Patrol: failed to load chart data", e);
-      this._showToast(wsErrorMessage(e, "chart view"));
-    }
-    this._chartLoading = false;
-  }
-
   async _saveBatteryType(entityId, type) {
     try {
       await this._hass.callWS({
@@ -964,13 +766,9 @@ class JuicePatrolPanel extends LitElement {
     // Save scroll position to current history entry before pushing detail
     this._saveScrollPosition();
     this._detailEntity = entityId;
-    this._chartData = null;
-    this._chartEl = null;
-    this._chartRange = "auto";
     this._activeView = "detail";
     const detailUrl = `${this._basePath}/detail/${encodeURIComponent(entityId)}`;
     history.pushState({ view: "detail", entityId }, "", detailUrl);
-    this._loadChartData(entityId);
   }
 
   _closeDetail() {
@@ -1077,8 +875,6 @@ class JuicePatrolPanel extends LitElement {
       this._confirmReplacement(entityId);
     } else if (action === "replace") {
       this._markReplaced(entityId);
-    } else if (action === "recalculate") {
-      this._recalculate(entityId);
     } else if (action === "type") {
       this._setBatteryType(entityId, dev?.batteryType);
     } else if (action === "undo-replace") {
@@ -1160,9 +956,6 @@ class JuicePatrolPanel extends LitElement {
             if (!action || !entityId) return;
             if (action === "replace") {
               this._markReplaced(entityId);
-            } else if (action === "recalculate") {
-              this._recalculate(entityId);
-              setTimeout(() => this._loadChartData(entityId), 500);
             } else if (action === "type") {
               this._setBatteryType(entityId, dev?.batteryType);
             } else if (action === "ignore") {
@@ -1176,10 +969,6 @@ class JuicePatrolPanel extends LitElement {
           <ha-dropdown-item value="replace">
             <ha-icon slot="icon" icon="mdi:battery-sync"></ha-icon>
             Mark as replaced
-          </ha-dropdown-item>
-          <ha-dropdown-item value="recalculate">
-            <ha-icon slot="icon" icon="mdi:calculator-variant"></ha-icon>
-            Recalculate
           </ha-dropdown-item>
           <ha-dropdown-item value="type">
             <ha-icon slot="icon" icon="mdi:battery-heart-variant"></ha-icon>
@@ -1281,22 +1070,11 @@ class JuicePatrolPanel extends LitElement {
 
   _renderFilterPane() {
     const statusValues = this._filters.status?.value || [];
-    const predValues = this._filters.prediction?.value || [];
     const statuses = [
       { value: "active", label: "Active", icon: "mdi:check-circle" },
       { value: "low", label: "Low battery", icon: "mdi:battery-alert" },
       { value: "stale", label: "Stale", icon: "mdi:clock-alert-outline" },
       { value: "unavailable", label: "Unavailable", icon: "mdi:help-circle-outline" },
-    ];
-    const predictions = [
-      { value: "normal", label: "Normal discharge", icon: "mdi:trending-down" },
-      { value: "flat", label: "Flat", icon: "mdi:minus" },
-      { value: "idle", label: "Idle", icon: "mdi:sleep" },
-      { value: "charging", label: "Charging", icon: "mdi:battery-charging" },
-      { value: "insufficient_data", label: "Not enough data", icon: "mdi:database-off-outline" },
-      { value: "single_level", label: "Single level", icon: "mdi:equal" },
-      { value: "insufficient_range", label: "Tiny range", icon: "mdi:approximately-equal" },
-      { value: "noisy", label: "Noisy data", icon: "mdi:chart-scatter-plot" },
     ];
     return html`
       <ha-expansion-panel slot="filter-pane" outlined expanded header="Status">
@@ -1334,21 +1112,6 @@ class JuicePatrolPanel extends LitElement {
       </ha-expansion-panel>
       ${this._renderBatteryTypeFilterPane()}
       ${this._renderLevelRangeFilterPane()}
-      <ha-expansion-panel slot="filter-pane" outlined header="Prediction">
-        <ha-icon slot="leading-icon" icon="mdi:crystal-ball" style="--mdc-icon-size:20px"></ha-icon>
-        <div class="jp-filter-list">
-          ${predictions.map((p) => html`
-            <label class="jp-filter-item">
-              <ha-checkbox
-                .checked=${predValues.includes(p.value)}
-                @change=${(e) => this._toggleFilter("prediction", p.value, e.target.checked)}
-              ></ha-checkbox>
-              <ha-icon icon=${p.icon} style="--mdc-icon-size:18px"></ha-icon>
-              <span>${p.label}</span>
-            </label>
-          `)}
-        </div>
-      </ha-expansion-panel>
     `;
   }
 
@@ -1486,15 +1249,6 @@ class JuicePatrolPanel extends LitElement {
             1,
             720,
             "hrs"
-          )}
-          ${this._renderSettingRow(
-            "Prediction alert horizon",
-            "Alert when a device is predicted to die within this many days.",
-            "prediction_horizon",
-            opts.prediction_horizon ?? 7,
-            1,
-            90,
-            "days"
           )}
         </div>
         <div class="card-actions">

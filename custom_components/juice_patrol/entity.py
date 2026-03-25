@@ -14,7 +14,7 @@ JUICE_PATROL_DEVICE_INFO = DeviceInfo(
     identifiers={(DOMAIN, "juice_patrol")},
     name="Juice Patrol",
     manufacturer="HNL",
-    model="Predictive Battery Monitor",
+    model="Battery Monitor",
 )
 
 

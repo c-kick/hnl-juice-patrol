@@ -17,7 +17,6 @@ from ..const import (
     STORE_MINOR_VERSION,
     STORE_VERSION,
 )
-from ..engine.models import MAX_CYCLES_PER_DEVICE
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,15 +34,6 @@ class DeviceData:
     replacement_confirmed: bool = True  # False when jump detected but not confirmed
     source_entity: str = ""
     device_id: str | None = None
-    completed_cycles: list[dict] = field(default_factory=list)
-    # Each cycle: {"start_t": float, "end_t": float, "start_pct": float,
-    #              "end_pct": float, "duration_days": float,
-    #              "model": str, "params": dict}
-    # Chemistry override — when set, takes precedence over auto-detected
-    # chemistry from battery_type.  Optional field with None default; no
-    # store migration required (existing records simply won't have the key
-    # and from_dict handles missing keys gracefully via .get()).
-    chemistry_override: str | None = None
 
     @property
     def last_replaced(self) -> float | None:
@@ -69,8 +59,6 @@ class DeviceData:
             replacement_confirmed=data.get("replacement_confirmed", True),
             source_entity=data.get("source_entity", entity_id),
             device_id=data.get("device_id"),
-            completed_cycles=data.get("completed_cycles", []),
-            chemistry_override=data.get("chemistry_override"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -89,10 +77,6 @@ class DeviceData:
             result["battery_type"] = self.battery_type
         if self.is_rechargeable is not None:
             result["is_rechargeable"] = self.is_rechargeable
-        if self.completed_cycles:
-            result["completed_cycles"] = self.completed_cycles
-        if self.chemistry_override is not None:
-            result["chemistry_override"] = self.chemistry_override
         return result
 
 
@@ -102,7 +86,6 @@ class StoreData:
 
     version: int = STORE_MINOR_VERSION
     devices: dict[str, DeviceData] = field(default_factory=dict)
-    bootstrap_complete: bool = False
 
 
 class JuicePatrolStore:
@@ -123,29 +106,16 @@ class JuicePatrolStore:
         """Return the device data dict."""
         return self._data.devices
 
-    @property
-    def bootstrap_complete(self) -> bool:
-        """Return whether the cycle bootstrap has run."""
-        return self._data.bootstrap_complete
-
-    @bootstrap_complete.setter
-    def bootstrap_complete(self, value: bool) -> None:
-        """Set the bootstrap complete flag."""
-        self._data.bootstrap_complete = value
-        self._dirty = True
-
     async def async_load(self) -> None:
         """Load data from disk."""
         raw = await self._store.async_load()
         if raw is None:
-            # Try loading from old store key (v1 migration)
             old_store = Store[dict[str, Any]](
                 self._hass, 1, self._OLD_STORE_KEY
             )
             raw = await old_store.async_load()
             if raw is not None:
                 _LOGGER.info("Found old store at %s, migrating", self._OLD_STORE_KEY)
-                # Remove old store after migration
                 await old_store.async_remove()
             else:
                 _LOGGER.info("No existing store found, starting fresh")
@@ -162,19 +132,16 @@ class JuicePatrolStore:
                     STORE_MINOR_VERSION,
                 )
                 for dev_data in raw.get("devices", {}).values():
-                    # v1 → v2: strip readings
                     if old_version < 2:
                         dev_data.pop("readings", None)
-                    # v2 → v3: convert last_replaced to replacement_history
                     if old_version < 3:
                         lr = dev_data.pop("last_replaced", None)
                         if lr is not None:
                             dev_data["replacement_history"] = [lr]
                         else:
                             dev_data.setdefault("replacement_history", [])
-                    # v3 → v4: add completed_cycles
                     if old_version < 4:
-                        dev_data.setdefault("completed_cycles", [])
+                        dev_data.pop("completed_cycles", None)
                 self._dirty = True
 
             self._data = StoreData(
@@ -183,7 +150,6 @@ class JuicePatrolStore:
                     entity_id: DeviceData.from_dict(dev_data, entity_id)
                     for entity_id, dev_data in raw.get("devices", {}).items()
                 },
-                bootstrap_complete=raw.get("bootstrap_complete", False),
             )
             _LOGGER.info(
                 "Loaded store with %d devices", len(self._data.devices)
@@ -193,11 +159,7 @@ class JuicePatrolStore:
             self._data = StoreData()
 
     async def async_save(self) -> None:
-        """Save data to disk if dirty.
-
-        Only clears the dirty flag after a successful save so data
-        is re-persisted on the next attempt if the write fails.
-        """
+        """Save data to disk if dirty."""
         if not self._dirty:
             return
 
@@ -207,7 +169,6 @@ class JuicePatrolStore:
                 entity_id: dev.to_dict()
                 for entity_id, dev in self._data.devices.items()
             },
-            "bootstrap_complete": self._data.bootstrap_complete,
         }
         try:
             await self._store.async_save(data)
@@ -218,7 +179,6 @@ class JuicePatrolStore:
                 "Failed to save store, will retry on next save cycle",
                 exc_info=True,
             )
-            # Do NOT clear _dirty — data will be retried on next save
 
     def ensure_device(
         self,
@@ -247,19 +207,14 @@ class JuicePatrolStore:
     def _dedup_and_cap_timestamps(
         timestamps: list[float], max_count: int, tolerance: float = 60.0
     ) -> list[float]:
-        """Deduplicate timestamps within tolerance and cap the list length.
-
-        Keeps the most recent entries when exceeding max_count.
-        """
+        """Deduplicate timestamps within tolerance and cap the list length."""
         if not timestamps:
             return timestamps
         timestamps.sort()
-        # Deduplicate: remove entries within tolerance of each other
         deduped = [timestamps[0]]
         for ts in timestamps[1:]:
             if abs(ts - deduped[-1]) > tolerance:
                 deduped.append(ts)
-        # Cap: keep most recent entries
         if len(deduped) > max_count:
             deduped = deduped[-max_count:]
         return deduped
@@ -271,7 +226,6 @@ class JuicePatrolStore:
             return False
 
         now = time.time()
-        # Deduplicate: don't add if there's already a timestamp within 60s
         if dev.replacement_history and abs(dev.replacement_history[-1] - now) < 60:
             dev.replacement_confirmed = True
             self._dirty = True
@@ -287,12 +241,11 @@ class JuicePatrolStore:
         return True
 
     def mark_replaced_at(self, entity_id: str, timestamp: float) -> bool:
-        """Mark a battery as replaced at a specific timestamp (inserts chronologically)."""
+        """Mark a battery as replaced at a specific timestamp."""
         dev = self._data.devices.get(entity_id)
         if dev is None:
             return False
 
-        # Deduplicate: don't add if there's already a timestamp within 60s
         if any(abs(ts - timestamp) < 60 for ts in dev.replacement_history):
             dev.replacement_confirmed = True
             self._dirty = True
@@ -407,17 +360,6 @@ class JuicePatrolStore:
         self._dirty = True
         return True
 
-    def set_chemistry_override(
-        self, entity_id: str, chemistry: str | None
-    ) -> bool:
-        """Set chemistry override. None = use auto-detected. Returns False if not found."""
-        dev = self._data.devices.get(entity_id)
-        if dev is None:
-            return False
-        dev.chemistry_override = chemistry
-        self._dirty = True
-        return True
-
     def set_replacement_confirmed(
         self, entity_id: str, confirmed: bool
     ) -> bool:
@@ -426,34 +368,6 @@ class JuicePatrolStore:
         if dev is None:
             return False
         dev.replacement_confirmed = confirmed
-        self._dirty = True
-        return True
-
-    def add_completed_cycle(
-        self, entity_id: str, cycle: dict,
-    ) -> bool:
-        """Append a completed cycle to a device's history.
-
-        Deduplicates by end_t (within 60s tolerance). Caps at
-        MAX_CYCLES_PER_DEVICE, evicting oldest.
-
-        Returns True if added, False if device not found or duplicate.
-        """
-        dev = self._data.devices.get(entity_id)
-        if dev is None:
-            return False
-
-        end_t = cycle.get("end_t")
-        if end_t is not None:
-            # Deduplicate: don't add if there's already a cycle ending near this time
-            for existing in dev.completed_cycles:
-                if abs(existing.get("end_t", 0) - end_t) < 60:
-                    return False
-
-        dev.completed_cycles.append(cycle)
-        # Cap at max, evict oldest
-        if len(dev.completed_cycles) > MAX_CYCLES_PER_DEVICE:
-            dev.completed_cycles = dev.completed_cycles[-MAX_CYCLES_PER_DEVICE:]
         self._dirty = True
         return True
 

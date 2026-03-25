@@ -1,4 +1,4 @@
-"""Juice Patrol — Predictive Battery Monitoring for Home Assistant."""
+"""Juice Patrol — Battery Monitoring for Home Assistant."""
 
 from __future__ import annotations
 
@@ -16,10 +16,8 @@ from homeassistant.helpers.typing import ConfigType
 
 from .const import (
     CONF_LOW_THRESHOLD,
-    CONF_PREDICTION_HORIZON,
     CONF_STALE_TIMEOUT,
     DEFAULT_LOW_THRESHOLD,
-    DEFAULT_PREDICTION_HORIZON,
     DEFAULT_STALE_TIMEOUT,
     DOMAIN,
     PLATFORMS,
@@ -102,7 +100,6 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ws_update_settings,
         ws_set_battery_type,
         ws_set_rechargeable,
-        ws_set_chemistry_override,
         ws_confirm_replacement,
         ws_mark_replaced,
         ws_undo_replacement,
@@ -110,10 +107,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ws_restore_denied_replacement,
         ws_detect_battery_type,
         ws_refresh,
-        ws_recalculate,
         ws_get_shopping_list,
         ws_get_dashboard_data,
-        ws_get_entity_chart,
         ws_set_ignored,
         ws_get_ignored,
     ):
@@ -148,13 +143,7 @@ async def async_setup_entry(
 async def _async_options_updated(
     hass: HomeAssistant, entry: JuicePatrolConfigEntry
 ) -> None:
-    """Handle options update — schedule non-blocking refresh.
-
-    Fire-and-forget: avoids blocking reconfigure flows that update
-    options and then immediately reload the entry.  Without this,
-    reconfigure triggers TWO sequential full data rebuilds (one from
-    this listener, one from the reload), which can overwhelm HA.
-    """
+    """Handle options update — schedule non-blocking refresh."""
     hass.async_create_task(entry.runtime_data.async_request_refresh())
 
 
@@ -242,9 +231,6 @@ async def ws_get_settings(hass, connection, msg):
         "entry_id": entry.entry_id,
         CONF_LOW_THRESHOLD: entry.options.get(CONF_LOW_THRESHOLD, DEFAULT_LOW_THRESHOLD),
         CONF_STALE_TIMEOUT: entry.options.get(CONF_STALE_TIMEOUT, DEFAULT_STALE_TIMEOUT),
-        CONF_PREDICTION_HORIZON: entry.options.get(
-            CONF_PREDICTION_HORIZON, DEFAULT_PREDICTION_HORIZON
-        ),
     })
 
 
@@ -253,7 +239,6 @@ async def ws_get_settings(hass, connection, msg):
         vol.Required("type"): "juice_patrol/update_settings",
         vol.Optional(CONF_LOW_THRESHOLD): vol.All(int, vol.Range(min=1, max=99)),
         vol.Optional(CONF_STALE_TIMEOUT): vol.All(int, vol.Range(min=1, max=720)),
-        vol.Optional(CONF_PREDICTION_HORIZON): vol.All(int, vol.Range(min=1, max=90)),
     }
 )
 @websocket_api.async_response
@@ -265,7 +250,7 @@ async def ws_update_settings(hass, connection, msg):
     entry = coordinator.config_entry
 
     new_options = dict(entry.options)
-    for key in (CONF_LOW_THRESHOLD, CONF_STALE_TIMEOUT, CONF_PREDICTION_HORIZON):
+    for key in (CONF_LOW_THRESHOLD, CONF_STALE_TIMEOUT):
         if key in msg:
             new_options[key] = msg[key]
 
@@ -312,28 +297,6 @@ async def ws_set_rechargeable(hass, connection, msg):
     entity_id = msg["entity_id"]
     value = msg.get("is_rechargeable")
     if coordinator.store.set_rechargeable(entity_id, value):
-        await coordinator.async_request_refresh()
-        connection.send_result(msg["id"], {"ok": True})
-    else:
-        connection.send_error(msg["id"], "not_found", f"Entity {entity_id} not in store")
-
-
-@websocket_api.websocket_command(
-    {
-        vol.Required("type"): "juice_patrol/set_chemistry_override",
-        vol.Required("entity_id"): cv.entity_id,
-        vol.Optional("chemistry"): vol.Any(str, None),
-    }
-)
-@websocket_api.async_response
-async def ws_set_chemistry_override(hass, connection, msg):
-    """Set chemistry override for a device. None = use auto-detected."""
-    coordinator = _ws_get_coordinator(hass, connection, msg["id"])
-    if not coordinator:
-        return
-    entity_id = msg["entity_id"]
-    value = msg.get("chemistry")
-    if coordinator.store.set_chemistry_override(entity_id, value):
         await coordinator.async_request_refresh()
         connection.send_result(msg["id"], {"ok": True})
     else:
@@ -399,7 +362,7 @@ async def ws_mark_replaced(hass, connection, msg):
 )
 @websocket_api.async_response
 async def ws_undo_replacement(hass, connection, msg):
-    """Undo a battery replacement. If timestamp given, remove that specific one; otherwise pop most recent."""
+    """Undo a battery replacement."""
     coordinator = _ws_get_coordinator(hass, connection, msg["id"])
     if not coordinator:
         return
@@ -500,27 +463,6 @@ async def ws_refresh(hass, connection, msg):
 
 
 @websocket_api.websocket_command(
-    {
-        vol.Required("type"): "juice_patrol/recalculate",
-        vol.Required("entity_id"): cv.entity_id,
-    }
-)
-@websocket_api.async_response
-async def ws_recalculate(hass, connection, msg):
-    """Recalculate predictions for a single device (invalidates its cache)."""
-    coordinator = _ws_get_coordinator(hass, connection, msg["id"])
-    if not coordinator:
-        return
-    entity_id = msg["entity_id"]
-    if not await coordinator.async_recalculate_entity(entity_id):
-        connection.send_error(
-            msg["id"], "not_found", f"Entity {entity_id} not discovered"
-        )
-        return
-    connection.send_result(msg["id"], {"ok": True})
-
-
-@websocket_api.websocket_command(
     {vol.Required("type"): "juice_patrol/get_shopping_list"}
 )
 @websocket_api.async_response
@@ -531,16 +473,15 @@ async def ws_get_shopping_list(hass, connection, msg):
         return
 
     data = coordinator.data or {}
-    horizon = coordinator.prediction_horizon_days
 
     def _parse_battery_type(raw: str) -> tuple[str, int]:
-        """Parse '2× AAA' into ('AAA', 2), 'CR2032' into ('CR2032', 1)."""
+        """Parse '2x AAA' into ('AAA', 2), 'CR2032' into ('CR2032', 1)."""
         m = re.match(r"^(\d+)\s*[×x]\s*(.+)$", raw, re.IGNORECASE)
         if m:
             return m.group(2).strip(), int(m.group(1))
         return raw.strip(), 1
 
-    # Group by base battery type (exclude rechargeable devices — they don't need replacement)
+    # Group by base battery type (exclude rechargeable devices)
     groups_map: dict[str, list[dict]] = {}
     for entity_id, info in data.items():
         if info.get("is_rechargeable"):
@@ -551,11 +492,6 @@ async def ws_get_shopping_list(hass, connection, msg):
             "entity_id": entity_id,
             "device_name": info.get("device_name") or entity_id,
             "level": info.get("level"),
-            "days_remaining": (
-                info["prediction"].estimated_days_remaining
-                if info.get("prediction")
-                else None
-            ),
             "is_low": info.get("is_low", False),
             "battery_count": battery_count,
         }
@@ -564,14 +500,10 @@ async def ws_get_shopping_list(hass, connection, msg):
     groups = []
     total_needed = 0
     for battery_type, devices in sorted(groups_map.items(), key=lambda x: (x[0] == "Unknown", x[0])):
-        # Total batteries in this group (sum of per-device counts)
         total_batteries = sum(d["battery_count"] for d in devices)
         needs_replacement = sum(
             d["battery_count"] for d in devices
-            if d["is_low"] or (
-                d["days_remaining"] is not None
-                and d["days_remaining"] <= horizon
-            )
+            if d["is_low"]
         )
         total_needed += needs_replacement
         groups.append({
@@ -579,7 +511,7 @@ async def ws_get_shopping_list(hass, connection, msg):
             "device_count": len(devices),
             "battery_count": total_batteries,
             "needs_replacement": needs_replacement,
-            "devices": sorted(devices, key=lambda d: d.get("days_remaining") or 9999),
+            "devices": sorted(devices, key=lambda d: d.get("level") or 999),
         })
 
     connection.send_result(msg["id"], {
@@ -602,40 +534,15 @@ async def ws_get_dashboard_data(hass, connection, msg):
     replacement_data = {}
     for entity_id, info in data.items():
         history = info.get("replacement_history", [])
-        # first_seen: earliest replacement timestamp, or last_reading_time as fallback
         first_seen = None
         if history:
             first_seen = min(history)
-        if first_seen is None and info.get("last_reading_time"):
-            first_seen = info["last_reading_time"]
         replacement_data[entity_id] = {
             "replacement_history": history,
             "first_seen": first_seen,
         }
 
     connection.send_result(msg["id"], {"replacement_data": replacement_data})
-
-
-@websocket_api.websocket_command(
-    {
-        vol.Required("type"): "juice_patrol/get_entity_chart",
-        vol.Required("entity_id"): cv.entity_id,
-    }
-)
-@websocket_api.async_response
-async def ws_get_entity_chart(hass, connection, msg):
-    """Return chart data (readings + prediction) for a single entity."""
-    coordinator = _ws_get_coordinator(hass, connection, msg["id"])
-    if not coordinator:
-        return
-    entity_id = msg["entity_id"]
-    chart_data = await coordinator.async_get_entity_chart_data(entity_id)
-    if chart_data is None:
-        connection.send_error(
-            msg["id"], "not_found", f"Entity {entity_id} not discovered"
-        )
-        return
-    connection.send_result(msg["id"], chart_data)
 
 
 @websocket_api.websocket_command(
@@ -700,10 +607,8 @@ async def async_remove_config_entry_device(
         if identifier[0] != DOMAIN:
             continue
         device_id_or_entity = identifier[1]
-        # The virtual summary device should not be removable
         if device_id_or_entity == "juice_patrol":
             return False
-        # Check if any discovered entity still uses this identifier
         for battery in coordinator.discovered.values():
             if (battery.device_id or battery.entity_id) == device_id_or_entity:
                 return False

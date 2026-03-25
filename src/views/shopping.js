@@ -72,7 +72,6 @@ function renderShoppingGroup(panel, group) {
   const icon = isUnknown ? "mdi:help-circle-outline" : "mdi:battery";
   const isExpanded = !!panel._expandedGroups[group.battery_type];
   const countText = `${group.battery_count} batter${group.battery_count !== 1 ? "ies" : "y"} in ${group.device_count} device${group.device_count !== 1 ? "s" : ""}${group.needs_replacement > 0 ? ` \u2014 ${group.needs_replacement} need${group.needs_replacement !== 1 ? "" : "s"} replacement` : ""}`;
-  const horizon = panel._settingsValues?.prediction_horizon ?? 7;
 
   return html`
     <ha-expansion-panel
@@ -96,9 +95,7 @@ function renderShoppingGroup(panel, group) {
       <div class="shopping-devices-inner">
         ${group.devices.map((d) => {
           const levelColor = getLevelColor(d.level, null);
-          const needsIt =
-            d.is_low ||
-            (d.days_remaining !== null && d.days_remaining <= horizon);
+          const needsIt = d.is_low;
           const countLabel = d.battery_count > 1 ? ` (${d.battery_count}\u00d7)` : "";
           return html`
             <div class="shopping-device ${needsIt ? "needs-replacement" : ""}">
@@ -107,9 +104,6 @@ function renderShoppingGroup(panel, group) {
               >
               <span class="shopping-device-level" style="color:${levelColor}">
                 ${formatLevel(d.level)}
-              </span>
-              <span class="shopping-device-days">
-                ${d.days_remaining !== null ? d.days_remaining + "d" : "\u2014"}
               </span>
             </div>
           `;

@@ -22,11 +22,9 @@ from homeassistant.helpers.selector import (
 from .const import (
     CONF_HISTORY_DAYS,
     CONF_LOW_THRESHOLD,
-    CONF_PREDICTION_HORIZON,
     CONF_STALE_TIMEOUT,
     DEFAULT_HISTORY_DAYS,
     DEFAULT_LOW_THRESHOLD,
-    DEFAULT_PREDICTION_HORIZON,
     DEFAULT_STALE_TIMEOUT,
     DOMAIN,
 )
@@ -49,17 +47,6 @@ def _stale_timeout_selector() -> NumberSelector:
         NumberSelectorConfig(
             min=1, max=720, step=1,
             unit_of_measurement="hours",
-            mode=NumberSelectorMode.BOX,
-        )
-    )
-
-
-def _prediction_horizon_selector() -> NumberSelector:
-    """Prediction alert horizon selector."""
-    return NumberSelector(
-        NumberSelectorConfig(
-            min=1, max=90, step=1,
-            unit_of_measurement="days",
             mode=NumberSelectorMode.BOX,
         )
     )
@@ -89,12 +76,6 @@ def _options_schema(options: dict) -> vol.Schema:
                 default=options.get(CONF_STALE_TIMEOUT, DEFAULT_STALE_TIMEOUT),
             ): _stale_timeout_selector(),
             vol.Required(
-                CONF_PREDICTION_HORIZON,
-                default=options.get(
-                    CONF_PREDICTION_HORIZON, DEFAULT_PREDICTION_HORIZON
-                ),
-            ): _prediction_horizon_selector(),
-            vol.Required(
                 CONF_HISTORY_DAYS,
                 default=options.get(
                     CONF_HISTORY_DAYS, DEFAULT_HISTORY_DAYS
@@ -113,7 +94,6 @@ class JuicePatrolConfigFlow(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle the initial step."""
-        # Only allow a single instance
         await self.async_set_unique_id(DOMAIN)
         self._abort_if_unique_id_configured()
 
@@ -155,9 +135,6 @@ class JuicePatrolConfigFlow(ConfigFlow, domain=DOMAIN):
                 options={
                     CONF_LOW_THRESHOLD: int(user_input[CONF_LOW_THRESHOLD]),
                     CONF_STALE_TIMEOUT: int(user_input[CONF_STALE_TIMEOUT]),
-                    CONF_PREDICTION_HORIZON: int(
-                        user_input[CONF_PREDICTION_HORIZON]
-                    ),
                     CONF_HISTORY_DAYS: int(user_input[CONF_HISTORY_DAYS]),
                 },
             )
@@ -187,7 +164,6 @@ class JuicePatrolOptionsFlow(OptionsFlow):
             return self.async_create_entry(data={
                 CONF_LOW_THRESHOLD: int(user_input[CONF_LOW_THRESHOLD]),
                 CONF_STALE_TIMEOUT: int(user_input[CONF_STALE_TIMEOUT]),
-                CONF_PREDICTION_HORIZON: int(user_input[CONF_PREDICTION_HORIZON]),
                 CONF_HISTORY_DAYS: int(user_input[CONF_HISTORY_DAYS]),
             })
 

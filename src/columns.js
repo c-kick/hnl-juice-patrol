@@ -1,14 +1,11 @@
 import { html, nothing } from "lit";
 import { STYLE_SECONDARY, STYLE_SUB_TEXT, STYLE_BADGE_ROW } from "./constants.js";
 import {
-  getBatteryIcon, getLevelColor, formatLevel, formatRate,
-  formatTimeRemaining, formatDate, isFastDischarge, isActivelyCharging,
-  predictionReason, predictionReasonDetail, erraticTooltip, displayLevel,
-  renderBadgeLabel, renderReliabilityBadge, getDeviceSubText,
+  getBatteryIcon, getLevelColor, formatLevel, isActivelyCharging,
+  displayLevel, renderBadgeLabel, getDeviceSubText,
 } from "./helpers.js";
 import {
-  BADGE_REPLACED, BADGE_LOW, BADGE_STALE, BADGE_CLIFF, BADGE_RAPID,
-  BADGE_ERRATIC, BADGE_NO_PREDICTION, BADGE_CHARGING, BADGE_AVG_LEVEL,
+  BADGE_REPLACED, BADGE_LOW, BADGE_STALE, BADGE_CHARGING, BADGE_AVG_LEVEL,
 } from "./colors.js";
 
 /**
@@ -83,39 +80,6 @@ export function buildColumns(panel) {
         title=${dev.batteryTypeSource ? `Source: ${dev.batteryTypeSource}` : ""}
       >${dev.batteryType || "\u2014"}</span>`,
     },
-    dischargeRate: {
-      title: "Rate",
-      sortable: true,
-      type: "numeric",
-      minWidth: "70px",
-      maxWidth: "120px",
-      template: (dev) => html`<span style=${STYLE_SECONDARY}>${formatRate(dev)}</span>`,
-    },
-    daysRemaining: {
-      title: "Left",
-      sortable: true,
-      type: "numeric",
-      minWidth: "55px",
-      maxWidth: "80px",
-      template: (dev) => html`<span style=${STYLE_SECONDARY}>${formatTimeRemaining(dev)}</span>`,
-    },
-    reliability: {
-      title: "Reliability",
-      sortable: true,
-      type: "numeric",
-      minWidth: "45px",
-      maxWidth: "85px",
-      template: (dev) => renderReliabilityBadge(dev),
-    },
-    predictedEmpty: {
-      title: "Empty by",
-      sortable: true,
-      minWidth: "80px",
-      maxWidth: "140px",
-      template: (dev) => html`<span style=${STYLE_SECONDARY}>${dev.predictedEmpty
-        ? formatDate(dev.predictedEmpty, isFastDischarge(dev))
-        : "\u2014"}</span>`,
-    },
     actions: {
       title: "",
       type: "overflow-menu",
@@ -179,38 +143,6 @@ export function getBadgeLabels(dev, panel) {
       description: "No battery reading received within the stale timeout period",
     });
   }
-  if (dev.anomaly === "cliff") {
-    labels.push({
-      label_id: "cliff",
-      name: "CLIFF DROP",
-      color: BADGE_CLIFF,
-      description: `Sudden drop of ${dev.dropSize ?? "?"}% in a single reading interval`,
-    });
-  } else if (dev.anomaly === "rapid") {
-    labels.push({
-      label_id: "rapid",
-      name: "RAPID",
-      color: BADGE_RAPID,
-      description: `Discharge rate significantly higher than average \u2014 ${dev.dropSize ?? "?"}% drop`,
-    });
-  }
-  if (dev.stability === "erratic") {
-    labels.push({
-      label_id: "erratic",
-      name: "ERRATIC",
-      color: BADGE_ERRATIC,
-      description: erraticTooltip(dev),
-    });
-  }
-  const skipReasons = dev.isRechargeable ? new Set(["flat", "charging", "idle"]) : new Set();
-  if (!dev.predictedEmpty && predictionReason(dev) && !skipReasons.has(dev.predictionStatus)) {
-    labels.push({
-      label_id: "no-pred",
-      name: predictionReason(dev),
-      color: BADGE_NO_PREDICTION,
-      description: predictionReasonDetail(dev.predictionStatus) || "",
-    });
-  }
   if (dev.isRechargeable && isActivelyCharging(dev)) {
     labels.push({
       label_id: "charging",
@@ -219,23 +151,6 @@ export function getBadgeLabels(dev, panel) {
       color: BADGE_CHARGING,
       description: "Currently charging",
     });
-  }
-  if (
-    dev.meanLevel !== null &&
-    dev.stability &&
-    dev.stability !== "stable" &&
-    dev.stability !== "insufficient_data"
-  ) {
-    const dMean = displayLevel(dev.meanLevel);
-    const dLevel = displayLevel(dev.level);
-    if (dMean !== null && Math.abs(dMean - (dLevel ?? 0)) > 2) {
-      labels.push({
-        label_id: "avg",
-        name: `avg ${dMean}%`,
-        color: BADGE_AVG_LEVEL,
-        description: `7-day average is ${dMean}% while current reading is ${dLevel ?? "?"}%`,
-      });
-    }
   }
   return labels;
 }
@@ -258,10 +173,6 @@ export function renderDropdownItems(dev) {
     <ha-dropdown-item value="replace">
       <ha-icon slot="icon" icon="mdi:battery-sync"></ha-icon>
       Mark as replaced
-    </ha-dropdown-item>
-    <ha-dropdown-item value="recalculate">
-      <ha-icon slot="icon" icon="mdi:calculator-variant"></ha-icon>
-      Recalculate
     </ha-dropdown-item>
     <ha-dropdown-item value="type">
       <ha-icon slot="icon" icon="mdi:battery-heart-variant"></ha-icon>

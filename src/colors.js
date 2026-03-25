@@ -6,10 +6,6 @@
  */
 
 // ── HA theme CSS vars with fallbacks ──
-// Used by resolveColor() for ECharts canvas (which can't read CSS vars)
-// and by inline style="" strings in templates.
-// Chart opacity: used by dashboard bar charts. For rechargeable, opacityRange
-// defines [min, max] for the per-bucket gradient in health-by-type charts.
 
 export const COLOR_PRIMARY = { var: "--primary-color", fallback: "#03a9f4" };
 export const COLOR_RECHARGEABLE = { var: "--info-color", fallback: "#039be5", opacity: 0.80, opacityRange: [0.25, 0.80] };
@@ -24,7 +20,6 @@ export const COLOR_CARD_BG_DARK = { var: "--card-background-color", fallback: "#
 export const COLOR_DIVIDER = { var: "--divider-color", fallback: "rgba(0,0,0,0.12)" };
 
 // ── Semantic colors (inline CSS var expressions) ──
-// For use directly in template style="" strings.
 
 export const CSS_PRIMARY = `var(${COLOR_PRIMARY.var}, ${COLOR_PRIMARY.fallback})`;
 export const CSS_RECHARGEABLE = `var(${COLOR_RECHARGEABLE.var}, ${COLOR_RECHARGEABLE.fallback})`;
@@ -36,19 +31,9 @@ export const CSS_SECONDARY_TEXT = `var(${COLOR_SECONDARY_TEXT.var}, ${COLOR_SECO
 export const CSS_PRIMARY_TEXT = `var(${COLOR_PRIMARY_TEXT.var}, ${COLOR_PRIMARY_TEXT.fallback})`;
 
 // ── Badge / label colors (hardcoded — not theme-dependent) ──
-// Used inside ha-data-table shadow DOM where CSS vars from our component
-// don't apply, and for ECharts where canvas can't resolve CSS vars.
 
 export const BADGE_REPLACED = "#FF9800";
 export const BADGE_LOW = "#F44336";
 export const BADGE_STALE = "#FF9800";
-export const BADGE_CLIFF = "#F44336";
-export const BADGE_RAPID = "#F44336";
-export const BADGE_ERRATIC = "#9C27B0";
-export const BADGE_NO_PREDICTION = "#9E9E9E";
 export const BADGE_CHARGING = "#4CAF50";
 export const BADGE_AVG_LEVEL = "#2196F3";
-
-// ── Chart-specific colors ──
-
-export const CHART_SUSPECTED_REPLACEMENT = "#ab47bc";
