@@ -663,13 +663,16 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_get_readings_incremental(
         self, entity_id: str, dev: Any,
-    ) -> list[dict[str, float]]:
+    ) -> list[dict[str, float]] | None:
         """Fetch readings incrementally when primary cache is warm.
 
         Fetches only readings newer than dev.current_cycle_last_raw_t from
         the recorder, then merges with the cached raw tail to reconstruct
-        full history for the current cycle. Falls back to full fetch on
-        any error.
+        the current cycle's readings. Returns None on failure so the caller
+        can fall back to a full fetch.
+
+        Does NOT write to HistoryCache — the merged result is partial data
+        (current cycle tail only), not full history.
         """
         from datetime import datetime, timezone
 
@@ -682,11 +685,8 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
         if not new_readings:
-            # No new readings — use the HistoryCache or full fetch
-            return await async_get_readings(
-                self.hass, entity_id, since=None, cache=self._history_cache,
-                history_days=self.history_days,
-            )
+            # No new readings since last cache — signal caller to full-fetch
+            return None
 
         # Merge: cached raw tail + deduped new readings
         # The raw tail covers the smoothing window; new readings extend it
@@ -698,21 +698,37 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 merged.append(r)
         merged.sort(key=lambda r: r["t"])
 
-        # Also update the HistoryCache so other code paths benefit
-        if merged:
-            self._history_cache.set(entity_id, merged)
-
-        return merged
+        return merged if merged else None
 
     async def _async_build_entity_data(
         self, entity_id: str, battery: DiscoveredBattery
     ) -> dict[str, Any]:
         """Build the data dict for a single entity (async — queries recorder)."""
         dev = self.store.get_device(entity_id)
-        all_readings = await async_get_readings(
-            self.hass, entity_id, since=None, cache=self._history_cache,
-            history_days=self.history_days,
-        )
+
+        # Incremental fetch: when primary cache is warm, fetch only new
+        # readings and merge with the cached raw tail.  This avoids a full
+        # recorder query on every update cycle.  Falls back to full fetch
+        # when incremental returns None (no new data or error).
+        # Chemistry isn't resolved yet, so skip the chemistry match — it
+        # will be validated later by _primary_cache_is_warm in the prediction
+        # path.  Here we only check that the cache has data at all.
+        all_readings: list[dict[str, float]] | None = None
+        if (
+            dev is not None
+            and dev.is_rechargeable is not True
+            and dev.primary_cache_version == PRIMARY_CACHE_VERSION
+            and dev.current_cycle_last_raw_t is not None
+        ):
+            all_readings = await self._async_get_readings_incremental(
+                entity_id, dev,
+            )
+
+        if all_readings is None:
+            all_readings = await async_get_readings(
+                self.hass, entity_id, since=None, cache=self._history_cache,
+                history_days=self.history_days,
+            )
 
         # Update last known level from readings
         if all_readings:
@@ -824,18 +840,6 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             r_squared=None,
                         )
         else:
-            # Incremental fetch: when primary cache is warm and HistoryCache
-            # has expired, fetch only new readings and merge with cached tail.
-            if (
-                dev is not None
-                and self._primary_cache_is_warm(dev, chemistry)
-                and self._history_cache.get(entity_id) is None
-            ):
-                incremental = await self._async_get_readings_incremental(
-                    entity_id, dev,
-                )
-                if incremental:
-                    all_readings = incremental
             prediction = self._predict_non_rechargeable(
                 readings, all_readings, dev, min_span, class_prior, chemistry,
             )
@@ -1342,6 +1346,8 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             dev.current_cycle_last_raw_t = result.current_cycle_last_raw_t
             changed = True
 
+        if dev.cache_chemistry != chemistry:
+            changed = True
         dev.cache_chemistry = chemistry
         dev.primary_cache_version = PRIMARY_CACHE_VERSION
 
