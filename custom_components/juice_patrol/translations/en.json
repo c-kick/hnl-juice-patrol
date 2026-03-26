@@ -13,8 +13,7 @@
         "description": "Adjust Juice Patrol monitoring settings.",
         "data": {
           "low_threshold": "Low battery threshold (%)",
-          "stale_timeout": "Stale device timeout (hours)",
-          "prediction_horizon": "Prediction alert horizon (days)"
+          "stale_timeout": "Stale device timeout (hours)"
         }
       }
     },
@@ -28,31 +27,15 @@
         "title": "Juice Patrol Settings",
         "data": {
           "low_threshold": "Low battery threshold (%)",
-          "stale_timeout": "Stale device timeout (hours)",
-          "prediction_horizon": "Prediction alert horizon (days)"
+          "stale_timeout": "Stale device timeout (hours)"
         }
       }
     }
   },
   "entity": {
     "sensor": {
-      "discharge_rate": {
-        "name": "Discharge rate"
-      },
-      "predicted_empty": {
-        "name": "Predicted empty"
-      },
-      "days_remaining": {
-        "name": "Days remaining"
-      },
-      "soh": {
-        "name": "State of health"
-      },
-      "soh_cycling": {
-        "name": "Cycle health"
-      },
-      "knee_risk": {
-        "name": "Knee risk"
+      "battery_level": {
+        "name": "Battery level"
       },
       "lowest_battery": {
         "name": "Lowest battery"

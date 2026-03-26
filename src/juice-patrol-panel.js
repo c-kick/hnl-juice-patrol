@@ -281,11 +281,12 @@ class JuicePatrolPanel extends LitElement {
       if (!sourceEntity) continue;
       if (entityId.includes("lowest_battery") || entityId.includes("attention_needed")) continue;
 
-      const hasSuffix =
-        entityId.includes("_battery_level") ||
-        entityId.includes("_battery_low") ||
-        entityId.includes("_stale");
-      if (!hasSuffix) continue;
+      const domain = entityId.split(".")[0];
+      const deviceClass = attrs.device_class;
+      const isBatteryLevel = domain === "sensor" && deviceClass === "battery";
+      const isBatteryLow = domain === "binary_sensor" && deviceClass === "battery";
+      const isStale = domain === "binary_sensor" && deviceClass === "problem";
+      if (!isBatteryLevel && !isBatteryLow && !isStale) continue;
 
       if (!devices.has(sourceEntity)) {
         devices.set(sourceEntity, {
@@ -312,7 +313,7 @@ class JuicePatrolPanel extends LitElement {
       const dev = devices.get(sourceEntity);
 
       // Extract data from each sensor type
-      if (entityId.includes("_battery_level")) {
+      if (isBatteryLevel) {
         const val = parseFloat(state.state);
         dev.level = isNaN(val) ? null : val;
         dev.batteryType = attrs.battery_type || null;
@@ -326,9 +327,9 @@ class JuicePatrolPanel extends LitElement {
         dev.manufacturer = attrs.manufacturer ?? null;
         dev.model = attrs.model ?? null;
         dev.platform = attrs.platform ?? null;
-      } else if (entityId.includes("_battery_low")) {
+      } else if (isBatteryLow) {
         dev.isLow = state.state === "on";
-      } else if (entityId.includes("_stale")) {
+      } else if (isStale) {
         dev.isStale = state.state === "on";
       }
     }

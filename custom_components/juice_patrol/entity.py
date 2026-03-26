@@ -45,8 +45,6 @@ class JuicePatrolEntity(CoordinatorEntity):
         self._source_entity_id = source_entity_id
         # Use full entity_id in unique_id to prevent cross-domain collisions
         self._attr_unique_id = f"{DOMAIN}_{source_entity_id}_{id_suffix}"
-        # Fallback device info for initial creation
-        self._fallback_device_id: str | None = info.get("device_id")
         self._fallback_device_name: str = info.get("device_name") or slug
 
     @property
@@ -61,9 +59,11 @@ class JuicePatrolEntity(CoordinatorEntity):
         """Return device info, reading live name from coordinator data."""
         data = self._entity_data
         device_name = data.get("device_name") or self._fallback_device_name
-        device_id = data.get("device_id") or self._fallback_device_id
-        identifier = device_id or self._source_entity_id
+        # Always use source_entity_id as the device identifier — it's stable
+        # and available at entity creation time (before deferred build).
+        # Using device_id caused duplicate devices because it registers JP
+        # entities under the same HA device as the source integration.
         return DeviceInfo(
-            identifiers={(DOMAIN, identifier)},
+            identifiers={(DOMAIN, self._source_entity_id)},
             name=device_name,
         )

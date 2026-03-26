@@ -8,102 +8,13 @@ import pytest
 
 from custom_components.juice_patrol.const import (
     CONF_LOW_THRESHOLD,
-    CONF_PREDICTION_HORIZON,
     CONF_STALE_TIMEOUT,
     DEFAULT_LOW_THRESHOLD,
-    DEFAULT_PREDICTION_HORIZON,
     DEFAULT_STALE_TIMEOUT,
 )
 from custom_components.juice_patrol.data.coordinator import (
     JuicePatrolCoordinator,
-    _extract_current_segment,
 )
-
-
-# ── Helpers ──────────────────────────────────────────────────────────────
-
-
-def _readings(levels: list[float], span_hours: float = 48.0) -> list[dict[str, float]]:
-    """Build evenly-spaced readings from a list of levels."""
-    t0 = time.time() - span_hours * 3600
-    count = len(levels)
-    interval = (span_hours * 3600) / max(count - 1, 1) if count > 1 else 0
-    return [{"t": t0 + i * interval, "v": v} for i, v in enumerate(levels)]
-
-
-# ── Pure function: _extract_current_segment ──────────────────────────────
-
-
-class TestExtractCurrentSegment:
-    """Tests for the module-level _extract_current_segment function."""
-
-    def test_fewer_than_5_readings_unchanged(self):
-        """With fewer than 5 readings, return input unchanged (even if there's a jump)."""
-        readings = _readings([100, 50, 90, 80])
-        result = _extract_current_segment(readings)
-        assert result is readings
-
-    def test_empty_list(self):
-        """Empty list returns empty list unchanged."""
-        result = _extract_current_segment([])
-        assert result == []
-
-    def test_no_charge_cycle_unchanged(self):
-        """Monotonic drain with no upward jump returns all readings."""
-        readings = _readings([100, 90, 80, 70, 60, 50])
-        result = _extract_current_segment(readings)
-        assert result is readings
-
-    def test_single_charge_cycle(self):
-        """100->20->100->80->60 should return from last peak (100) onward."""
-        readings = _readings([100, 60, 20, 100, 80, 60])
-        result = _extract_current_segment(readings)
-        # The last jump >= 20 is at index 3 (20 -> 100 = +80)
-        assert len(result) == 3
-        assert result[0]["v"] == 100
-        assert result[-1]["v"] == 60
-
-    def test_multiple_charge_cycles(self):
-        """With multiple charge cycles, only the last one is extracted."""
-        # Cycle 1: 100->30->90, Cycle 2: 90->20->95->70->50
-        readings = _readings([100, 50, 30, 90, 70, 20, 95, 70, 50])
-        result = _extract_current_segment(readings)
-        # Last jump >= 20 is at index 6 (20 -> 95 = +75)
-        assert len(result) == 3
-        assert result[0]["v"] == 95
-        assert result[-1]["v"] == 50
-
-    def test_small_jump_not_peak(self):
-        """A 10% jump is below the 20% threshold and should not be treated as a charge event."""
-        # 100, 70, 60, 70, 60, 50 — the 60->70 jump is only 10
-        readings = _readings([100, 70, 60, 70, 60, 50])
-        result = _extract_current_segment(readings)
-        # No jump >= 20 so all readings returned
-        assert result is readings
-
-    def test_segment_too_short_returns_all(self):
-        """If the segment after the last peak has fewer than 3 readings, return all."""
-        # 100, 60, 30, 90, 80 — peak at index 3 (30->90 = +60), segment is [90, 80] = 2 readings
-        readings = _readings([100, 60, 30, 90, 80])
-        result = _extract_current_segment(readings)
-        assert result is readings
-
-    def test_large_jump_at_boundary_exactly_20(self):
-        """A jump of exactly 20 should be recognized as a charge event."""
-        # 80, 60, 50, 30, 50, 40, 30 — jump at index 4 (30->50 = +20, exactly threshold)
-        readings = _readings([80, 60, 50, 30, 50, 40, 30])
-        result = _extract_current_segment(readings)
-        # Segment from index 4 onward: [50, 40, 30] = 3 readings
-        assert len(result) == 3
-        assert result[0]["v"] == 50
-        assert result[-1]["v"] == 30
-
-    def test_jump_of_19_not_detected(self):
-        """A jump of 19 (just below 20) should NOT be treated as a charge event."""
-        readings = _readings([80, 60, 50, 31, 50, 40, 30])
-        result = _extract_current_segment(readings)
-        # 31->50 = +19, not >= 20
-        assert result is readings
 
 
 # ── Coordinator construction helper ──────────────────────────────────────
@@ -141,9 +52,6 @@ def make_coordinator(mock_hass):
             patch(
                 "custom_components.juice_patrol.data.coordinator.BatteryTypeResolver"
             ) as mock_resolver_cls,
-            patch(
-                "custom_components.juice_patrol.data.coordinator.HistoryCache"
-            ),
         ):
             mock_store = MagicMock()
             mock_store.mark_replaced = MagicMock(return_value=True)
@@ -179,20 +87,10 @@ class TestProperties:
         coord = make_coordinator({})
         assert coord.stale_timeout_hours == DEFAULT_STALE_TIMEOUT
 
-    def test_prediction_horizon_from_options(self, make_coordinator):
-        """prediction_horizon_days reads from config_entry.options."""
-        coord = make_coordinator({CONF_PREDICTION_HORIZON: 14})
-        assert coord.prediction_horizon_days == 14
-
     def test_low_threshold_default(self, make_coordinator):
         """low_threshold returns default when not in options."""
         coord = make_coordinator({})
         assert coord.low_threshold == DEFAULT_LOW_THRESHOLD
-
-    def test_prediction_horizon_default(self, make_coordinator):
-        """prediction_horizon_days returns default when not set."""
-        coord = make_coordinator({})
-        assert coord.prediction_horizon_days == DEFAULT_PREDICTION_HORIZON
 
 
 # ── async_mark_replaced ──────────────────────────────────────────────────
@@ -224,50 +122,6 @@ class TestAsyncMarkReplaced:
         result = await coord.async_mark_replaced("sensor.unknown")
         assert result is False
         coord.async_request_refresh.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_mark_replaced_invalidates_cache(self, make_coordinator):
-        """Mark replaced should invalidate the history cache for that entity."""
-        coord = make_coordinator()
-        coord.store.mark_replaced.return_value = True
-        coord.async_request_refresh = AsyncMock()
-
-        await coord.async_mark_replaced("sensor.battery_1")
-        coord._history_cache.invalidate.assert_called_once_with("sensor.battery_1")
-
-
-# ── async_recalculate_entity ─────────────────────────────────────────────
-
-
-class TestAsyncRecalculateEntity:
-    """Test the async_recalculate_entity method."""
-
-    @pytest.mark.asyncio
-    async def test_recalculate_not_discovered(self, make_coordinator):
-        """Returns False when entity is not in discovered dict."""
-        coord = make_coordinator()
-        coord.discovered = {}
-
-        result = await coord.async_recalculate_entity("sensor.unknown")
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_recalculate_success(self, make_coordinator):
-        """When entity is discovered, invalidates cache and rebuilds."""
-        coord = make_coordinator()
-        battery = MagicMock()
-        battery.entity_id = "sensor.battery_1"
-        coord.discovered = {"sensor.battery_1": battery}
-
-        # Mock the internal rebuild to avoid running the full pipeline
-        coord._async_rebuild_entity = AsyncMock()
-
-        result = await coord.async_recalculate_entity("sensor.battery_1")
-        assert result is True
-        coord._history_cache.invalidate.assert_called_once_with("sensor.battery_1")
-        coord._async_rebuild_entity.assert_awaited_once_with(
-            "sensor.battery_1", battery
-        )
 
 
 # ── detect_battery_type ──────────────────────────────────────────────────
@@ -319,7 +173,6 @@ class TestDedupCleanup:
         }
         coord._fired_low = {"sensor.battery_1", "sensor.battery_2"}
         coord._fired_stale = {"sensor.battery_1"}
-        coord._fired_predicted_low = {"sensor.battery_2"}
 
         # Set up old discovered state (both entities)
         coord.discovered = {
@@ -360,116 +213,11 @@ class TestDedupCleanup:
         assert "sensor.battery_2" not in coord._last_known_levels
         assert "sensor.battery_2" not in coord._fired_low
         assert "sensor.battery_2" not in coord._fired_stale
-        assert "sensor.battery_2" not in coord._fired_predicted_low
 
         # battery_1 should still be in last_known_levels
         assert "sensor.battery_1" in coord._last_known_levels
         # battery_1 stays in fired_low (still discovered, cleanup only removes disappeared)
         assert "sensor.battery_1" in coord._fired_low
-
-
-# ── async_get_entity_chart_data ────────────────────────────────────────
-
-
-class TestAsyncGetEntityChartData:
-    """Test the async_get_entity_chart_data method."""
-
-    @pytest.mark.asyncio
-    async def test_returns_none_for_unknown_entity(self, make_coordinator):
-        """Returns None when entity is not discovered."""
-        coord = make_coordinator()
-        coord.discovered = {}
-        coord._initial_build_done.set()
-        result = await coord.async_get_entity_chart_data("sensor.unknown")
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_returns_chart_data(self, make_coordinator, mock_hass):
-        """Returns chart data dict with readings, prediction, and metadata."""
-        coord = make_coordinator()
-        coord._initial_build_done.set()
-        battery = MagicMock()
-        battery.device_name = "Test Device"
-        battery.current_level = 75.0
-        battery.device_id = "dev_123"
-        coord.discovered = {"sensor.battery_1": battery}
-
-        # Mock store device
-        dev_data = MagicMock()
-        dev_data.last_replaced = None
-        dev_data.custom_threshold = None
-        coord.store.get_device.return_value = dev_data
-
-        # Mock readings
-        readings = _readings([100, 90, 80, 70, 60], span_hours=48.0)
-
-        # Mock prediction in coordinator data
-        mock_prediction = MagicMock()
-        mock_prediction.slope_per_day = -2.5
-        mock_prediction.intercept = 100.0
-        mock_prediction.r_squared = 0.95
-        mock_prediction.confidence = "high"
-        mock_prediction.estimated_empty_timestamp = time.time() + 86400 * 20
-        mock_prediction.estimated_days_remaining = 20.0
-        mock_prediction.status = "normal"
-        mock_prediction.reliability = 85
-        mock_prediction.data_points_used = 5
-
-        coord.data = {
-            "sensor.battery_1": {
-                "prediction": mock_prediction,
-                "is_rechargeable": False,
-                "battery_type": "CR2032",
-                "charging_state": None,
-            }
-        }
-
-        with patch(
-            "custom_components.juice_patrol.data.coordinator.async_get_readings",
-            new_callable=AsyncMock,
-            return_value=readings,
-        ):
-            result = await coord.async_get_entity_chart_data("sensor.battery_1")
-
-        assert result is not None
-        assert result["device_name"] == "Test Device"
-        assert result["level"] == 75.0
-        assert len(result["readings"]) == 5
-        assert len(result["all_readings"]) == 5
-        assert result["prediction"]["slope_per_day"] == -2.5
-        assert result["prediction"]["confidence"] == "high"
-        assert result["prediction"]["r_squared"] == 0.95
-        assert result["prediction"]["reliability"] == 85
-        assert result["is_rechargeable"] is False
-        assert result["battery_type"] == "CR2032"
-        assert result["first_reading_timestamp"] == readings[0]["t"]
-
-    @pytest.mark.asyncio
-    async def test_returns_empty_prediction_when_no_data(
-        self, make_coordinator, mock_hass
-    ):
-        """When coordinator has no data for entity, prediction dict is empty."""
-        coord = make_coordinator()
-        coord._initial_build_done.set()
-        battery = MagicMock()
-        battery.device_name = "Empty Device"
-        battery.current_level = None
-        battery.device_id = None
-        coord.discovered = {"sensor.battery_1": battery}
-        coord.store.get_device.return_value = None
-        coord.data = {}
-
-        with patch(
-            "custom_components.juice_patrol.data.coordinator.async_get_readings",
-            new_callable=AsyncMock,
-            return_value=[],
-        ):
-            result = await coord.async_get_entity_chart_data("sensor.battery_1")
-
-        assert result is not None
-        assert result["readings"] == []
-        assert result["prediction"] == {}
-        assert result["first_reading_timestamp"] is None
 
 
 # ── async_shutdown ─────────────────────────────────────────────────────
@@ -844,15 +592,13 @@ class TestSiblingStateChange:
         coord.hass.async_create_task.assert_called_once()
 
 
-class TestHourlyPollUnaffected:
-    """Verify hourly poll still works for devices without siblings."""
+class TestUpdateData:
+    """Verify _async_update_data runs discovery and build."""
 
     @pytest.mark.asyncio
     async def test_update_data_calls_discover_and_build(self, make_coordinator):
-        """_async_update_data runs discovery and build regardless of siblings."""
+        """_async_update_data runs discovery and build."""
         coord = make_coordinator()
-        coord.store.bootstrap_complete = True
-        coord._first_refresh = False  # Skip deferred first-refresh path
 
         with (
             patch.object(
@@ -868,26 +614,3 @@ class TestHourlyPollUnaffected:
         mock_discover.assert_awaited_once()
         mock_build.assert_awaited_once()
         assert "sensor.battery_1" in result
-
-    @pytest.mark.asyncio
-    async def test_first_refresh_defers_full_build(self, make_coordinator):
-        """First _async_update_data defers recorder queries to background task."""
-        coord = make_coordinator()
-        coord.store.bootstrap_complete = True
-        assert coord._first_refresh is True
-
-        with (
-            patch.object(
-                coord, "_async_discover_and_subscribe", new_callable=AsyncMock
-            ) as mock_discover,
-            patch.object(
-                coord, "_async_build_full_data", new_callable=AsyncMock,
-                return_value={"sensor.battery_1": {"level": 50}},
-            ) as mock_build,
-        ):
-            result = await coord._async_update_data()
-
-        mock_discover.assert_awaited_once()
-        mock_build.assert_not_awaited()
-        assert result == {}
-        assert coord._first_refresh is False

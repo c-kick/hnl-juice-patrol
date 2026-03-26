@@ -8,12 +8,10 @@ VERSION = "0.1.0"
 # Config keys
 CONF_LOW_THRESHOLD = "low_threshold"
 CONF_STALE_TIMEOUT = "stale_timeout"
-CONF_HISTORY_DAYS = "history_days"
 
 # Defaults
 DEFAULT_LOW_THRESHOLD = 20  # percent
 DEFAULT_STALE_TIMEOUT = 48  # hours
-DEFAULT_HISTORY_DAYS = 1095  # 3 years
 DEFAULT_SCAN_INTERVAL = 3600  # seconds (1 hour)
 
 # Replacement detection
@@ -29,14 +27,9 @@ STORE_KEY = f"{DOMAIN}.metadata"
 STORE_VERSION = 2  # Major version for HA Store class (do not bump without migration func)
 STORE_MINOR_VERSION = 4  # Internal data schema version (4: completed_cycles)
 
-# Recorder history
-HISTORY_CACHE_TTL = 1800  # 30 min cache for recorder queries
-HISTORY_DEFAULT_DAYS = DEFAULT_HISTORY_DAYS  # how far back to query recorder
-
 # Memory limits
 MAX_REPLACEMENT_HISTORY = 50  # max replacement timestamps per device
 MAX_DENIED_REPLACEMENTS = 50  # max denied replacement timestamps per device
-MAX_HISTORY_CACHE_ENTRIES = 500  # max entities in the history cache
 
 # Platforms
 PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR]

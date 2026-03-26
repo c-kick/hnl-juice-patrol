@@ -16,10 +16,8 @@ from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from ..const import (
-    CONF_HISTORY_DAYS,
     CONF_LOW_THRESHOLD,
     CONF_STALE_TIMEOUT,
-    DEFAULT_HISTORY_DAYS,
     DEFAULT_LOW_THRESHOLD,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_STALE_TIMEOUT,
@@ -39,7 +37,6 @@ from ..discovery import (
     parse_battery_level,
 )
 from .battery_types import BatteryTypeResolver
-from .history import HistoryCache, async_batch_get_statistics, async_get_readings
 from .store import JuicePatrolStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -67,7 +64,6 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.discovered: dict[str, DiscoveredBattery] = {}
         self._tracked_entities: set[str] = set()
         self._unsub_state_listener: CALLBACK_TYPE | None = None
-        self._history_cache = HistoryCache()
         self._last_known_levels: dict[str, float] = {}
         # Event dedup: track which entities have had events fired
         self._fired_low: set[str] = set()
@@ -75,8 +71,6 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._first_full_build = True
         # Debounce: pending rebuild tasks per entity (cancel-on-supersede)
         self._pending_rebuilds: dict[str, asyncio.Task] = {}
-        # Lock to prevent concurrent full rebuilds
-        self._rebuild_lock = asyncio.Lock()
         # WS refresh throttle (per-coordinator, not module-level)
         self._last_ws_refresh: float = 0.0
         # Callback for dynamic entity creation
@@ -89,7 +83,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Maps sibling battery_state entity IDs → source entity IDs
         self._sibling_to_source: dict[str, str] = {}
         # First refresh: skip recorder queries to avoid bootstrap timeout
-        self._first_refresh = True
+
         # Signals when the initial data build completes
         self._initial_build_done = asyncio.Event()
 
@@ -111,13 +105,6 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Get the configured stale timeout in hours."""
         return self.config_entry.options.get(
             CONF_STALE_TIMEOUT, DEFAULT_STALE_TIMEOUT
-        )
-
-    @property
-    def history_days(self) -> int:
-        """Get the configured history lookback window in days."""
-        return self.config_entry.options.get(
-            CONF_HISTORY_DAYS, DEFAULT_HISTORY_DAYS
         )
 
     async def async_setup(self) -> None:
@@ -155,28 +142,9 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self._async_discover_and_subscribe()
         await self.store.async_save()
 
-        if self._first_refresh:
-            self._first_refresh = False
-            _LOGGER.debug(
-                "First refresh: discovered %d entities, deferring full build",
-                len(self.discovered),
-            )
-            self.hass.async_create_task(self._async_deferred_full_build())
-            return {}
-
         result = await self._async_build_full_data()
         self._initial_build_done.set()
         return result
-
-    async def _async_deferred_full_build(self) -> None:
-        """Run the full data build after bootstrap and push to listeners."""
-        try:
-            result = await self._async_build_full_data()
-            self.async_set_updated_data(result)
-        except Exception:
-            _LOGGER.error("Deferred full build failed", exc_info=True)
-        finally:
-            self._initial_build_done.set()
 
     async def _async_discover_and_subscribe(self) -> None:
         """Run discovery and subscribe to state changes for new entities."""
@@ -347,7 +315,6 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     dev.replacement_history.append(time.time())
                     dev.replacement_confirmed = False
                     self.store.mark_dirty()
-                self._history_cache.invalidate(entity_id)
                 replaced = True
 
         self._last_known_levels[entity_id] = level
@@ -516,41 +483,33 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_build_full_data(self) -> dict[str, Any]:
         """Build the full data dict for all entities."""
-        async with self._rebuild_lock:
-            all_entity_ids = set(self.discovered.keys())
-            await async_batch_get_statistics(
-                self.hass,
-                all_entity_ids,
-                cache=self._history_cache,
-                history_days=self.history_days,
-            )
-            data: dict[str, Any] = {}
-            failed_count = 0
-            for entity_id, battery in self.discovered.items():
-                try:
-                    data[entity_id] = await self._async_build_entity_data(
-                        entity_id, battery
-                    )
-                except Exception:
-                    _LOGGER.warning(
-                        "Failed to build data for %s", entity_id, exc_info=True
-                    )
-                    failed_count += 1
-                    continue
-
-            if failed_count:
-                _LOGGER.warning(
-                    "Partial data build: %d/%d entities failed",
-                    failed_count,
-                    len(self.discovered),
+        data: dict[str, Any] = {}
+        failed_count = 0
+        for entity_id, battery in self.discovered.items():
+            try:
+                data[entity_id] = await self._async_build_entity_data(
+                    entity_id, battery
                 )
+            except Exception:
+                _LOGGER.warning(
+                    "Failed to build data for %s", entity_id, exc_info=True
+                )
+                failed_count += 1
+                continue
 
-            if self._first_full_build:
-                self._first_full_build = False
-                self._pre_populate_event_dedup(data)
-            else:
-                self._fire_events(data)
-            return data
+        if failed_count:
+            _LOGGER.warning(
+                "Partial data build: %d/%d entities failed",
+                failed_count,
+                len(self.discovered),
+            )
+
+        if self._first_full_build:
+            self._first_full_build = False
+            self._pre_populate_event_dedup(data)
+        else:
+            self._fire_events(data)
+        return data
 
     def try_claim_refresh(self) -> bool:
         """Atomically check throttle and claim a refresh slot."""
@@ -561,15 +520,14 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return True
 
     async def async_manual_refresh(self) -> None:
-        """Force refresh with cache invalidation."""
-        self._history_cache.invalidate_all()
+        """Force a full refresh."""
         await self.async_request_refresh()
 
     async def async_mark_replaced(self, entity_id: str) -> bool:
         """Mark a battery as replaced: update store, invalidate cache."""
         if not self.store.mark_replaced(entity_id):
             return False
-        self._history_cache.invalidate(entity_id)
+
         self.hass.async_create_task(self.async_request_refresh())
         return True
 
@@ -579,7 +537,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Mark a battery as replaced at a specific timestamp."""
         if not self.store.mark_replaced_at(entity_id, timestamp):
             return False
-        self._history_cache.invalidate(entity_id)
+
         self.hass.async_create_task(self.async_request_refresh())
         return True
 
@@ -597,7 +555,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Restore a previously denied replacement."""
         if not self.store.restore_denied_replacement(entity_id, timestamp):
             return False
-        self._history_cache.invalidate(entity_id)
+
         self.hass.async_create_task(self.async_request_refresh())
         return True
 
@@ -610,7 +568,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return False
         elif not self.store.undo_replacement(entity_id):
             return False
-        self._history_cache.invalidate(entity_id)
+
         self.hass.async_create_task(self.async_request_refresh())
         return True
 

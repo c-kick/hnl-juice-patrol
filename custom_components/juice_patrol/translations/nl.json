@@ -13,8 +13,7 @@
         "description": "Pas de monitoringinstellingen van Juice Patrol aan.",
         "data": {
           "low_threshold": "Lage batterij drempel (%)",
-          "stale_timeout": "Time-out inactief apparaat (uren)",
-          "prediction_horizon": "Voorspellingshorizon voor waarschuwingen (dagen)"
+          "stale_timeout": "Time-out inactief apparaat (uren)"
         }
       }
     },
@@ -28,31 +27,15 @@
         "title": "Juice Patrol Instellingen",
         "data": {
           "low_threshold": "Lage batterij drempel (%)",
-          "stale_timeout": "Time-out inactief apparaat (uren)",
-          "prediction_horizon": "Voorspellingshorizon voor waarschuwingen (dagen)"
+          "stale_timeout": "Time-out inactief apparaat (uren)"
         }
       }
     }
   },
   "entity": {
     "sensor": {
-      "discharge_rate": {
-        "name": "Ontlaadsnelheid"
-      },
-      "predicted_empty": {
-        "name": "Voorspeld leeg"
-      },
-      "days_remaining": {
-        "name": "Dagen resterend"
-      },
-      "soh": {
-        "name": "Gezondheidsstatus"
-      },
-      "soh_cycling": {
-        "name": "Cyclusgezondheid"
-      },
-      "knee_risk": {
-        "name": "Kniepuntrisico"
+      "battery_level": {
+        "name": "Batterijniveau"
       },
       "lowest_battery": {
         "name": "Laagste batterij"

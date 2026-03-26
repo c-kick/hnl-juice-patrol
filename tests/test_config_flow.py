@@ -12,10 +12,8 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.juice_patrol.const import (
     CONF_LOW_THRESHOLD,
-    CONF_PREDICTION_HORIZON,
     CONF_STALE_TIMEOUT,
     DEFAULT_LOW_THRESHOLD,
-    DEFAULT_PREDICTION_HORIZON,
     DEFAULT_STALE_TIMEOUT,
     DOMAIN,
 )
@@ -106,7 +104,6 @@ async def test_options_flow_shows_form(hass: HomeAssistant) -> None:
         options={
             CONF_LOW_THRESHOLD: 25,
             CONF_STALE_TIMEOUT: 72,
-            CONF_PREDICTION_HORIZON: 14,
         },
         unique_id=DOMAIN,
     )
@@ -127,7 +124,6 @@ async def test_options_flow_saves(hass: HomeAssistant) -> None:
         options={
             CONF_LOW_THRESHOLD: 20,
             CONF_STALE_TIMEOUT: 48,
-            CONF_PREDICTION_HORIZON: 7,
         },
         unique_id=DOMAIN,
     )
@@ -141,14 +137,12 @@ async def test_options_flow_saves(hass: HomeAssistant) -> None:
         user_input={
             CONF_LOW_THRESHOLD: 30,
             CONF_STALE_TIMEOUT: 96,
-            CONF_PREDICTION_HORIZON: 21,
         },
     )
 
     assert result2["type"] is FlowResultType.CREATE_ENTRY
     assert result2["data"][CONF_LOW_THRESHOLD] == 30
     assert result2["data"][CONF_STALE_TIMEOUT] == 96
-    assert result2["data"][CONF_PREDICTION_HORIZON] == 21
 
 
 async def test_options_flow_defaults(hass: HomeAssistant) -> None:
@@ -176,7 +170,6 @@ async def test_reconfigure_shows_form(hass: HomeAssistant) -> None:
         options={
             CONF_LOW_THRESHOLD: 25,
             CONF_STALE_TIMEOUT: 72,
-            CONF_PREDICTION_HORIZON: 14,
         },
         unique_id=DOMAIN,
     )
@@ -199,7 +192,6 @@ async def test_reconfigure_saves(hass: HomeAssistant) -> None:
         options={
             CONF_LOW_THRESHOLD: 20,
             CONF_STALE_TIMEOUT: 48,
-            CONF_PREDICTION_HORIZON: 7,
         },
         unique_id=DOMAIN,
     )
@@ -216,7 +208,6 @@ async def test_reconfigure_saves(hass: HomeAssistant) -> None:
         user_input={
             CONF_LOW_THRESHOLD: 35,
             CONF_STALE_TIMEOUT: 120,
-            CONF_PREDICTION_HORIZON: 30,
         },
     )
 
@@ -224,4 +215,3 @@ async def test_reconfigure_saves(hass: HomeAssistant) -> None:
     assert result2["reason"] == "reconfigure_successful"
     assert entry.options[CONF_LOW_THRESHOLD] == 35
     assert entry.options[CONF_STALE_TIMEOUT] == 120
-    assert entry.options[CONF_PREDICTION_HORIZON] == 30

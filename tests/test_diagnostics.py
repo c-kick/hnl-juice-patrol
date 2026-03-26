@@ -7,11 +7,6 @@ import pytest
 from custom_components.juice_patrol.diagnostics import (
     async_get_config_entry_diagnostics,
 )
-from custom_components.juice_patrol.engine.predictions import (
-    Confidence,
-    PredictionResult,
-    PredictionStatus,
-)
 
 
 @pytest.mark.asyncio
@@ -35,27 +30,14 @@ async def test_diagnostics_with_devices(hass, mock_coordinator) -> None:
     entry.runtime_data = mock_coordinator
     entry.options = {"low_threshold": 20}
 
-    prediction = PredictionResult(
-        slope_per_day=-1.5,
-        slope_per_hour=-0.0625,
-        intercept=100.0,
-        r_squared=0.95,
-        confidence=Confidence.HIGH,
-        estimated_empty_timestamp=1710000000.0,
-        estimated_days_remaining=53.0,
-        estimated_hours_remaining=1272.0,
-        data_points_used=50,
-        status=PredictionStatus.NORMAL,
-        reliability=85,
-    )
-
     mock_coordinator.data = {
         "sensor.test_battery": {
             "level": 85.0,
-            "reading_count": 50,
-            "discharge_rate": 1.5,
+            "battery_type": "CR2032",
+            "is_rechargeable": False,
+            "is_low": False,
+            "is_stale": False,
             "last_replaced": None,
-            "prediction": prediction,
         }
     }
     mock_coordinator.discovered = {"sensor.test_battery": MagicMock()}
@@ -67,13 +49,13 @@ async def test_diagnostics_with_devices(hass, mock_coordinator) -> None:
     assert "sensor.test_battery" in result["devices"]
     diag = result["devices"]["sensor.test_battery"]
     assert diag["level"] == 85.0
-    assert diag["prediction_confidence"] == Confidence.HIGH
-    assert diag["prediction_days_remaining"] == 53.0
+    assert diag["battery_type"] == "CR2032"
+    assert diag["is_rechargeable"] is False
 
 
 @pytest.mark.asyncio
-async def test_diagnostics_no_prediction(hass, mock_coordinator) -> None:
-    """Test diagnostics when device has no prediction."""
+async def test_diagnostics_no_data(hass, mock_coordinator) -> None:
+    """Test diagnostics when device has minimal data."""
     entry = MagicMock()
     entry.runtime_data = mock_coordinator
     entry.options = {}
@@ -81,10 +63,11 @@ async def test_diagnostics_no_prediction(hass, mock_coordinator) -> None:
     mock_coordinator.data = {
         "sensor.test_battery": {
             "level": 95.0,
-            "reading_count": 2,
-            "discharge_rate": None,
+            "battery_type": None,
+            "is_rechargeable": False,
+            "is_low": False,
+            "is_stale": False,
             "last_replaced": None,
-            "prediction": None,
         }
     }
     mock_coordinator.discovered = {}
@@ -92,5 +75,5 @@ async def test_diagnostics_no_prediction(hass, mock_coordinator) -> None:
 
     result = await async_get_config_entry_diagnostics(hass, entry)
     diag = result["devices"]["sensor.test_battery"]
-    assert diag["prediction_confidence"] is None
-    assert diag["prediction_days_remaining"] is None
+    assert diag["level"] == 95.0
+    assert diag["battery_type"] is None

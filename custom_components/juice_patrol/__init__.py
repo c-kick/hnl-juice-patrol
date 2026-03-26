@@ -11,7 +11,11 @@ from homeassistant.components import websocket_api
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
-from homeassistant.helpers import config_validation as cv, device_registry as dr
+from homeassistant.helpers import (
+    config_validation as cv,
+    device_registry as dr,
+    entity_registry as er,
+)
 from homeassistant.helpers.typing import ConfigType
 
 from .const import (
@@ -129,6 +133,27 @@ async def async_setup_entry(
         raise
 
     entry.runtime_data = coordinator
+
+    # Clean up entity registry entries from removed prediction engine sensors.
+    _REMOVED_SUFFIXES = ("_discharge_rate", "_days_remaining", "_predicted_empty")
+    ent_reg = er.async_get(hass)
+    stale = [
+        ent_entry
+        for ent_entry in er.async_entries_for_config_entry(ent_reg, entry.entry_id)
+        if ent_entry.unique_id
+        and any(ent_entry.unique_id.endswith(s) for s in _REMOVED_SUFFIXES)
+    ]
+    for ent_entry in stale:
+        _LOGGER.info("Removing orphaned prediction entity: %s", ent_entry.entity_id)
+        ent_reg.async_remove(ent_entry.entity_id)
+
+    # Clean up orphan devices that have no entities left (e.g. from the
+    # device_id→source_entity_id identifier migration).
+    dev_reg = dr.async_get(hass)
+    for dev_entry in dr.async_entries_for_config_entry(dev_reg, entry.entry_id):
+        if not er.async_entries_for_device(ent_reg, dev_entry.id):
+            _LOGGER.info("Removing orphaned device: %s", dev_entry.name)
+            dev_reg.async_remove_device(dev_entry.id)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
