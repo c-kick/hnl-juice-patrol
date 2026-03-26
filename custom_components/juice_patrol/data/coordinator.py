@@ -22,8 +22,6 @@ from ..const import (
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_STALE_TIMEOUT,
     DOMAIN,
-    EVENT_BATTERY_LOW,
-    EVENT_DEVICE_STALE,
 )
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
@@ -34,7 +32,7 @@ from ..discovery import (
     async_discover_batteries,
     parse_battery_level,
 )
-from .battery_types import BatteryTypeResolver
+from ..modules import ModuleRegistry
 from .store import JuicePatrolStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -49,7 +47,6 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     config_entry: ConfigEntry
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
-        """Initialize the coordinator."""
         super().__init__(
             hass,
             _LOGGER,
@@ -58,59 +55,42 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self.config_entry = entry
         self.store = JuicePatrolStore(hass)
-        self.type_resolver = BatteryTypeResolver(hass)
+        self.registry = ModuleRegistry(self)
         self.discovered: dict[str, DiscoveredBattery] = {}
         self._tracked_entities: set[str] = set()
         self._unsub_state_listener: CALLBACK_TYPE | None = None
         self._last_known_levels: dict[str, float] = {}
-        # Event dedup: track which entities have had events fired
-        self._fired_low: set[str] = set()
-        self._fired_stale: set[str] = set()
-        self._first_full_build = True
-        # Debounce: pending rebuild tasks per entity (cancel-on-supersede)
         self._pending_rebuilds: dict[str, asyncio.Task] = {}
-        # WS refresh throttle (per-coordinator, not module-level)
         self._last_ws_refresh: float = 0.0
-        # Callback for dynamic entity creation
         self._new_device_callbacks: list[
             Callable[[list[str]], None]
         ] = []
-        # Entity registry listener for real-time new device discovery
         self._unsub_entity_listener: CALLBACK_TYPE | None = None
         self._discovery_debounce_task: asyncio.Task | None = None
-        # Maps sibling battery_state entity IDs → source entity IDs
         self._sibling_to_source: dict[str, str] = {}
-        # First refresh: skip recorder queries to avoid bootstrap timeout
-
-        # Signals when the initial data build completes
         self._initial_build_done = asyncio.Event()
 
     def async_register_new_device_callback(
         self, cb: Callable[[list[str]], None]
     ) -> None:
-        """Register a callback for when new devices are discovered."""
         self._new_device_callbacks.append(cb)
 
     @property
     def low_threshold(self) -> int:
-        """Get the configured low battery threshold."""
         return self.config_entry.options.get(
             CONF_LOW_THRESHOLD, DEFAULT_LOW_THRESHOLD
         )
 
     @property
     def stale_timeout_hours(self) -> int:
-        """Get the configured stale timeout in hours."""
         return self.config_entry.options.get(
             CONF_STALE_TIMEOUT, DEFAULT_STALE_TIMEOUT
         )
 
     async def async_setup(self) -> None:
-        """Set up the coordinator: load store and run initial discovery."""
+        """Set up the coordinator: load store, init modules, start discovery."""
         await self.store.async_load()
-        # Fetch Battery Notes library in background
-        self.hass.async_create_task(self.type_resolver.async_load_library())
-        # Listen for new entities to discover battery devices promptly
+        await self.registry.async_setup_all()
         self._unsub_entity_listener = self.hass.bus.async_listen(
             er.EVENT_ENTITY_REGISTRY_UPDATED,
             self._handle_entity_registry_update,
@@ -118,7 +98,6 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     @callback
     def _handle_entity_registry_update(self, event: Event) -> None:
-        """Handle entity registry changes — trigger re-discovery for new entities."""
         if event.data.get("action") not in ("create", "update"):
             return
         if self._discovery_debounce_task and not self._discovery_debounce_task.done():
@@ -128,7 +107,6 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
     async def _async_debounced_rediscovery(self) -> None:
-        """Wait briefly to batch rapid entity registrations, then re-discover."""
         await asyncio.sleep(5)
         try:
             await self.async_request_refresh()
@@ -136,16 +114,13 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug("Debounced rediscovery failed", exc_info=True)
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """Periodic update: re-discover devices and save store."""
         await self._async_discover_and_subscribe()
         await self.store.async_save()
-
         result = await self._async_build_full_data()
         self._initial_build_done.set()
         return result
 
     async def _async_discover_and_subscribe(self) -> None:
-        """Run discovery and subscribe to state changes for new entities."""
         ignored = self.store.get_ignored_entities()
         batteries = await async_discover_batteries(self.hass, ignored)
 
@@ -153,7 +128,6 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.discovered = {b.entity_id: b for b in batteries}
         new_entity_ids = set(self.discovered.keys())
 
-        # Ensure device metadata exists for discovered devices
         for battery in batteries:
             self.store.ensure_device(
                 battery.entity_id,
@@ -197,8 +171,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         disappeared = old_entity_ids - new_entity_ids
         for entity_id in disappeared:
             self._last_known_levels.pop(entity_id, None)
-            self._fired_low.discard(entity_id)
-            self._fired_stale.discard(entity_id)
+            self.registry.on_entity_disappeared(entity_id)
 
         # Clean up devices for entities that have disappeared
         if disappeared:
@@ -227,17 +200,8 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         entity_ids,
                     )
 
-    def _pre_populate_event_dedup(self, data: dict[str, Any]) -> None:
-        """Pre-populate dedup sets from current state to prevent restart storm."""
-        for entity_id, info in data.items():
-            if info.get("is_low"):
-                self._fired_low.add(entity_id)
-            if info.get("is_stale"):
-                self._fired_stale.add(entity_id)
-
     @callback
     def _handle_state_change(self, event: Event) -> None:
-        """Handle a state change event for a tracked battery entity."""
         entity_id = event.data.get("entity_id", "")
         new_state = event.data.get("new_state")
 
@@ -290,16 +254,13 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_known_levels[entity_id] = level
         battery.current_level = level
 
-        # Only rebuild when the level actually changed.
         if level == old_level:
             return
 
-        # Cancel any pending rebuild for this entity (debounce rapid updates)
         existing_task = self._pending_rebuilds.pop(entity_id, None)
         if existing_task and not existing_task.done():
             existing_task.cancel()
 
-        # Schedule async rebuild for this entity
         task = self.hass.async_create_task(
             self._async_rebuild_entity(entity_id, battery)
         )
@@ -308,7 +269,6 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_rebuild_entity(
         self, entity_id: str, battery: DiscoveredBattery
     ) -> None:
-        """Rebuild data for a single entity and update coordinator data."""
         entity_data = await self._async_build_entity_data(entity_id, battery)
         prev = self.data.get(entity_id) if self.data else None
 
@@ -317,20 +277,21 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         data = dict(self.data) if self.data else {}
         data[entity_id] = entity_data
-        self._fire_events_for_entity(entity_id, entity_data)
+
+        # Fire events via monitoring module
+        monitoring = self.registry.get_module("monitoring")
+        if monitoring is not None:
+            monitoring.fire_events_for_entity(entity_id, entity_data)
+
         self.async_set_updated_data(data)
 
     @staticmethod
     def _is_significant_change(
         old: dict[str, Any], new: dict[str, Any]
     ) -> bool:
-        """Return True if new entity data differs meaningfully from old."""
-        # Boolean / categorical flags — any change is significant
         for key in ("is_low", "is_stale", "charging_state"):
             if old.get(key) != new.get(key):
                 return True
-
-        # Level change > 1% absolute — significant
         old_level = old.get("level")
         new_level = new.get("level")
         if old_level is None or new_level is None:
@@ -338,105 +299,25 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return True
         elif abs(new_level - old_level) > 1:
             return True
-
         return False
 
     async def _async_build_entity_data(
         self, entity_id: str, battery: DiscoveredBattery
     ) -> dict[str, Any]:
-        """Build the data dict for a single entity."""
-        dev = self.store.get_device(entity_id)
-
-        threshold = (
-            dev.custom_threshold if dev and dev.custom_threshold
-            else self.low_threshold
-        )
-
-        # Determine if this device is rechargeable.
-        is_rechargeable_hint = False
-        if dev and dev.is_rechargeable is not None:
-            is_rechargeable_hint = dev.is_rechargeable
-        else:
-            battery_state_init = self._get_battery_state(entity_id, battery.device_id)
-            if battery_state_init:
-                normalized = battery_state_init.lower().replace(" ", "_")
-                if normalized in ("charging", "not_charging", "full", "discharging"):
-                    is_rechargeable_hint = True
-            if not is_rechargeable_hint and self.data is not None:
-                prev_data = self.data.get(entity_id, {})
-                is_rechargeable_hint = prev_data.get("is_rechargeable", False)
-
-        # Resolve battery type
-        manual_type = dev.battery_type if dev else None
-        if manual_type:
-            battery_type = manual_type
-            battery_type_source = "manual"
-        else:
-            battery_type, battery_type_source = self.type_resolver.resolve_type(
-                entity_id, battery.device_id
-            )
-
-        battery_state = self._get_battery_state(entity_id, battery.device_id)
-
-        level = battery.current_level
-        is_low = level is not None and level < threshold
-
-        now = time.time()
-        is_stale = False
-        # Check staleness from last HA state
-        source_state = self.hass.states.get(entity_id)
-        if source_state and source_state.state in (
-            STATE_UNAVAILABLE, STATE_UNKNOWN
-        ):
-            last_changed = source_state.last_changed.timestamp()
-            hours_unavailable = (now - last_changed) / 3600
-            is_stale = hours_unavailable > self.stale_timeout_hours
-
-        return {
-            "level": level,
+        """Build the data dict for a single entity — core fields + module enrichment."""
+        base_data: dict[str, Any] = {
+            "level": battery.current_level,
             "device_name": battery.device_name,
             "device_id": battery.device_id,
             "source_type": battery.source_type,
             "platform": battery.platform,
             "manufacturer": battery.manufacturer,
             "model": battery.model,
-            "last_replaced": dev.last_replaced if dev else None,
-            "custom_threshold": dev.custom_threshold if dev else None,
-            "threshold": threshold,
-            "battery_type": battery_type,
-            "battery_type_source": battery_type_source,
-            "is_rechargeable": is_rechargeable_hint,
-            "charging_state": battery_state,
-            "is_low": is_low,
-            "is_stale": is_stale,
-            "last_calculated": now,
-            "replacement_history": dev.replacement_history if dev else [],
+            "last_calculated": time.time(),
         }
-
-    def _get_battery_state(self, entity_id: str, device_id: str | None) -> str | None:
-        """Find battery charging state from attributes or sibling entities."""
-        state = self.hass.states.get(entity_id)
-        if state:
-            for attr in ("battery_state", "charging"):
-                val = state.attributes.get(attr)
-                if val:
-                    return str(val)
-
-        if device_id:
-            ent_reg = er.async_get(self.hass)
-            for entry in er.async_entries_for_device(ent_reg, device_id):
-                if "battery_state" not in entry.entity_id:
-                    continue
-                sibling_state = self.hass.states.get(entry.entity_id)
-                if sibling_state and sibling_state.state not in (
-                    STATE_UNAVAILABLE, STATE_UNKNOWN, None
-                ):
-                    return sibling_state.state
-
-        return None
+        return self.registry.enrich_entity_data(entity_id, battery, base_data)
 
     async def _async_build_full_data(self) -> dict[str, Any]:
-        """Build the full data dict for all entities."""
         data: dict[str, Any] = {}
         failed_count = 0
         for entity_id, battery in self.discovered.items():
@@ -458,15 +339,14 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 len(self.discovered),
             )
 
-        if self._first_full_build:
-            self._first_full_build = False
-            self._pre_populate_event_dedup(data)
-        else:
-            self._fire_events(data)
+        # Fire events via monitoring module
+        monitoring = self.registry.get_module("monitoring")
+        if monitoring is not None:
+            monitoring.fire_events(data)
+
         return data
 
     def try_claim_refresh(self) -> bool:
-        """Atomically check throttle and claim a refresh slot."""
         now = time.monotonic()
         if (now - self._last_ws_refresh) < _WS_REFRESH_MIN_INTERVAL:
             return False
@@ -474,102 +354,9 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return True
 
     async def async_manual_refresh(self) -> None:
-        """Force a full refresh."""
         await self.async_request_refresh()
 
-    async def async_mark_replaced(self, entity_id: str) -> bool:
-        """Mark a battery as replaced: update store, invalidate cache."""
-        if not self.store.mark_replaced(entity_id):
-            return False
-
-        self.hass.async_create_task(self.async_request_refresh())
-        return True
-
-    async def async_mark_replaced_at(
-        self, entity_id: str, timestamp: float
-    ) -> bool:
-        """Mark a battery as replaced at a specific timestamp."""
-        if not self.store.mark_replaced_at(entity_id, timestamp):
-            return False
-
-        self.hass.async_create_task(self.async_request_refresh())
-        return True
-
-    async def async_undo_replacement(
-        self, entity_id: str, *, timestamp: float | None = None
-    ) -> bool:
-        """Undo a replacement: update store, invalidate cache."""
-        if timestamp is not None:
-            if not self.store.remove_replacement(entity_id, timestamp):
-                return False
-        elif not self.store.undo_replacement(entity_id):
-            return False
-
-        self.hass.async_create_task(self.async_request_refresh())
-        return True
-
-    def detect_battery_type(
-        self, entity_id: str
-    ) -> tuple[str | None, str | None]:
-        """Auto-detect battery type for a discovered device (bypasses cache)."""
-        battery = self.discovered.get(entity_id)
-        if battery is None:
-            raise KeyError(entity_id)
-        return self.type_resolver.resolve_uncached(entity_id, battery.device_id)
-
-    @callback
-    def _fire_events_for_entity(
-        self, entity_id: str, info: dict[str, Any]
-    ) -> None:
-        """Fire events for a single entity."""
-        device_name = info.get("device_name") or entity_id
-        level = info.get("level")
-        threshold = info.get("threshold", self.low_threshold)
-
-        if info.get("is_low"):
-            if entity_id not in self._fired_low:
-                self._fired_low.add(entity_id)
-                self.hass.bus.async_fire(
-                    EVENT_BATTERY_LOW,
-                    {
-                        "entity_id": entity_id,
-                        "device_name": device_name,
-                        "level": level,
-                        "threshold": threshold,
-                    },
-                )
-        elif level is not None:
-            self._fired_low.discard(entity_id)
-
-        if info.get("is_stale"):
-            if entity_id not in self._fired_stale:
-                self._fired_stale.add(entity_id)
-                last_reading = info.get("last_reading_time")
-                hours_since = (
-                    (time.time() - last_reading) / 3600
-                    if last_reading
-                    else 0
-                )
-                self.hass.bus.async_fire(
-                    EVENT_DEVICE_STALE,
-                    {
-                        "entity_id": entity_id,
-                        "device_name": device_name,
-                        "last_seen": last_reading,
-                        "stale_hours": round(hours_since, 1),
-                    },
-                )
-        else:
-            self._fired_stale.discard(entity_id)
-
-    @callback
-    def _fire_events(self, data: dict[str, Any]) -> None:
-        """Fire events for all entities (used on full rebuild)."""
-        for entity_id, info in data.items():
-            self._fire_events_for_entity(entity_id, info)
-
     async def async_shutdown(self) -> None:
-        """Shut down the coordinator, save store, remove listeners."""
         if self._unsub_state_listener:
             self._unsub_state_listener()
             self._unsub_state_listener = None
@@ -584,5 +371,6 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 task.cancel()
         self._pending_rebuilds.clear()
         self._new_device_callbacks.clear()
+        await self.registry.async_teardown_all()
         await self.store.async_save()
         await super().async_shutdown()

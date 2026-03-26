@@ -34,8 +34,6 @@ def mock_coordinator():
     coordinator.store = MagicMock()
     coordinator.store.devices = {}
     coordinator.store.get_ignored_entities.return_value = set()
-    coordinator.type_resolver = MagicMock()
-    coordinator._history_cache = MagicMock()
     coordinator.async_request_refresh = AsyncMock()
     coordinator.async_manual_refresh = AsyncMock()
     coordinator.async_shutdown = AsyncMock()
@@ -45,6 +43,15 @@ def mock_coordinator():
     coordinator.last_update_success = True
     coordinator.async_add_listener = MagicMock(return_value=lambda: None)
     coordinator.async_register_new_device_callback = MagicMock()
+
+    # Module registry mock
+    mock_registry = MagicMock()
+    mock_registry.collect_ws_handlers.return_value = []
+    mock_registry.collect_services.return_value = []
+    mock_registry.get_all_diagnostics.return_value = {}
+    mock_registry.get_module.return_value = None
+    coordinator.registry = mock_registry
+
     return coordinator
 
 
@@ -75,5 +82,14 @@ def mock_coordinator_setup():
         instance.last_update_success = True
         instance.store = MagicMock()
         instance.store.devices = {}
+
+        # Module registry mock
+        mock_registry = MagicMock()
+        mock_registry.collect_ws_handlers.return_value = []
+        mock_registry.collect_services.return_value = []
+        mock_registry.get_all_diagnostics.return_value = {}
+        mock_registry.get_module.return_value = None
+        instance.registry = mock_registry
+
         mock_cls.return_value = instance
         yield mock_cls, instance

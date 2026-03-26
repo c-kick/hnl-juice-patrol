@@ -33,4 +33,5 @@ async def async_get_config_entry_diagnostics(
         "store_devices": len(coordinator.store.devices),
         "ignored_devices": len(coordinator.store.get_ignored_entities()),
         "devices": devices_diag,
+        "modules": coordinator.registry.get_all_diagnostics(),
     }

@@ -5,15 +5,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ServiceValidationError
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.juice_patrol import (
     _async_options_updated,
     _get_coordinator,
-    _require_coordinator,
-    _require_monitored,
     async_setup,
     async_setup_entry,
     async_unload_entry,
@@ -24,21 +21,18 @@ from custom_components.juice_patrol.const import (
 )
 
 
-async def test_async_setup_registers_services(
+async def test_async_setup_registers_core_ws_handlers(
     hass: HomeAssistant, mock_setup_panel
 ) -> None:
-    """Test that async_setup registers all services."""
+    """Test that async_setup registers core WS handlers."""
     with patch(
         "custom_components.juice_patrol.websocket_api.async_register_command"
-    ):
+    ) as mock_register:
         result = await async_setup(hass, {})
         assert result is True
 
-    assert hass.services.has_service(DOMAIN, "force_refresh")
-    assert hass.services.has_service(DOMAIN, "mark_replaced")
-    assert hass.services.has_service(DOMAIN, "set_device_threshold")
-    assert hass.services.has_service(DOMAIN, "ignore_device")
-    assert hass.services.has_service(DOMAIN, "unignore_device")
+    # Core WS handlers: refresh, set_ignored, get_ignored
+    assert mock_register.call_count == 3
 
 
 async def test_setup_and_unload_entry(
@@ -48,6 +42,12 @@ async def test_setup_and_unload_entry(
 ) -> None:
     """Test full setup and unload cycle."""
     mock_cls, mock_instance = mock_coordinator_setup
+
+    # Add registry mock to coordinator instance
+    mock_registry = MagicMock()
+    mock_registry.collect_ws_handlers.return_value = []
+    mock_registry.collect_services.return_value = []
+    mock_instance.registry = mock_registry
 
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -113,21 +113,6 @@ class TestGetCoordinator:
         """Return None when no entries are loaded."""
         result = _get_coordinator(hass)
         assert result is None
-
-    def test_require_coordinator_raises(self, hass: HomeAssistant):
-        """Raise ServiceValidationError when not loaded."""
-        with pytest.raises(ServiceValidationError):
-            _require_coordinator(hass)
-
-    def test_require_monitored_raises(self, mock_coordinator):
-        """Raise when entity not in discovered."""
-        with pytest.raises(ServiceValidationError):
-            _require_monitored(mock_coordinator, "sensor.not_monitored")
-
-    def test_require_monitored_ok(self, mock_coordinator):
-        """No exception when entity is discovered."""
-        mock_coordinator.discovered = {"sensor.battery": MagicMock()}
-        _require_monitored(mock_coordinator, "sensor.battery")  # Should not raise
 
 
 class TestAsyncOptionsUpdated:
