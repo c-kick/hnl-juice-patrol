@@ -106,7 +106,10 @@ class BatteryTypeResolver:
             return cached
 
         result = self.resolve_uncached(entity_id, device_id)
-        self._cache[entity_id] = result
+        # Only cache positive matches — (None, None) may be a race with
+        # the Battery Notes library still loading in the background.
+        if result != (None, None):
+            self._cache[entity_id] = result
         return result
 
     def resolve_uncached(
