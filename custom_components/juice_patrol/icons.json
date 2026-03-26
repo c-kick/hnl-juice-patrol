@@ -1,23 +1,8 @@
 {
   "entity": {
     "sensor": {
-      "discharge_rate": {
-        "default": "mdi:battery-minus"
-      },
-      "predicted_empty": {
-        "default": "mdi:battery-clock"
-      },
-      "days_remaining": {
-        "default": "mdi:calendar-clock"
-      },
-      "soh": {
-        "default": "mdi:heart-pulse"
-      },
-      "soh_cycling": {
-        "default": "mdi:battery-heart"
-      },
-      "knee_risk": {
-        "default": "mdi:chart-bell-curve"
+      "battery_level": {
+        "default": "mdi:battery"
       },
       "lowest_battery": {
         "default": "mdi:battery-alert"

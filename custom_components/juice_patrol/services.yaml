@@ -1,10 +1,10 @@
 force_refresh:
   name: Force Refresh
-  description: Trigger an immediate full discovery and prediction update.
+  description: Trigger an immediate full discovery and level update.
 
 mark_replaced:
   name: Mark Battery Replaced
-  description: Manually mark a battery as replaced, resetting its discharge curve.
+  description: Manually mark a battery as replaced.
   fields:
     entity_id:
       name: Entity

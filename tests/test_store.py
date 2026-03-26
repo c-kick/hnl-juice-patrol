@@ -39,7 +39,6 @@ class TestDeviceData:
         assert d.custom_threshold is None
         assert d.battery_type is None
         assert d.is_rechargeable is None
-        assert d.replacement_confirmed is True
 
     def test_from_dict(self):
         raw = {
@@ -48,7 +47,6 @@ class TestDeviceData:
             "custom_threshold": 30,
             "battery_type": "CR2032",
             "is_rechargeable": False,
-            "replacement_confirmed": False,
             "source_entity": "sensor.test",
             "device_id": "abc123",
         }
@@ -58,7 +56,6 @@ class TestDeviceData:
         assert d.custom_threshold == 30
         assert d.battery_type == "CR2032"
         assert d.is_rechargeable is False
-        assert d.replacement_confirmed is False
         assert d.device_id == "abc123"
 
     def test_from_dict_defaults(self):
@@ -73,7 +70,6 @@ class TestDeviceData:
             ignored=False,
             custom_threshold=25,
             battery_type="AA",
-            replacement_confirmed=True,
             source_entity="sensor.test",
             device_id="dev1",
         )
@@ -100,7 +96,6 @@ class TestDeviceData:
             custom_threshold=15,
             battery_type="AAA",
             is_rechargeable=True,
-            replacement_confirmed=False,
             source_entity="sensor.foo",
             device_id="dev42",
         )
@@ -130,7 +125,6 @@ class TestJuicePatrolStore:
                 "sensor.test": {
                     "last_replaced": None,
                     "ignored": False,
-                    "replacement_confirmed": True,
                     "source_entity": "sensor.test",
                     "device_id": "dev1",
                 }
@@ -150,7 +144,6 @@ class TestJuicePatrolStore:
                     "readings": [{"t": 1, "v": 90}],
                     "last_replaced": None,
                     "ignored": False,
-                    "replacement_confirmed": True,
                     "source_entity": "sensor.test",
                     "device_id": None,
                 }
@@ -213,7 +206,6 @@ class TestJuicePatrolStore:
         assert store.mark_replaced("sensor.test") is True
         dev = store.get_device("sensor.test")
         assert dev.last_replaced is not None
-        assert dev.replacement_confirmed is True
 
     def test_mark_replaced_missing(self, store):
         assert store.mark_replaced("sensor.missing") is False
@@ -225,7 +217,6 @@ class TestJuicePatrolStore:
         assert store.undo_replacement("sensor.test") is True
         dev = store.get_device("sensor.test")
         assert dev.last_replaced is None
-        assert dev.replacement_confirmed is True
 
     def test_undo_replacement_missing(self, store):
         assert store.undo_replacement("sensor.missing") is False
@@ -267,15 +258,6 @@ class TestJuicePatrolStore:
 
     def test_set_rechargeable_missing(self, store):
         assert store.set_rechargeable("sensor.missing", True) is False
-
-    def test_set_replacement_confirmed(self, store):
-        store.ensure_device("sensor.test")
-        store.mark_replaced("sensor.test")
-        assert store.set_replacement_confirmed("sensor.test", True) is True
-        assert store.devices["sensor.test"].replacement_confirmed is True
-
-    def test_set_replacement_confirmed_missing(self, store):
-        assert store.set_replacement_confirmed("sensor.missing", True) is False
 
     def test_mark_dirty(self, store):
         store.mark_dirty()

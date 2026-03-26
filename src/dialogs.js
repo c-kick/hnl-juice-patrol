@@ -134,10 +134,6 @@ export function showBatteryTypeDialog(panel, entityId, currentType) {
   let stashedBadges = null;
   let stashedLockedType = null;
 
-  const chemistryPresets = ["alkaline", "lithium_primary", "NMC", "NiMH"];
-  const chemistryLabels = { alkaline: "Alkaline", lithium_primary: "Lithium", NMC: "Li-ion", NiMH: "NiMH" };
-  let chemistryOverride = dev?.chemistryOverride || null;
-  let chemistryChanged = false;
 
   let popoverOpen = false;
   let customInputValue = "";
@@ -312,24 +308,6 @@ export function showBatteryTypeDialog(panel, entityId, currentType) {
         </div>
       </div>
 
-      <ha-expansion-panel outlined style="margin: 12px 0 0">
-        <span slot="header">Advanced</span>
-        <div style="padding: 8px 0">
-          <div style="font-size:13px; font-weight:500; margin-bottom:8px">Chemistry override</div>
-          <div class="jp-dialog-presets jp-chem-presets">
-            ${chemistryPresets.map((c) => {
-              const active = chemistryOverride === c;
-              return `<button class="jp-preset jp-chem-chip${active ? " active" : ""}"
-                data-chem="${c}">${chemistryLabels[c]}</button>`;
-            }).join("")}
-          </div>
-          <div style="font-size:12px; color:var(--secondary-text-color); margin-top:8px; line-height:16px">
-            Changes the prediction model used for this device. Leave unset to use
-            the default for this battery type.
-          </div>
-        </div>
-      </ha-expansion-panel>
-
       <div class="jp-dialog-actions">
         <ha-button variant="neutral" class="jp-dialog-clear">Clear</ha-button>
         <ha-button variant="neutral" class="jp-dialog-cancel">Cancel</ha-button>
@@ -357,16 +335,6 @@ export function showBatteryTypeDialog(panel, entityId, currentType) {
         const t = btn.dataset.type;
         lockedType = t;
         badges.push(t);
-        renderDialog();
-      });
-    });
-
-    // Chemistry override chips — toggle on/off
-    body.querySelectorAll(".jp-chem-chip").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const c = btn.dataset.chem;
-        chemistryOverride = chemistryOverride === c ? null : c;
-        chemistryChanged = true;
         renderDialog();
       });
     });
@@ -481,8 +449,6 @@ export function showBatteryTypeDialog(panel, entityId, currentType) {
       lockedType = null;
       popoverOpen = false;
       customInputValue = "";
-      chemistryOverride = null;
-      chemistryChanged = true;
       renderDialog();
     });
 
@@ -508,17 +474,6 @@ export function showBatteryTypeDialog(panel, entityId, currentType) {
       }
       if (typeChanged) {
         await panel._saveBatteryType(entityId, val);
-      }
-      if (chemistryChanged) {
-        try {
-          await panel._hass.callWS({
-            type: "juice_patrol/set_chemistry_override",
-            entity_id: entityId,
-            chemistry: chemistryOverride,
-          });
-        } catch (e) {
-          showToast(panel, "Failed to update chemistry override");
-        }
       }
     });
   };

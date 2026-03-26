@@ -32,7 +32,6 @@ export const CSS_PRIMARY_TEXT = `var(${COLOR_PRIMARY_TEXT.var}, ${COLOR_PRIMARY_
 
 // ── Badge / label colors (hardcoded — not theme-dependent) ──
 
-export const BADGE_REPLACED = "#FF9800";
 export const BADGE_LOW = "#F44336";
 export const BADGE_STALE = "#FF9800";
 export const BADGE_CHARGING = "#4CAF50";

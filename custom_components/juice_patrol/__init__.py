@@ -104,11 +104,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ws_update_settings,
         ws_set_battery_type,
         ws_set_rechargeable,
-        ws_confirm_replacement,
         ws_mark_replaced,
         ws_undo_replacement,
-        ws_deny_replacement,
-        ws_restore_denied_replacement,
         ws_detect_battery_type,
         ws_refresh,
         ws_get_shopping_list,
@@ -330,26 +327,6 @@ async def ws_set_rechargeable(hass, connection, msg):
 
 @websocket_api.websocket_command(
     {
-        vol.Required("type"): "juice_patrol/confirm_replacement",
-        vol.Required("entity_id"): cv.entity_id,
-    }
-)
-@websocket_api.async_response
-async def ws_confirm_replacement(hass, connection, msg):
-    """Confirm a detected battery replacement."""
-    coordinator = _ws_get_coordinator(hass, connection, msg["id"])
-    if not coordinator:
-        return
-    entity_id = msg["entity_id"]
-    if coordinator.store.set_replacement_confirmed(entity_id, True):
-        await coordinator.async_request_refresh()
-        connection.send_result(msg["id"], {"ok": True})
-    else:
-        connection.send_error(msg["id"], "not_found", f"Entity {entity_id} not in store")
-
-
-@websocket_api.websocket_command(
-    {
         vol.Required("type"): "juice_patrol/mark_replaced",
         vol.Required("entity_id"): cv.entity_id,
         vol.Optional("timestamp"): vol.Coerce(float),
@@ -400,51 +377,6 @@ async def ws_undo_replacement(hass, connection, msg):
             msg["id"], "not_found", f"Entity {entity_id} not in store"
         )
 
-
-@websocket_api.websocket_command(
-    {
-        vol.Required("type"): "juice_patrol/deny_replacement",
-        vol.Required("entity_id"): cv.entity_id,
-        vol.Required("timestamp"): vol.Coerce(float),
-    }
-)
-@websocket_api.async_response
-async def ws_deny_replacement(hass, connection, msg):
-    """Deny a suspected historical replacement (won't be suggested again)."""
-    coordinator = _ws_get_coordinator(hass, connection, msg["id"])
-    if not coordinator:
-        return
-    entity_id = msg["entity_id"]
-    if await coordinator.async_deny_replacement(entity_id, msg["timestamp"]):
-        connection.send_result(msg["id"], {"ok": True})
-    else:
-        connection.send_error(
-            msg["id"], "not_found", f"Entity {entity_id} not in store"
-        )
-
-
-@websocket_api.websocket_command(
-    {
-        vol.Required("type"): "juice_patrol/restore_denied_replacement",
-        vol.Required("entity_id"): cv.entity_id,
-        vol.Required("timestamp"): vol.Coerce(float),
-    }
-)
-@websocket_api.async_response
-async def ws_restore_denied_replacement(hass, connection, msg):
-    """Restore a previously denied replacement (re-enables suggestion)."""
-    coordinator = _ws_get_coordinator(hass, connection, msg["id"])
-    if not coordinator:
-        return
-    entity_id = msg["entity_id"]
-    if await coordinator.async_restore_denied_replacement(
-        entity_id, msg["timestamp"]
-    ):
-        connection.send_result(msg["id"], {"ok": True})
-    else:
-        connection.send_error(
-            msg["id"], "not_found", f"Entity {entity_id} not in store"
-        )
 
 
 @websocket_api.websocket_command(

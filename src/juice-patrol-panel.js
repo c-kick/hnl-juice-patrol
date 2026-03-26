@@ -299,7 +299,6 @@ class JuicePatrolPanel extends LitElement {
           batteryTypeSource: null,
           threshold: null,
           lastReplaced: null,
-          replacementPending: false,
           isRechargeable: false,
           rechargeableReason: null,
           chargingState: null,
@@ -320,7 +319,6 @@ class JuicePatrolPanel extends LitElement {
         dev.batteryTypeSource = attrs.battery_type_source || null;
         dev.threshold = attrs.threshold != null ? parseFloat(attrs.threshold) : null;
         dev.lastReplaced = attrs.last_replaced ?? null;
-        dev.replacementPending = attrs.replacement_pending ?? false;
         dev.isRechargeable = attrs.is_rechargeable ?? false;
         dev.rechargeableReason = attrs.rechargeable_reason ?? null;
         dev.chargingState = attrs.charging_state ?? null;
@@ -384,7 +382,7 @@ class JuicePatrolPanel extends LitElement {
     }
 
     this._entityList = list;
-    this._entityHash = list.map((d) => `${d.sourceEntity}:${d.level}:${d.isLow}:${d.isStale}:${d.replacementPending}:${d.chargingState}:${d.batteryType}`).join("|");
+    this._entityHash = list.map((d) => `${d.sourceEntity}:${d.level}:${d.isLow}:${d.isStale}:${d.chargingState}:${d.batteryType}`).join("|");
   }
 
   _getFilteredEntities() {
@@ -563,59 +561,6 @@ class JuicePatrolPanel extends LitElement {
     });
   }
 
-  async _confirmReplacement(entityId) {
-    try {
-      await this._hass.callWS({
-        type: "juice_patrol/confirm_replacement",
-        entity_id: entityId,
-      });
-      this._showToast("Replacement confirmed");
-    } catch (e) {
-      this._showToast("Failed to confirm");
-    }
-  }
-
-  async _confirmSuspectedReplacement(entityId, timestamp) {
-    try {
-      await this._hass.callWS({
-        type: "juice_patrol/mark_replaced",
-        entity_id: entityId,
-        timestamp,
-      });
-      this._showToast("Replacement confirmed");
-    } catch (e) {
-      this._showToast("Failed to confirm replacement");
-    }
-  }
-
-  async _denySuspectedReplacement(entityId, timestamp) {
-    try {
-      await this._hass.callWS({
-        type: "juice_patrol/deny_replacement",
-        entity_id: entityId,
-        timestamp,
-      });
-      this._showToast("Suggestion dismissed", {
-        text: "Undo",
-        action: () => this._restoreDeniedReplacement(entityId, timestamp),
-      });
-    } catch (e) {
-      this._showToast("Failed to dismiss suggestion");
-    }
-  }
-
-  async _restoreDeniedReplacement(entityId, timestamp) {
-    try {
-      await this._hass.callWS({
-        type: "juice_patrol/restore_denied_replacement",
-        entity_id: entityId,
-        timestamp,
-      });
-      this._showToast("Suggestion restored");
-    } catch (e) {
-      this._showToast("Failed to restore suggestion");
-    }
-  }
 
   _confirmRefresh() {
     showConfirmDialog(this, {

@@ -1,11 +1,11 @@
-import { html, nothing } from "lit";
+import { html } from "lit";
 import { STYLE_SECONDARY, STYLE_SUB_TEXT, STYLE_BADGE_ROW } from "./constants.js";
 import {
   getBatteryIcon, getLevelColor, formatLevel, isActivelyCharging,
   displayLevel, renderBadgeLabel, getDeviceSubText,
 } from "./helpers.js";
 import {
-  BADGE_REPLACED, BADGE_LOW, BADGE_STALE, BADGE_CHARGING, BADGE_AVG_LEVEL,
+  BADGE_LOW, BADGE_STALE, BADGE_CHARGING, BADGE_AVG_LEVEL,
 } from "./colors.js";
 
 /**
@@ -116,16 +116,6 @@ export function getBadgeLabels(dev, panel) {
   const labels = [];
   const threshold = panel._settingsValues?.low_threshold ?? 20;
 
-  if (dev.replacementPending) {
-    labels.push({
-      label_id: "replaced",
-      name: dev.isRechargeable ? "RECHARGED?" : "REPLACED?",
-      color: BADGE_REPLACED,
-      description: dev.isRechargeable
-        ? "Battery level jumped significantly \u2014 normal recharge cycle?"
-        : "Battery level jumped significantly \u2014 was the battery replaced?",
-    });
-  }
   if (dev.isLow) {
     const t = dev.threshold ?? threshold;
     labels.push({
@@ -165,11 +155,6 @@ export function renderDropdownItems(dev) {
       More info
     </ha-dropdown-item>
     <wa-divider></wa-divider>
-    ${dev?.replacementPending ? html`
-    <ha-dropdown-item value="confirm">
-      <ha-icon slot="icon" icon="mdi:check-circle-outline"></ha-icon>
-      Confirm replacement
-    </ha-dropdown-item>` : nothing}
     <ha-dropdown-item value="replace">
       <ha-icon slot="icon" icon="mdi:battery-sync"></ha-icon>
       Mark as replaced

@@ -11,7 +11,6 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from ..const import (
-    MAX_DENIED_REPLACEMENTS,
     MAX_REPLACEMENT_HISTORY,
     STORE_KEY,
     STORE_MINOR_VERSION,
@@ -26,12 +25,10 @@ class DeviceData:
     """In-memory representation of a single device's metadata."""
 
     replacement_history: list[float] = field(default_factory=list)
-    denied_replacements: list[float] = field(default_factory=list)
     ignored: bool = False
     custom_threshold: int | None = None
     battery_type: str | None = None  # e.g. "CR2032", "AA", "AAA"
     is_rechargeable: bool | None = None  # None=auto-detect, True/False=manual
-    replacement_confirmed: bool = True  # False when jump detected but not confirmed
     source_entity: str = ""
     device_id: str | None = None
 
@@ -51,12 +48,10 @@ class DeviceData:
                 replacement_history = [last_replaced]
         return cls(
             replacement_history=replacement_history,
-            denied_replacements=data.get("denied_replacements", []),
             ignored=data.get("ignored", False),
             custom_threshold=data.get("custom_threshold"),
             battery_type=data.get("battery_type"),
             is_rechargeable=data.get("is_rechargeable"),
-            replacement_confirmed=data.get("replacement_confirmed", True),
             source_entity=data.get("source_entity", entity_id),
             device_id=data.get("device_id"),
         )
@@ -65,9 +60,7 @@ class DeviceData:
         """Serialize to dict for storage."""
         result: dict[str, Any] = {
             "replacement_history": self.replacement_history,
-            "denied_replacements": self.denied_replacements,
             "ignored": self.ignored,
-            "replacement_confirmed": self.replacement_confirmed,
             "source_entity": self.source_entity,
             "device_id": self.device_id,
         }
@@ -227,7 +220,6 @@ class JuicePatrolStore:
 
         now = time.time()
         if dev.replacement_history and abs(dev.replacement_history[-1] - now) < 60:
-            dev.replacement_confirmed = True
             self._dirty = True
             return True
 
@@ -235,7 +227,6 @@ class JuicePatrolStore:
         dev.replacement_history = self._dedup_and_cap_timestamps(
             dev.replacement_history, MAX_REPLACEMENT_HISTORY
         )
-        dev.replacement_confirmed = True
         self._dirty = True
         _LOGGER.info("Battery manually marked as replaced: %s", entity_id)
         return True
@@ -247,7 +238,6 @@ class JuicePatrolStore:
             return False
 
         if any(abs(ts - timestamp) < 60 for ts in dev.replacement_history):
-            dev.replacement_confirmed = True
             self._dirty = True
             return True
 
@@ -255,7 +245,6 @@ class JuicePatrolStore:
         dev.replacement_history = self._dedup_and_cap_timestamps(
             dev.replacement_history, MAX_REPLACEMENT_HISTORY
         )
-        dev.replacement_confirmed = True
         self._dirty = True
         _LOGGER.info("Battery marked as replaced at %s: %s", timestamp, entity_id)
         return True
@@ -268,7 +257,6 @@ class JuicePatrolStore:
 
         if dev.replacement_history:
             dev.replacement_history.pop()
-        dev.replacement_confirmed = True
         self._dirty = True
         _LOGGER.info("Battery replacement undone: %s", entity_id)
         return True
@@ -282,40 +270,8 @@ class JuicePatrolStore:
             dev.replacement_history.remove(timestamp)
         except ValueError:
             return False
-        dev.replacement_confirmed = True
         self._dirty = True
         _LOGGER.info("Battery replacement removed (ts=%s): %s", timestamp, entity_id)
-        return True
-
-    def deny_replacement(self, entity_id: str, timestamp: float) -> bool:
-        """Deny a suspected replacement (prevents re-suggestion)."""
-        dev = self._data.devices.get(entity_id)
-        if dev is None:
-            return False
-
-        dev.denied_replacements.append(timestamp)
-        dev.denied_replacements = self._dedup_and_cap_timestamps(
-            dev.denied_replacements, MAX_DENIED_REPLACEMENTS
-        )
-        self._dirty = True
-        _LOGGER.info("Suspected replacement denied at %s: %s", timestamp, entity_id)
-        return True
-
-    def restore_denied_replacement(
-        self, entity_id: str, timestamp: float
-    ) -> bool:
-        """Remove a timestamp from denied_replacements (re-enables detection)."""
-        dev = self._data.devices.get(entity_id)
-        if dev is None:
-            return False
-        try:
-            dev.denied_replacements.remove(timestamp)
-        except ValueError:
-            return False
-        self._dirty = True
-        _LOGGER.info(
-            "Denied replacement restored at %s: %s", timestamp, entity_id
-        )
         return True
 
     def set_ignored(self, entity_id: str, ignored: bool) -> None:
@@ -357,17 +313,6 @@ class JuicePatrolStore:
         if dev is None:
             return False
         dev.is_rechargeable = is_rechargeable
-        self._dirty = True
-        return True
-
-    def set_replacement_confirmed(
-        self, entity_id: str, confirmed: bool
-    ) -> bool:
-        """Set replacement confirmation state. Returns False if not found."""
-        dev = self._data.devices.get(entity_id)
-        if dev is None:
-            return False
-        dev.replacement_confirmed = confirmed
         self._dirty = True
         return True
 

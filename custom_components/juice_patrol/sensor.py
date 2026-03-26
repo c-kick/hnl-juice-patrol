@@ -99,7 +99,6 @@ class JuicePatrolBatteryLevel(JuicePatrolEntity, SensorEntity):
             "battery_type_source": info.get("battery_type_source"),
             "is_rechargeable": info.get("is_rechargeable", False),
             "charging_state": info.get("charging_state"),
-            "replacement_pending": info.get("replacement_pending", False),
             "last_replaced": info.get("last_replaced"),
             "last_calculated": info.get("last_calculated"),
         }

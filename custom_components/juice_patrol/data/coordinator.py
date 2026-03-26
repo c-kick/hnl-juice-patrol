@@ -22,9 +22,7 @@ from ..const import (
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_STALE_TIMEOUT,
     DOMAIN,
-    REPLACEMENT_LOW_MULTIPLIER,
     EVENT_BATTERY_LOW,
-    EVENT_DEVICE_REPLACED,
     EVENT_DEVICE_STALE,
 )
 from homeassistant.helpers import device_registry as dr, entity_registry as er
@@ -288,53 +286,12 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if level is None or not (0 <= level <= 100):
             return
 
-        # Determine rechargeable status to prevent replacement detection
-        # on normal charge cycles.
-        is_rechargeable = False
-        if self.data:
-            prev_data = self.data.get(entity_id, {})
-            is_rechargeable = prev_data.get("is_rechargeable", False)
-        if not is_rechargeable:
-            dev = self.store.get_device(entity_id)
-            if dev and dev.is_rechargeable is True:
-                is_rechargeable = True
-
-        # Replacement detection: compare against last known level
         old_level = self._last_known_levels.get(entity_id)
-        replaced = False
-        if old_level is not None and not is_rechargeable:
-            if old_level <= self.low_threshold * REPLACEMENT_LOW_MULTIPLIER and level >= 80:
-                _LOGGER.info(
-                    "Battery replacement detected for %s: %s%% → %s%%",
-                    entity_id,
-                    old_level,
-                    level,
-                )
-                dev = self.store.get_device(entity_id)
-                if dev:
-                    dev.replacement_history.append(time.time())
-                    dev.replacement_confirmed = False
-                    self.store.mark_dirty()
-                replaced = True
-
         self._last_known_levels[entity_id] = level
         battery.current_level = level
 
-        # Fire replacement event if detected
-        if replaced:
-            self.hass.bus.async_fire(
-                EVENT_DEVICE_REPLACED,
-                {
-                    "entity_id": entity_id,
-                    "device_name": battery.device_name or entity_id,
-                    "old_level": old_level,
-                    "new_level": level,
-                },
-            )
-            self._fired_low.discard(entity_id)
-
-        # Only rebuild when the level actually changed (or replacement detected).
-        if level == old_level and not replaced:
+        # Only rebuild when the level actually changed.
+        if level == old_level:
             return
 
         # Cancel any pending rebuild for this entity (debounce rapid updates)
@@ -369,7 +326,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> bool:
         """Return True if new entity data differs meaningfully from old."""
         # Boolean / categorical flags — any change is significant
-        for key in ("is_low", "is_stale", "charging_state", "replacement_pending"):
+        for key in ("is_low", "is_stale", "charging_state"):
             if old.get(key) != new.get(key):
                 return True
 
@@ -450,9 +407,6 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "battery_type_source": battery_type_source,
             "is_rechargeable": is_rechargeable_hint,
             "charging_state": battery_state,
-            "replacement_pending": (
-                dev is not None and not dev.replacement_confirmed
-            ),
             "is_low": is_low,
             "is_stale": is_stale,
             "last_calculated": now,
@@ -536,24 +490,6 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> bool:
         """Mark a battery as replaced at a specific timestamp."""
         if not self.store.mark_replaced_at(entity_id, timestamp):
-            return False
-
-        self.hass.async_create_task(self.async_request_refresh())
-        return True
-
-    async def async_deny_replacement(
-        self, entity_id: str, timestamp: float
-    ) -> bool:
-        """Deny a suspected replacement timestamp."""
-        if not self.store.deny_replacement(entity_id, timestamp):
-            return False
-        return True
-
-    async def async_restore_denied_replacement(
-        self, entity_id: str, timestamp: float
-    ) -> bool:
-        """Restore a previously denied replacement."""
-        if not self.store.restore_denied_replacement(entity_id, timestamp):
             return False
 
         self.hass.async_create_task(self.async_request_refresh())

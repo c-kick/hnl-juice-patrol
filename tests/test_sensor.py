@@ -29,7 +29,6 @@ def _make_device_info(
         battery_type="CR2032",
         battery_type_source="battery_notes library",
         is_rechargeable=False,
-        replacement_pending=False,
         is_low=False,
         is_stale=False,
         threshold=20,
@@ -183,7 +182,6 @@ class TestBatteryLevel:
         assert attrs["battery_type"] == "CR2032"
         assert attrs["battery_type_source"] == "battery_notes library"
         assert attrs["is_rechargeable"] is False
-        assert attrs["replacement_pending"] is False
 
     def test_unique_id(self, mock_coordinator) -> None:
         """Unique ID follows the DOMAIN_source_suffix pattern."""

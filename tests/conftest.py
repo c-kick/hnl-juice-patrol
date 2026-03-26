@@ -41,7 +41,6 @@ def mock_coordinator():
     coordinator.async_shutdown = AsyncMock()
     coordinator.low_threshold = 20
     coordinator.stale_timeout_hours = 48
-    coordinator.prediction_horizon_days = 7
     coordinator.config_entry = MagicMock()
     coordinator.last_update_success = True
     coordinator.async_add_listener = MagicMock(return_value=lambda: None)
