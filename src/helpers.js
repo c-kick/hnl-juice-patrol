@@ -97,28 +97,6 @@ export function formatDate(isoString, includeTime = false) {
   }
 }
 
-export function erraticTooltip(dev) {
-  const parts = [];
-  const display = displayLevel(dev.level);
-  const mean = displayLevel(dev.meanLevel);
-
-  if (mean !== null && display !== null && display > mean + 3 && !dev.isRechargeable) {
-    parts.push(
-      `Level is rising (${display}%) without a charge state — not expected for a non-rechargeable battery`
-    );
-  } else if (mean !== null && display !== null && Math.abs(display - mean) > 5) {
-    parts.push(
-      `Current level (${display}%) differs significantly from 7-day average (${mean}%)`
-    );
-  }
-
-  if (parts.length === 0) {
-    parts.push("Battery readings show non-monotonic or inconsistent behavior");
-  }
-
-  return parts.join(". ");
-}
-
 export function getDeviceSubText(dev) {
   const parts = [];
   const nameLC = (dev.name || "").toLowerCase();

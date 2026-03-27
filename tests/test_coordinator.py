@@ -280,6 +280,14 @@ class TestSiblingBatteryStateDiscovery:
         sibling_entry = MagicMock()
         sibling_entry.entity_id = "sensor.ipad_battery_state"
 
+        # The sibling must have a state value that looks like a charging state
+        # (coordinator now uses state-value detection, not entity_id substring)
+        sibling_state = MagicMock()
+        sibling_state.state = "Charging"
+        mock_hass.states.get = lambda eid: (
+            sibling_state if eid == "sensor.ipad_battery_state" else None
+        )
+
         mock_ent_reg = MagicMock()
 
         def _entries_for_device(reg, device_id):

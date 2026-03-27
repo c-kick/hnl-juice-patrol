@@ -18,6 +18,11 @@ DEFAULT_SCAN_INTERVAL = 3600  # seconds (1 hour)
 EVENT_BATTERY_LOW = f"{DOMAIN}_battery_low"
 EVENT_DEVICE_STALE = f"{DOMAIN}_device_stale"
 
+# Known battery charging state values (normalised: lowercase, underscores).
+BATTERY_STATE_VALUES = frozenset(
+    {"charging", "not_charging", "full", "discharging"}
+)
+
 # Storage
 STORE_KEY = f"{DOMAIN}.metadata"
 STORE_VERSION = 2  # Major version for HA Store class (do not bump without migration func)

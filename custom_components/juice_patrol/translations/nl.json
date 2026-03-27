@@ -57,6 +57,9 @@
     "not_loaded": {
       "message": "Juice Patrol is niet ingesteld of niet geladen."
     },
+    "module_not_loaded": {
+      "message": "De module die vereist is voor deze service kon niet worden geladen. Controleer de logboeken voor meer informatie."
+    },
     "entity_not_monitored": {
       "message": "{entity_id} is geen bewaakt batterij-entiteit."
     },

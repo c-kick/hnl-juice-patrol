@@ -75,7 +75,7 @@ function renderHeroCard(panel, dev) {
         </div>
         <div class="hero-stat">
           <div class="hero-stat-label">Status</div>
-          <div class="hero-stat-val">${dev.isStale ? "Stale" : dev.isLow ? "Low" : dev.isRechargeable && dev.chargingState === "charging" ? "Charging" : "OK"}</div>
+          <div class="hero-stat-val">${dev.isStale ? "Stale" : dev.isLow ? "Low" : dev.isRechargeable && dev.chargingState ? dev.chargingState === "charging" ? "Charging" : dev.chargingState === "discharging" || dev.chargingState === "not_charging" ? "Discharging" : dev.chargingState === "full" ? "Full" : "OK" : "OK"}</div>
         </div>
         <div class="hero-stat">
           <div class="hero-stat-label">Rechargeable</div>

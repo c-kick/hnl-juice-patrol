@@ -31,7 +31,6 @@ class JuicePatrolPanel extends LitElement {
       _refreshing: { state: true },
       _ignoredEntities: { state: true },
       _filters: { state: true },
-      _dashboardData: { state: true },
       _dashboardLoading: { state: true },
     };
   }
@@ -54,7 +53,6 @@ class JuicePatrolPanel extends LitElement {
     this._flashGeneration = 0;
     this._ignoredEntities = null;
     this._filters = { status: { value: ["active", "low"] } };
-    this._dashboardData = null;
     this._dashboardLoading = false;
     this._sorting = { column: "level", direction: "asc" };
     this._flashCleanupTimer = null;
@@ -121,7 +119,6 @@ class JuicePatrolPanel extends LitElement {
         }
         if (this._activeView === "dashboard") {
           if (!this._shoppingData) this._loadShoppingList();
-          this._loadDashboardData();
         }
       }
     };
@@ -183,7 +180,6 @@ class JuicePatrolPanel extends LitElement {
       if (this._activeView !== "dashboard") {
         this._activeView = "dashboard";
         if (!this._shoppingData) this._loadShoppingList();
-        this._loadDashboardData();
       }
       this._entities = this._entityList;
       return;
@@ -590,10 +586,7 @@ class JuicePatrolPanel extends LitElement {
       if (this._activeView === "shopping") {
         setTimeout(() => this._loadShoppingList(), 500);
       } else if (this._activeView === "dashboard") {
-        setTimeout(() => {
-          this._loadShoppingList();
-          this._loadDashboardData();
-        }, 500);
+        setTimeout(() => this._loadShoppingList(), 500);
       }
     } catch (e) {
       this._showToast("Refresh failed");
@@ -669,29 +662,6 @@ class JuicePatrolPanel extends LitElement {
     this._shoppingLoading = false;
   }
 
-  async _loadDashboardData() {
-    if (!this._hass) return;
-    this._dashboardLoading = true;
-    try {
-      this._dashboardData = await this._hass.callWS({
-        type: "juice_patrol/get_dashboard_data",
-      });
-    } catch (e) {
-      if (!this._dashboardRetried) {
-        this._dashboardRetried = true;
-        this._dashboardLoading = false;
-        setTimeout(() => {
-          this._dashboardRetried = false;
-          this._loadDashboardData();
-        }, 1000);
-        return;
-      }
-      this._dashboardRetried = false;
-      console.error("Juice Patrol: failed to load dashboard data", e);
-      this._dashboardData = null;
-    }
-    this._dashboardLoading = false;
-  }
 
   async _saveBatteryType(entityId, type) {
     try {
@@ -817,8 +787,6 @@ class JuicePatrolPanel extends LitElement {
     const dev = this._getDevice(entityId);
     if (action === "detail") {
       this._openDetail(entityId);
-    } else if (action === "confirm") {
-      this._confirmReplacement(entityId);
     } else if (action === "replace") {
       this._markReplaced(entityId);
     } else if (action === "type") {

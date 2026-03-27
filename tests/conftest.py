@@ -46,8 +46,6 @@ def mock_coordinator():
 
     # Module registry mock
     mock_registry = MagicMock()
-    mock_registry.collect_ws_handlers.return_value = []
-    mock_registry.collect_services.return_value = []
     mock_registry.get_all_diagnostics.return_value = {}
     mock_registry.get_module.return_value = None
     coordinator.registry = mock_registry
@@ -85,8 +83,6 @@ def mock_coordinator_setup():
 
         # Module registry mock
         mock_registry = MagicMock()
-        mock_registry.collect_ws_handlers.return_value = []
-        mock_registry.collect_services.return_value = []
         mock_registry.get_all_diagnostics.return_value = {}
         mock_registry.get_module.return_value = None
         instance.registry = mock_registry

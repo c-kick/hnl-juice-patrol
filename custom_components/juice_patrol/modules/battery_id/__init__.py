@@ -8,18 +8,19 @@ for manual battery-type and rechargeable overrides.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
 
-from homeassistant.components import websocket_api
-from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
-from homeassistant.helpers import config_validation as cv, entity_registry as er
+from homeassistant.helpers import config_validation as cv
 
-from ...const import DOMAIN
+from ...const import BATTERY_STATE_VALUES
 from ...data.battery_types import BatteryTypeResolver
 from ...discovery import DiscoveredBattery
-from .. import JuicePatrolModule
+from .. import JuicePatrolModule, WsCommandDefinition
+
+if TYPE_CHECKING:
+    from ...data.store import DeviceData
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,18 +36,45 @@ class BatteryIdModule(JuicePatrolModule):
         self.type_resolver = BatteryTypeResolver(self.hass)
 
     async def async_setup(self) -> None:
-        self.hass.async_create_task(self.type_resolver.async_load_library())
+        await self.type_resolver.async_load_library()
+
+    @classmethod
+    def ws_command_definitions(cls) -> list[WsCommandDefinition]:
+        return [
+            WsCommandDefinition(
+                command_type="juice_patrol/set_battery_type",
+                schema={
+                    vol.Required("entity_id"): cv.entity_id,
+                    vol.Optional("battery_type"): vol.Any(str, None),
+                },
+                handler_method="handle_ws_set_battery_type",
+            ),
+            WsCommandDefinition(
+                command_type="juice_patrol/set_rechargeable",
+                schema={
+                    vol.Required("entity_id"): cv.entity_id,
+                    vol.Optional("is_rechargeable"): vol.Any(bool, None),
+                },
+                handler_method="handle_ws_set_rechargeable",
+            ),
+            WsCommandDefinition(
+                command_type="juice_patrol/detect_battery_type",
+                schema={
+                    vol.Required("entity_id"): cv.entity_id,
+                },
+                handler_method="handle_ws_detect_battery_type",
+            ),
+        ]
 
     def get_entity_data(
         self,
         entity_id: str,
         battery: DiscoveredBattery,
         base_data: dict[str, Any],
+        device_data: DeviceData | None,
     ) -> dict[str, Any]:
-        dev = self.coordinator.store.get_device(entity_id)
-
         # Resolve battery type
-        manual_type = dev.battery_type if dev else None
+        manual_type = device_data.battery_type if device_data else None
         if manual_type:
             battery_type = manual_type
             battery_type_source = "manual"
@@ -55,21 +83,26 @@ class BatteryIdModule(JuicePatrolModule):
                 entity_id, battery.device_id
             )
 
-        # Determine rechargeable flag
-        is_rechargeable = False
-        if dev and dev.is_rechargeable is not None:
-            is_rechargeable = dev.is_rechargeable
-        else:
-            battery_state = self._get_battery_state(entity_id, battery.device_id)
-            if battery_state:
-                normalized = battery_state.lower().replace(" ", "_")
-                if normalized in ("charging", "not_charging", "full", "discharging"):
-                    is_rechargeable = True
-            if not is_rechargeable and self.coordinator.data is not None:
-                prev_data = self.coordinator.data.get(entity_id, {})
-                is_rechargeable = prev_data.get("is_rechargeable", False)
+        # Get charging state once (used for both rechargeable inference and output)
+        # Normalise to lowercase+underscores so the panel can match known values.
+        charging_state_raw = self._get_battery_state(entity_id)
+        charging_state = (
+            charging_state_raw.lower().replace(" ", "_")
+            if charging_state_raw
+            else None
+        )
 
-        charging_state = self._get_battery_state(entity_id, battery.device_id)
+        # Determine rechargeable flag
+        if device_data and device_data.is_rechargeable is not None:
+            is_rechargeable = device_data.is_rechargeable
+        elif charging_state:
+            is_rechargeable = charging_state in BATTERY_STATE_VALUES
+        elif self.coordinator.data is not None:
+            is_rechargeable = (
+                self.coordinator.data.get(entity_id, {}).get("is_rechargeable", False)
+            )
+        else:
+            is_rechargeable = False
 
         return {
             "battery_type": battery_type,
@@ -78,10 +111,9 @@ class BatteryIdModule(JuicePatrolModule):
             "charging_state": charging_state,
         }
 
-    def _get_battery_state(
-        self, entity_id: str, device_id: str | None
-    ) -> str | None:
-        """Find battery charging state from attributes or sibling entities."""
+    def _get_battery_state(self, entity_id: str) -> str | None:
+        """Find battery charging state from attributes or coordinator's sibling map."""
+        # Check entity attributes first
         state = self.hass.states.get(entity_id)
         if state:
             for attr in ("battery_state", "charging"):
@@ -89,18 +121,8 @@ class BatteryIdModule(JuicePatrolModule):
                 if val:
                     return str(val)
 
-        if device_id:
-            ent_reg = er.async_get(self.hass)
-            for entry in er.async_entries_for_device(ent_reg, device_id):
-                if "battery_state" not in entry.entity_id:
-                    continue
-                sibling_state = self.hass.states.get(entry.entity_id)
-                if sibling_state and sibling_state.state not in (
-                    STATE_UNAVAILABLE, STATE_UNKNOWN, None
-                ):
-                    return sibling_state.state
-
-        return None
+        # Use coordinator's pre-computed sibling map (O(1) lookup)
+        return self.coordinator.get_sibling_battery_state(entity_id)
 
     def detect_battery_type(
         self, entity_id: str
@@ -111,68 +133,42 @@ class BatteryIdModule(JuicePatrolModule):
             raise KeyError(entity_id)
         return self.type_resolver.resolve_uncached(entity_id, battery.device_id)
 
-    def ws_handlers(self) -> list:
-        coordinator = self.coordinator
+    # -- WS handler methods (called via static registration wrappers) --
 
-        @websocket_api.websocket_command(
-            {
-                vol.Required("type"): "juice_patrol/set_battery_type",
-                vol.Required("entity_id"): cv.entity_id,
-                vol.Optional("battery_type"): vol.Any(str, None),
-            }
-        )
-        @websocket_api.async_response
-        async def ws_set_battery_type(hass, connection, msg):
-            entity_id = msg["entity_id"]
-            battery_type = msg.get("battery_type")
-            if coordinator.store.set_battery_type(entity_id, battery_type):
-                self.type_resolver.invalidate_cache(entity_id)
-                await coordinator.async_request_refresh()
-                connection.send_result(msg["id"], {"ok": True})
-            else:
-                connection.send_error(
-                    msg["id"], "not_found", f"Entity {entity_id} not in store"
-                )
+    async def handle_ws_set_battery_type(self, hass, connection, msg):
+        entity_id = msg["entity_id"]
+        battery_type = msg.get("battery_type")
+        if self.coordinator.store.set_battery_type(entity_id, battery_type):
+            self.type_resolver.invalidate_cache(entity_id)
+            await self.coordinator.async_request_refresh()
+            connection.send_result(msg["id"], {"ok": True})
+        else:
+            connection.send_error(
+                msg["id"], "not_found", f"Entity {entity_id} not in store"
+            )
 
-        @websocket_api.websocket_command(
-            {
-                vol.Required("type"): "juice_patrol/set_rechargeable",
-                vol.Required("entity_id"): cv.entity_id,
-                vol.Optional("is_rechargeable"): vol.Any(bool, None),
-            }
-        )
-        @websocket_api.async_response
-        async def ws_set_rechargeable(hass, connection, msg):
-            entity_id = msg["entity_id"]
-            value = msg.get("is_rechargeable")
-            if coordinator.store.set_rechargeable(entity_id, value):
-                await coordinator.async_request_refresh()
-                connection.send_result(msg["id"], {"ok": True})
-            else:
-                connection.send_error(
-                    msg["id"], "not_found", f"Entity {entity_id} not in store"
-                )
+    async def handle_ws_set_rechargeable(self, hass, connection, msg):
+        entity_id = msg["entity_id"]
+        value = msg.get("is_rechargeable")
+        if self.coordinator.store.set_rechargeable(entity_id, value):
+            await self.coordinator.async_request_refresh()
+            connection.send_result(msg["id"], {"ok": True})
+        else:
+            connection.send_error(
+                msg["id"], "not_found", f"Entity {entity_id} not in store"
+            )
 
-        @websocket_api.websocket_command(
-            {
-                vol.Required("type"): "juice_patrol/detect_battery_type",
-                vol.Required("entity_id"): cv.entity_id,
-            }
-        )
-        @websocket_api.async_response
-        async def ws_detect_battery_type(hass, connection, msg):
-            entity_id = msg["entity_id"]
-            try:
-                battery_type, source = self.detect_battery_type(entity_id)
-            except KeyError:
-                connection.send_error(
-                    msg["id"], "not_found",
-                    f"Entity {entity_id} not discovered",
-                )
-                return
-            connection.send_result(msg["id"], {
-                "battery_type": battery_type,
-                "source": source,
-            })
-
-        return [ws_set_battery_type, ws_set_rechargeable, ws_detect_battery_type]
+    async def handle_ws_detect_battery_type(self, hass, connection, msg):
+        entity_id = msg["entity_id"]
+        try:
+            battery_type, source = self.detect_battery_type(entity_id)
+        except KeyError:
+            connection.send_error(
+                msg["id"], "not_found",
+                f"Entity {entity_id} not discovered",
+            )
+            return
+        connection.send_result(msg["id"], {
+            "battery_type": battery_type,
+            "source": source,
+        })

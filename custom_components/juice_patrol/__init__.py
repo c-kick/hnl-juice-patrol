@@ -8,7 +8,8 @@ import voluptuous as vol
 
 from homeassistant.components import websocket_api
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import (
     config_validation as cv,
     device_registry as dr,
@@ -21,6 +22,7 @@ from .const import (
     PLATFORMS,
 )
 from .data import JuicePatrolCoordinator
+from .modules import MODULES, WsCommandDefinition, ServiceDefinition
 from .panel import async_setup_panel
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -30,12 +32,28 @@ _LOGGER = logging.getLogger(__name__)
 type JuicePatrolConfigEntry = ConfigEntry[JuicePatrolCoordinator]
 
 
+# ---------------------------------------------------------------------------
+# Coordinator lookup helpers
+# ---------------------------------------------------------------------------
+
+
 def _get_coordinator(hass: HomeAssistant) -> JuicePatrolCoordinator | None:
     """Get the single coordinator instance, or None if not loaded."""
     for entry in hass.config_entries.async_entries(DOMAIN):
         if entry.state is ConfigEntryState.LOADED:
             return entry.runtime_data
     return None
+
+
+def _require_coordinator(hass: HomeAssistant) -> JuicePatrolCoordinator:
+    """Get the coordinator, raising ServiceValidationError if unavailable."""
+    coordinator = _get_coordinator(hass)
+    if coordinator is None:
+        raise ServiceValidationError(
+            translation_domain=DOMAIN,
+            translation_key="not_loaded",
+        )
+    return coordinator
 
 
 def _ws_get_coordinator(
@@ -48,8 +66,56 @@ def _ws_get_coordinator(
     return coordinator
 
 
+# ---------------------------------------------------------------------------
+# Static registration factories
+# ---------------------------------------------------------------------------
+
+
+def _make_ws_handler(module_id: str, defn: WsCommandDefinition):
+    """Create a static WS handler that looks up coordinator/module at call time."""
+    full_schema = {vol.Required("type"): defn.command_type, **defn.schema}
+
+    @websocket_api.websocket_command(full_schema)
+    @websocket_api.async_response
+    async def ws_handler(hass, connection, msg):
+        coordinator = _ws_get_coordinator(hass, connection, msg["id"])
+        if not coordinator:
+            return
+        module = coordinator.registry.get_module(module_id)
+        if module is None:
+            connection.send_error(
+                msg["id"], "not_loaded", f"Module {module_id} not available"
+            )
+            return
+        await getattr(module, defn.handler_method)(hass, connection, msg)
+
+    return ws_handler
+
+
+def _make_service_handler(module_id: str, svc_defn: ServiceDefinition):
+    """Create a static service handler that looks up coordinator/module at call time."""
+
+    async def service_handler(call: ServiceCall) -> None:
+        coordinator = _require_coordinator(call.hass)
+        module = coordinator.registry.get_module(module_id)
+        if module is None:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="module_not_loaded",
+                translation_placeholders={"module": module_id},
+            )
+        await getattr(module, svc_defn.handler_method)(call)
+
+    return service_handler
+
+
+# ---------------------------------------------------------------------------
+# Setup
+# ---------------------------------------------------------------------------
+
+
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Set up Juice Patrol — register panel and core WS handlers."""
+    """Set up Juice Patrol — register panel, WS handlers, and services."""
     await async_setup_panel(hass)
 
     # Core WS handlers (not owned by any module)
@@ -57,8 +123,36 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ws_refresh,
         ws_set_ignored,
         ws_get_ignored,
+        ws_get_capabilities,
     ):
         websocket_api.async_register_command(hass, ws_handler)
+
+    # Validate handler methods exist on module classes (catches typos at startup)
+    for module_cls in MODULES:
+        for defn in module_cls.ws_command_definitions():
+            if not callable(getattr(module_cls, defn.handler_method, None)):
+                raise ValueError(
+                    f"Module {module_cls.MODULE_ID}: no method '{defn.handler_method}'"
+                )
+        for svc_defn in module_cls.service_definitions():
+            if not callable(getattr(module_cls, svc_defn.handler_method, None)):
+                raise ValueError(
+                    f"Module {module_cls.MODULE_ID}: no method '{svc_defn.handler_method}'"
+                )
+
+    # Module WS handlers — registered statically, look up coordinator at call time
+    for module_cls in MODULES:
+        for defn in module_cls.ws_command_definitions():
+            handler = _make_ws_handler(module_cls.MODULE_ID, defn)
+            websocket_api.async_register_command(hass, handler)
+
+    # Module services — registered statically, look up coordinator at call time
+    for module_cls in MODULES:
+        for svc_defn in module_cls.service_definitions():
+            handler = _make_service_handler(module_cls.MODULE_ID, svc_defn)
+            hass.services.async_register(
+                DOMAIN, svc_defn.name, handler, schema=svc_defn.schema
+            )
 
     return True
 
@@ -76,15 +170,6 @@ async def async_setup_entry(
         raise
 
     entry.runtime_data = coordinator
-
-    # Register module WS handlers and services
-    for ws_handler in coordinator.registry.collect_ws_handlers():
-        websocket_api.async_register_command(hass, ws_handler)
-
-    for svc_def in coordinator.registry.collect_services():
-        hass.services.async_register(
-            DOMAIN, svc_def.name, svc_def.handler, schema=svc_def.schema
-        )
 
     # Clean up entity registry entries from removed prediction engine sensors.
     _REMOVED_SUFFIXES = ("_discharge_rate", "_days_remaining", "_predicted_empty")
@@ -192,6 +277,20 @@ async def ws_get_ignored(hass, connection, msg):
             "level": level,
         })
     connection.send_result(msg["id"], {"devices": devices})
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): "juice_patrol/get_capabilities"}
+)
+@websocket_api.async_response
+async def ws_get_capabilities(hass, connection, msg):
+    """Return the list of successfully loaded module IDs."""
+    coordinator = _get_coordinator(hass)
+    if coordinator is None:
+        connection.send_result(msg["id"], {"modules": []})
+        return
+    modules = [m.MODULE_ID for m in coordinator.registry.modules_in_order]
+    connection.send_result(msg["id"], {"modules": modules})
 
 
 async def async_remove_config_entry_device(

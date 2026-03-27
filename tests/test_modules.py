@@ -8,6 +8,8 @@ from custom_components.juice_patrol.modules import (
     JuicePatrolModule,
     ModuleRegistry,
     ServiceDefinition,
+    WsCommandDefinition,
+    MODULES,
 )
 
 
@@ -21,7 +23,7 @@ class _GoodModule(JuicePatrolModule):
     async def async_setup(self):
         pass
 
-    def get_entity_data(self, entity_id, battery, base_data):
+    def get_entity_data(self, entity_id, battery, base_data, device_data):
         return {"from_good": True}
 
 
@@ -48,11 +50,37 @@ class _ModuleWithHandlers(JuicePatrolModule):
     async def async_setup(self):
         pass
 
-    def ws_handlers(self):
-        return ["ws_handler_1"]
+    @classmethod
+    def ws_command_definitions(cls):
+        return [
+            WsCommandDefinition(
+                command_type="test/command",
+                schema={},
+                handler_method="handle_ws_test",
+            )
+        ]
 
-    def services(self):
-        return [ServiceDefinition("test_svc", lambda: None)]
+    @classmethod
+    def service_definitions(cls):
+        return [ServiceDefinition("test_svc", "handle_svc_test")]
+
+    async def handle_ws_test(self, hass, connection, msg):
+        pass
+
+    async def handle_svc_test(self, call):
+        pass
+
+
+# ── Explicit module list ────────────────────────────────────────────────
+
+
+class TestExplicitModuleList:
+
+    def test_modules_list_contains_all_expected(self):
+        module_ids = {cls.MODULE_ID for cls in MODULES}
+        assert module_ids == {
+            "battery_id", "monitoring", "replacement", "shopping"
+        }
 
 
 # ── Dependency resolution ────────────────────────────────────────────────
@@ -87,9 +115,9 @@ class TestSetupTeardown:
         coordinator.hass = MagicMock()
         registry = ModuleRegistry(coordinator)
 
-        with patch.object(
-            ModuleRegistry, "_discover_module_classes",
-            return_value={"good": _GoodModule},
+        with patch(
+            "custom_components.juice_patrol.modules.MODULES",
+            [_GoodModule],
         ):
             await registry.async_setup_all()
 
@@ -101,12 +129,9 @@ class TestSetupTeardown:
         coordinator.hass = MagicMock()
         registry = ModuleRegistry(coordinator)
 
-        with patch.object(
-            ModuleRegistry, "_discover_module_classes",
-            return_value={
-                "good": _GoodModule,
-                "failing": _FailingModule,
-            },
+        with patch(
+            "custom_components.juice_patrol.modules.MODULES",
+            [_GoodModule, _FailingModule],
         ):
             await registry.async_setup_all()
 
@@ -136,9 +161,9 @@ class TestSetupTeardown:
             async def async_teardown(self):
                 teardown_order.append("b")
 
-        with patch.object(
-            ModuleRegistry, "_discover_module_classes",
-            return_value={"a": _A, "b": _B},
+        with patch(
+            "custom_components.juice_patrol.modules.MODULES",
+            [_A, _B],
         ):
             await registry.async_setup_all()
             await registry.async_teardown_all()
@@ -146,41 +171,26 @@ class TestSetupTeardown:
         assert teardown_order == ["b", "a"]
 
 
-# ── Collection methods ───────────────────────────────────────────────────
+# ── WS/service definitions (class-level) ─────────────────────────────────
 
 
-class TestCollectMethods:
+class TestDefinitions:
 
-    @pytest.mark.asyncio
-    async def test_collect_ws_handlers(self):
-        coordinator = MagicMock()
-        coordinator.hass = MagicMock()
-        registry = ModuleRegistry(coordinator)
+    def test_ws_command_definitions_classmethod(self):
+        defns = _ModuleWithHandlers.ws_command_definitions()
+        assert len(defns) == 1
+        assert defns[0].command_type == "test/command"
+        assert defns[0].handler_method == "handle_ws_test"
 
-        with patch.object(
-            ModuleRegistry, "_discover_module_classes",
-            return_value={"with_handlers": _ModuleWithHandlers},
-        ):
-            await registry.async_setup_all()
+    def test_service_definitions_classmethod(self):
+        defns = _ModuleWithHandlers.service_definitions()
+        assert len(defns) == 1
+        assert defns[0].name == "test_svc"
+        assert defns[0].handler_method == "handle_svc_test"
 
-        handlers = registry.collect_ws_handlers()
-        assert "ws_handler_1" in handlers
-
-    @pytest.mark.asyncio
-    async def test_collect_services(self):
-        coordinator = MagicMock()
-        coordinator.hass = MagicMock()
-        registry = ModuleRegistry(coordinator)
-
-        with patch.object(
-            ModuleRegistry, "_discover_module_classes",
-            return_value={"with_handlers": _ModuleWithHandlers},
-        ):
-            await registry.async_setup_all()
-
-        services = registry.collect_services()
-        assert len(services) == 1
-        assert services[0].name == "test_svc"
+    def test_base_module_returns_empty_definitions(self):
+        assert _GoodModule.ws_command_definitions() == []
+        assert _GoodModule.service_definitions() == []
 
 
 # ── Entity data enrichment ───────────────────────────────────────────────
@@ -194,15 +204,17 @@ class TestEnrichEntityData:
         coordinator.hass = MagicMock()
         registry = ModuleRegistry(coordinator)
 
-        with patch.object(
-            ModuleRegistry, "_discover_module_classes",
-            return_value={"good": _GoodModule},
+        with patch(
+            "custom_components.juice_patrol.modules.MODULES",
+            [_GoodModule],
         ):
             await registry.async_setup_all()
 
         battery = MagicMock()
         base_data = {"level": 50}
-        result = registry.enrich_entity_data("sensor.test", battery, base_data)
+        result = registry.enrich_entity_data(
+            "sensor.test", battery, base_data, None
+        )
 
         assert result["level"] == 50
         assert result["from_good"] is True
@@ -217,18 +229,127 @@ class TestEnrichEntityData:
             MODULE_ID = "crasher"
             DEPENDENCIES = ()
             async def async_setup(self): pass
-            def get_entity_data(self, entity_id, battery, base_data):
+            def get_entity_data(self, entity_id, battery, base_data, device_data):
                 raise RuntimeError("boom")
 
-        with patch.object(
-            ModuleRegistry, "_discover_module_classes",
-            return_value={"crasher": _Crasher},
+        with patch(
+            "custom_components.juice_patrol.modules.MODULES",
+            [_Crasher],
         ):
             await registry.async_setup_all()
 
         battery = MagicMock()
         base_data = {"level": 50}
-        result = registry.enrich_entity_data("sensor.test", battery, base_data)
+        result = registry.enrich_entity_data(
+            "sensor.test", battery, base_data, None
+        )
 
         # Should still return base_data despite module crash
         assert result["level"] == 50
+
+    @pytest.mark.asyncio
+    async def test_key_collision_logged(self, caplog):
+        """Overlapping keys from modules produce a debug log."""
+        coordinator = MagicMock()
+        coordinator.hass = MagicMock()
+        registry = ModuleRegistry(coordinator)
+
+        class _OverWriter(JuicePatrolModule):
+            MODULE_ID = "overwriter"
+            DEPENDENCIES = ()
+            async def async_setup(self): pass
+            def get_entity_data(self, entity_id, battery, base_data, device_data):
+                return {"level": 99}
+
+        with patch(
+            "custom_components.juice_patrol.modules.MODULES",
+            [_OverWriter],
+        ):
+            await registry.async_setup_all()
+
+        import logging
+        with caplog.at_level(logging.DEBUG):
+            result = registry.enrich_entity_data(
+                "sensor.test", MagicMock(), {"level": 50}, None
+            )
+
+        assert result["level"] == 99
+        assert "overwrites keys" in caplog.text
+
+
+# ── Coordinator callback hooks ───────────────────────────────────────────
+
+
+class TestCoordinatorHooks:
+
+    def test_async_on_entity_updated(self):
+        """Coordinator callback hook fires and can be unsubscribed."""
+        from custom_components.juice_patrol.data.coordinator import (
+            JuicePatrolCoordinator,
+        )
+        from unittest.mock import patch as _patch
+
+        hass = MagicMock()
+        hass.async_create_task = MagicMock(
+            side_effect=lambda coro, *a, **kw: (
+                coro.close() if hasattr(coro, "close") else None,
+                MagicMock(),
+            )[-1]
+        )
+        entry = MagicMock()
+        entry.options = {}
+        entry.entry_id = "test"
+
+        with _patch(
+            "custom_components.juice_patrol.data.coordinator.JuicePatrolStore"
+        ):
+            coord = JuicePatrolCoordinator(hass, entry)
+
+        calls = []
+        unsub = coord.async_on_entity_updated(
+            lambda eid, data: calls.append((eid, data))
+        )
+
+        # Simulate callback
+        for cb in coord._on_entity_updated:
+            cb("sensor.test", {"level": 42})
+
+        assert len(calls) == 1
+        assert calls[0] == ("sensor.test", {"level": 42})
+
+        unsub()
+        assert len(coord._on_entity_updated) == 0
+
+    def test_async_on_full_update(self):
+        """Coordinator full-update callback hook fires and can be unsubscribed."""
+        from custom_components.juice_patrol.data.coordinator import (
+            JuicePatrolCoordinator,
+        )
+        from unittest.mock import patch as _patch
+
+        hass = MagicMock()
+        hass.async_create_task = MagicMock(
+            side_effect=lambda coro, *a, **kw: (
+                coro.close() if hasattr(coro, "close") else None,
+                MagicMock(),
+            )[-1]
+        )
+        entry = MagicMock()
+        entry.options = {}
+        entry.entry_id = "test"
+
+        with _patch(
+            "custom_components.juice_patrol.data.coordinator.JuicePatrolStore"
+        ):
+            coord = JuicePatrolCoordinator(hass, entry)
+
+        calls = []
+        unsub = coord.async_on_full_update(lambda data: calls.append(data))
+
+        for cb in coord._on_full_update:
+            cb({"sensor.a": {}})
+
+        assert len(calls) == 1
+
+        unsub()
+        assert len(coord._on_full_update) == 0

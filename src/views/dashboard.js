@@ -1,6 +1,5 @@
 import { html, nothing } from "lit";
 import { getLevelColor, getDeviceSubText, displayLevel } from "../helpers.js";
-import { resolveColor } from "../chart-utils.js";
 import {
   COLOR_PRIMARY, COLOR_RECHARGEABLE, COLOR_SUCCESS, COLOR_WARNING, COLOR_ERROR,
   COLOR_DISABLED, COLOR_SECONDARY_TEXT, COLOR_PRIMARY_TEXT, COLOR_CARD_BG,

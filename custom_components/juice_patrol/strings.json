@@ -57,6 +57,9 @@
     "not_loaded": {
       "message": "Juice Patrol is not set up or not loaded."
     },
+    "module_not_loaded": {
+      "message": "The module required by this service failed to load. Check the logs for details."
+    },
     "entity_not_monitored": {
       "message": "{entity_id} is not a monitored battery entity."
     },

@@ -8,14 +8,13 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
 
-from homeassistant.components import websocket_api
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import callback
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 
 from ...const import (
@@ -28,7 +27,12 @@ from ...const import (
     EVENT_DEVICE_STALE,
 )
 from ...discovery import DiscoveredBattery
-from .. import JuicePatrolModule, ServiceDefinition
+from .. import JuicePatrolModule, ServiceDefinition, WsCommandDefinition
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from ...data.store import DeviceData
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -44,20 +48,74 @@ class MonitoringModule(JuicePatrolModule):
         self._fired_low: set[str] = set()
         self._fired_stale: set[str] = set()
         self._first_build = True
+        self._unsub_entity: Callable[[], None] | None = None
+        self._unsub_full: Callable[[], None] | None = None
 
     async def async_setup(self) -> None:
-        pass
+        self._unsub_entity = self.coordinator.async_on_entity_updated(
+            self.fire_events_for_entity
+        )
+        self._unsub_full = self.coordinator.async_on_full_update(
+            self.fire_events
+        )
+
+    async def async_teardown(self) -> None:
+        if self._unsub_entity:
+            self._unsub_entity()
+        if self._unsub_full:
+            self._unsub_full()
+
+    @classmethod
+    def ws_command_definitions(cls) -> list[WsCommandDefinition]:
+        return [
+            WsCommandDefinition(
+                command_type="juice_patrol/get_settings",
+                schema={},
+                handler_method="handle_ws_get_settings",
+            ),
+            WsCommandDefinition(
+                command_type="juice_patrol/update_settings",
+                schema={
+                    vol.Optional(CONF_LOW_THRESHOLD): vol.All(
+                        int, vol.Range(min=1, max=99)
+                    ),
+                    vol.Optional(CONF_STALE_TIMEOUT): vol.All(
+                        int, vol.Range(min=1, max=720)
+                    ),
+                },
+                handler_method="handle_ws_update_settings",
+            ),
+        ]
+
+    @classmethod
+    def service_definitions(cls) -> list[ServiceDefinition]:
+        entity_schema = vol.Schema({vol.Required("entity_id"): cv.entity_id})
+        return [
+            ServiceDefinition("force_refresh", "handle_svc_force_refresh"),
+            ServiceDefinition(
+                "set_device_threshold",
+                "handle_svc_set_device_threshold",
+                vol.Schema({
+                    vol.Required("entity_id"): cv.entity_id,
+                    vol.Required("threshold"): vol.All(
+                        int, vol.Range(min=1, max=99)
+                    ),
+                }),
+            ),
+            ServiceDefinition("ignore_device", "handle_svc_ignore_device", entity_schema),
+            ServiceDefinition("unignore_device", "handle_svc_unignore_device", entity_schema),
+        ]
 
     def get_entity_data(
         self,
         entity_id: str,
         battery: DiscoveredBattery,
         base_data: dict[str, Any],
+        device_data: DeviceData | None,
     ) -> dict[str, Any]:
-        dev = self.coordinator.store.get_device(entity_id)
         threshold = (
-            dev.custom_threshold
-            if dev and dev.custom_threshold
+            device_data.custom_threshold
+            if device_data and device_data.custom_threshold
             else self.coordinator.low_threshold
         )
 
@@ -75,7 +133,7 @@ class MonitoringModule(JuicePatrolModule):
 
         return {
             "threshold": threshold,
-            "custom_threshold": dev.custom_threshold if dev else None,
+            "custom_threshold": device_data.custom_threshold if device_data else None,
             "is_low": is_low,
             "is_stale": is_stale,
         }
@@ -115,7 +173,7 @@ class MonitoringModule(JuicePatrolModule):
         if info.get("is_stale"):
             if entity_id not in self._fired_stale:
                 self._fired_stale.add(entity_id)
-                last_reading = info.get("last_reading_time")
+                last_reading = info.get("last_calculated")
                 hours_since = (
                     (time.time() - last_reading) / 3600
                     if last_reading
@@ -147,95 +205,57 @@ class MonitoringModule(JuicePatrolModule):
         self._fired_low.discard(entity_id)
         self._fired_stale.discard(entity_id)
 
-    def services(self) -> list[ServiceDefinition]:
-        coordinator = self.coordinator
+    # -- WS handler methods --
 
-        async def handle_force_refresh(call):
-            await coordinator.async_request_refresh()
-
-        async def handle_set_device_threshold(call):
-            entity_id = call.data["entity_id"]
-            threshold = call.data["threshold"]
-            if entity_id not in coordinator.discovered:
-                raise HomeAssistantError(
-                    translation_domain=DOMAIN,
-                    translation_key="entity_not_monitored",
-                    translation_placeholders={"entity_id": entity_id},
-                )
-            if not coordinator.store.set_device_threshold(entity_id, threshold):
-                raise HomeAssistantError(
-                    translation_domain=DOMAIN,
-                    translation_key="entity_not_in_store",
-                    translation_placeholders={"entity_id": entity_id},
-                )
-            await coordinator.async_request_refresh()
-
-        async def handle_ignore_device(call):
-            entity_id = call.data["entity_id"]
-            coordinator.store.set_ignored(entity_id, True)
-            await coordinator.async_request_refresh()
-
-        async def handle_unignore_device(call):
-            entity_id = call.data["entity_id"]
-            coordinator.store.set_ignored(entity_id, False)
-            await coordinator.async_request_refresh()
-
-        entity_schema = vol.Schema({vol.Required("entity_id"): cv.entity_id})
-
-        return [
-            ServiceDefinition("force_refresh", handle_force_refresh),
-            ServiceDefinition(
-                "set_device_threshold",
-                handle_set_device_threshold,
-                vol.Schema({
-                    vol.Required("entity_id"): cv.entity_id,
-                    vol.Required("threshold"): vol.All(
-                        int, vol.Range(min=1, max=99)
-                    ),
-                }),
+    async def handle_ws_get_settings(self, hass, connection, msg):
+        entry = self.coordinator.config_entry
+        connection.send_result(msg["id"], {
+            "entry_id": entry.entry_id,
+            CONF_LOW_THRESHOLD: entry.options.get(
+                CONF_LOW_THRESHOLD, DEFAULT_LOW_THRESHOLD
             ),
-            ServiceDefinition("ignore_device", handle_ignore_device, entity_schema),
-            ServiceDefinition("unignore_device", handle_unignore_device, entity_schema),
-        ]
+            CONF_STALE_TIMEOUT: entry.options.get(
+                CONF_STALE_TIMEOUT, DEFAULT_STALE_TIMEOUT
+            ),
+        })
 
-    def ws_handlers(self) -> list:
-        coordinator = self.coordinator
+    async def handle_ws_update_settings(self, hass, connection, msg):
+        entry = self.coordinator.config_entry
+        new_options = dict(entry.options)
+        for key in (CONF_LOW_THRESHOLD, CONF_STALE_TIMEOUT):
+            if key in msg:
+                new_options[key] = msg[key]
+        hass.config_entries.async_update_entry(entry, options=new_options)
+        connection.send_result(msg["id"], new_options)
 
-        @websocket_api.websocket_command(
-            {vol.Required("type"): "juice_patrol/get_settings"}
-        )
-        @websocket_api.async_response
-        async def ws_get_settings(hass, connection, msg):
-            entry = coordinator.config_entry
-            connection.send_result(msg["id"], {
-                "entry_id": entry.entry_id,
-                CONF_LOW_THRESHOLD: entry.options.get(
-                    CONF_LOW_THRESHOLD, DEFAULT_LOW_THRESHOLD
-                ),
-                CONF_STALE_TIMEOUT: entry.options.get(
-                    CONF_STALE_TIMEOUT, DEFAULT_STALE_TIMEOUT
-                ),
-            })
+    # -- Service handler methods --
 
-        @websocket_api.websocket_command(
-            {
-                vol.Required("type"): "juice_patrol/update_settings",
-                vol.Optional(CONF_LOW_THRESHOLD): vol.All(
-                    int, vol.Range(min=1, max=99)
-                ),
-                vol.Optional(CONF_STALE_TIMEOUT): vol.All(
-                    int, vol.Range(min=1, max=720)
-                ),
-            }
-        )
-        @websocket_api.async_response
-        async def ws_update_settings(hass, connection, msg):
-            entry = coordinator.config_entry
-            new_options = dict(entry.options)
-            for key in (CONF_LOW_THRESHOLD, CONF_STALE_TIMEOUT):
-                if key in msg:
-                    new_options[key] = msg[key]
-            hass.config_entries.async_update_entry(entry, options=new_options)
-            connection.send_result(msg["id"], new_options)
+    async def handle_svc_force_refresh(self, call):
+        await self.coordinator.async_request_refresh()
 
-        return [ws_get_settings, ws_update_settings]
+    async def handle_svc_set_device_threshold(self, call):
+        entity_id = call.data["entity_id"]
+        threshold = call.data["threshold"]
+        if entity_id not in self.coordinator.discovered:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="entity_not_monitored",
+                translation_placeholders={"entity_id": entity_id},
+            )
+        if not self.coordinator.store.set_device_threshold(entity_id, threshold):
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="entity_not_in_store",
+                translation_placeholders={"entity_id": entity_id},
+            )
+        await self.coordinator.async_request_refresh()
+
+    async def handle_svc_ignore_device(self, call):
+        entity_id = call.data["entity_id"]
+        self.coordinator.store.set_ignored(entity_id, True)
+        await self.coordinator.async_request_refresh()
+
+    async def handle_svc_unignore_device(self, call):
+        entity_id = call.data["entity_id"]
+        self.coordinator.store.set_ignored(entity_id, False)
+        await self.coordinator.async_request_refresh()

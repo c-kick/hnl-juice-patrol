@@ -31,8 +31,12 @@ async def test_async_setup_registers_core_ws_handlers(
         result = await async_setup(hass, {})
         assert result is True
 
-    # Core WS handlers: refresh, set_ignored, get_ignored
-    assert mock_register.call_count == 3
+    # 3 core WS handlers + 9 module WS handlers + 5 module services
+    # Core: refresh, set_ignored, get_ignored
+    # Module WS: set_battery_type, set_rechargeable, detect_battery_type,
+    #   get_settings, update_settings, mark_replaced, undo_replacement,
+    #   get_shopping_list, get_dashboard_data
+    assert mock_register.call_count == 12
 
 
 async def test_setup_and_unload_entry(
@@ -42,12 +46,6 @@ async def test_setup_and_unload_entry(
 ) -> None:
     """Test full setup and unload cycle."""
     mock_cls, mock_instance = mock_coordinator_setup
-
-    # Add registry mock to coordinator instance
-    mock_registry = MagicMock()
-    mock_registry.collect_ws_handlers.return_value = []
-    mock_registry.collect_services.return_value = []
-    mock_instance.registry = mock_registry
 
     entry = MockConfigEntry(
         domain=DOMAIN,

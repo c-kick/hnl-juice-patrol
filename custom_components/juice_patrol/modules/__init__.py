@@ -10,10 +10,9 @@ WebSocket handlers and services.
 
 from __future__ import annotations
 
-import importlib
 import logging
-import pkgutil
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
@@ -22,26 +21,29 @@ from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, ServiceCall
 
 if TYPE_CHECKING:
+    from ..data.store import DeviceData
     from ..data.coordinator import JuicePatrolCoordinator
     from ..discovery import DiscoveredBattery
 
 _LOGGER = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class WsCommandDefinition:
+    """Describes a WS command a module wants to register."""
+
+    command_type: str
+    schema: dict[vol.Marker, Any]
+    handler_method: str
+
+
+@dataclass(frozen=True)
 class ServiceDefinition:
     """Describes a service a module wants to register."""
 
-    __slots__ = ("name", "handler", "schema")
-
-    def __init__(
-        self,
-        name: str,
-        handler: Any,
-        schema: vol.Schema | None = None,
-    ) -> None:
-        self.name = name
-        self.handler = handler
-        self.schema = schema
+    name: str
+    handler_method: str
+    schema: vol.Schema | None = None
 
 
 class JuicePatrolModule(ABC):
@@ -61,12 +63,14 @@ class JuicePatrolModule(ABC):
     async def async_teardown(self) -> None:
         """Tear down the module. Called in reverse dependency order."""
 
-    def ws_handlers(self) -> list:
-        """Return WebSocket handler functions to register."""
+    @classmethod
+    def ws_command_definitions(cls) -> list[WsCommandDefinition]:
+        """Return WS command definitions (class-level, no instance needed)."""
         return []
 
-    def services(self) -> list[ServiceDefinition]:
-        """Return service definitions to register."""
+    @classmethod
+    def service_definitions(cls) -> list[ServiceDefinition]:
+        """Return service definitions (class-level, no instance needed)."""
         return []
 
     def get_entity_data(
@@ -74,6 +78,7 @@ class JuicePatrolModule(ABC):
         entity_id: str,
         battery: DiscoveredBattery,
         base_data: dict[str, Any],
+        device_data: DeviceData | None,
     ) -> dict[str, Any]:
         """Return additional data to merge into entity data dict."""
         return {}
@@ -104,8 +109,8 @@ class ModuleRegistry:
         return self._modules.get(module_id)
 
     async def async_setup_all(self) -> None:
-        """Discover, resolve dependencies, and set up all modules."""
-        discovered = self._discover_module_classes()
+        """Resolve dependencies and set up all modules."""
+        discovered = {cls.MODULE_ID: cls for cls in MODULES}
         order = self._resolve_order(discovered)
 
         for module_id in order:
@@ -144,43 +149,29 @@ class ModuleRegistry:
         self._modules.clear()
         self._setup_order.clear()
 
-    def collect_ws_handlers(self) -> list:
-        """Gather WebSocket handlers from all loaded modules."""
-        handlers = []
-        for module in self.modules_in_order:
-            try:
-                handlers.extend(module.ws_handlers())
-            except Exception:
-                _LOGGER.exception(
-                    "Module '%s' failed to provide WS handlers",
-                    module.MODULE_ID,
-                )
-        return handlers
-
-    def collect_services(self) -> list[ServiceDefinition]:
-        """Gather service definitions from all loaded modules."""
-        services = []
-        for module in self.modules_in_order:
-            try:
-                services.extend(module.services())
-            except Exception:
-                _LOGGER.exception(
-                    "Module '%s' failed to provide services",
-                    module.MODULE_ID,
-                )
-        return services
-
     def enrich_entity_data(
         self,
         entity_id: str,
         battery: DiscoveredBattery,
         base_data: dict[str, Any],
+        device_data: DeviceData | None,
     ) -> dict[str, Any]:
         """Let each module enrich the entity data dict."""
         for module in self.modules_in_order:
             try:
-                extra = module.get_entity_data(entity_id, battery, base_data)
+                extra = module.get_entity_data(
+                    entity_id, battery, base_data, device_data
+                )
                 if extra:
+                    if _LOGGER.isEnabledFor(logging.DEBUG):
+                        overlap = set(extra) & set(base_data)
+                        if overlap:
+                            _LOGGER.debug(
+                                "Module '%s' overwrites keys %s for %s",
+                                module.MODULE_ID,
+                                overlap,
+                                entity_id,
+                            )
                     base_data.update(extra)
             except Exception:
                 _LOGGER.exception(
@@ -218,32 +209,6 @@ class ModuleRegistry:
         return diag
 
     @staticmethod
-    def _discover_module_classes() -> dict[str, type[JuicePatrolModule]]:
-        """Import all sub-packages and find JuicePatrolModule subclasses."""
-        from . import __path__ as pkg_path, __name__ as pkg_name
-
-        classes: dict[str, type[JuicePatrolModule]] = {}
-        for importer, modname, ispkg in pkgutil.iter_modules(pkg_path):
-            if not ispkg:
-                continue
-            try:
-                mod = importlib.import_module(f"{pkg_name}.{modname}")
-            except Exception:
-                _LOGGER.exception("Failed to import module package '%s'", modname)
-                continue
-
-            for attr_name in dir(mod):
-                attr = getattr(mod, attr_name)
-                if (
-                    isinstance(attr, type)
-                    and issubclass(attr, JuicePatrolModule)
-                    and attr is not JuicePatrolModule
-                    and hasattr(attr, "MODULE_ID")
-                ):
-                    classes[attr.MODULE_ID] = attr
-        return classes
-
-    @staticmethod
     def _resolve_order(
         classes: dict[str, type[JuicePatrolModule]],
     ) -> list[str]:
@@ -271,3 +236,18 @@ class ModuleRegistry:
         for mid in classes:
             visit(mid)
         return order
+
+
+# Explicit module list — add new modules here.
+# Imported after class definitions to avoid circular imports.
+from .battery_id import BatteryIdModule  # noqa: E402
+from .monitoring import MonitoringModule  # noqa: E402
+from .replacement import ReplacementModule  # noqa: E402
+from .shopping import ShoppingModule  # noqa: E402
+
+MODULES: list[type[JuicePatrolModule]] = [
+    BatteryIdModule,
+    MonitoringModule,
+    ReplacementModule,
+    ShoppingModule,
+]

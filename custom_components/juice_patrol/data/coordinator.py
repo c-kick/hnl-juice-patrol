@@ -16,6 +16,7 @@ from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from ..const import (
+    BATTERY_STATE_VALUES,
     CONF_LOW_THRESHOLD,
     CONF_STALE_TIMEOUT,
     DEFAULT_LOW_THRESHOLD,
@@ -39,7 +40,6 @@ _LOGGER = logging.getLogger(__name__)
 
 # Minimum interval between WS-triggered refreshes (seconds)
 _WS_REFRESH_MIN_INTERVAL = 5.0
-
 
 class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Coordinator that manages battery discovery, tracking, and state."""
@@ -68,12 +68,51 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._unsub_entity_listener: CALLBACK_TYPE | None = None
         self._discovery_debounce_task: asyncio.Task | None = None
         self._sibling_to_source: dict[str, str] = {}
+        self._source_to_sibling: dict[str, str] = {}
         self._initial_build_done = asyncio.Event()
+
+        # Generic data-update hooks (modules subscribe via these)
+        self._on_entity_updated: list[Callable[[str, dict[str, Any]], None]] = []
+        self._on_full_update: list[Callable[[dict[str, Any]], None]] = []
 
     def async_register_new_device_callback(
         self, cb: Callable[[list[str]], None]
     ) -> None:
         self._new_device_callbacks.append(cb)
+
+    @callback
+    def async_on_entity_updated(
+        self, cb: Callable[[str, dict[str, Any]], None]
+    ) -> Callable[[], None]:
+        """Register a callback for single-entity rebuilds. Returns unsub."""
+        self._on_entity_updated.append(cb)
+
+        def _unsub() -> None:
+            self._on_entity_updated.remove(cb)
+
+        return _unsub
+
+    @callback
+    def async_on_full_update(
+        self, cb: Callable[[dict[str, Any]], None]
+    ) -> Callable[[], None]:
+        """Register a callback for full data builds. Returns unsub."""
+        self._on_full_update.append(cb)
+
+        def _unsub() -> None:
+            self._on_full_update.remove(cb)
+
+        return _unsub
+
+    def get_sibling_battery_state(self, entity_id: str) -> str | None:
+        """Return the current state of the charging-state sibling, if any."""
+        sibling_id = self._source_to_sibling.get(entity_id)
+        if sibling_id is None:
+            return None
+        state = self.hass.states.get(sibling_id)
+        if state and state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN, None):
+            return state.state
+        return None
 
     @property
     def low_threshold(self) -> int:
@@ -134,18 +173,28 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 device_id=battery.device_id,
             )
 
-        # Discover sibling battery_state entities for charging state tracking
+        # Discover sibling battery-state entities by checking current state
+        # values — NOT by matching entity_id substrings (locale-dependent).
         self._sibling_to_source = {}
+        self._source_to_sibling = {}
         ent_reg = er.async_get(self.hass)
         for battery in batteries:
             if not battery.device_id:
                 continue
             for entry in er.async_entries_for_device(ent_reg, battery.device_id):
+                if entry.entity_id == battery.entity_id:
+                    continue
+                sibling_state = self.hass.states.get(entry.entity_id)
                 if (
-                    "battery_state" in entry.entity_id
-                    and entry.entity_id != battery.entity_id
+                    sibling_state is not None
+                    and sibling_state.state not in (
+                        STATE_UNAVAILABLE, STATE_UNKNOWN, None
+                    )
+                    and sibling_state.state.lower().replace(" ", "_")
+                    in BATTERY_STATE_VALUES
                 ):
                     self._sibling_to_source[entry.entity_id] = battery.entity_id
+                    self._source_to_sibling[battery.entity_id] = entry.entity_id
 
         # Replace state listener with one covering all entities
         if self._unsub_state_listener:
@@ -278,10 +327,9 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         data = dict(self.data) if self.data else {}
         data[entity_id] = entity_data
 
-        # Fire events via monitoring module
-        monitoring = self.registry.get_module("monitoring")
-        if monitoring is not None:
-            monitoring.fire_events_for_entity(entity_id, entity_data)
+        # Notify subscribers (e.g. monitoring module for event firing)
+        for cb in self._on_entity_updated:
+            cb(entity_id, entity_data)
 
         self.async_set_updated_data(data)
 
@@ -305,6 +353,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self, entity_id: str, battery: DiscoveredBattery
     ) -> dict[str, Any]:
         """Build the data dict for a single entity — core fields + module enrichment."""
+        device_data = self.store.get_device(entity_id)
         base_data: dict[str, Any] = {
             "level": battery.current_level,
             "device_name": battery.device_name,
@@ -315,7 +364,9 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "model": battery.model,
             "last_calculated": time.time(),
         }
-        return self.registry.enrich_entity_data(entity_id, battery, base_data)
+        return self.registry.enrich_entity_data(
+            entity_id, battery, base_data, device_data
+        )
 
     async def _async_build_full_data(self) -> dict[str, Any]:
         data: dict[str, Any] = {}
@@ -339,10 +390,9 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 len(self.discovered),
             )
 
-        # Fire events via monitoring module
-        monitoring = self.registry.get_module("monitoring")
-        if monitoring is not None:
-            monitoring.fire_events(data)
+        # Notify subscribers (e.g. monitoring module for event firing)
+        for cb in self._on_full_update:
+            cb(data)
 
         return data
 
@@ -372,5 +422,7 @@ class JuicePatrolCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._pending_rebuilds.clear()
         self._new_device_callbacks.clear()
         await self.registry.async_teardown_all()
+        self._on_entity_updated.clear()
+        self._on_full_update.clear()
         await self.store.async_save()
         await super().async_shutdown()
