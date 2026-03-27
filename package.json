@@ -5,6 +5,7 @@
   "description": "Juice Patrol — predictive battery monitoring for Home Assistant",
   "license": "MIT",
   "dependencies": {
+    "chart.js": "^4.5.1",
     "lit": "^3.3.0"
   },
   "devDependencies": {

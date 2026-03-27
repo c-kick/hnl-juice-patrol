@@ -5,6 +5,8 @@ import {
 } from "../helpers.js";
 import { CSS_SUCCESS, CSS_WARNING, CSS_ERROR, CSS_SECONDARY_TEXT } from "../colors.js";
 
+const CHART_CANVAS_ID = "jp-detail-chart-canvas";
+
 /**
  * Render the full detail view for a single device.
  */
@@ -17,7 +19,30 @@ export function renderDetailView(panel) {
 
   return html`
     ${renderHeroCard(panel, dev)}
+    ${renderHistoryChart(panel)}
     ${renderReplacementHistory(panel, dev)}
+  `;
+}
+
+// ── History Chart ──────────────────────────────────────────────────────────
+
+function renderHistoryChart(panel) {
+  return html`
+    <ha-card style="margin-bottom:16px">
+      ${panel._chartLoading ? html`
+        <div class="loading-state">
+          <ha-spinner></ha-spinner>
+        </div>
+      ` : panel._chartData && panel._chartData.length > 0 ? html`
+        <div style="padding:16px 16px 8px">
+          <div style="height:200px;position:relative">
+            <canvas id="${CHART_CANVAS_ID}"></canvas>
+          </div>
+        </div>
+      ` : html`
+        <div class="empty-state">No history available</div>
+      `}
+    </ha-card>
   `;
 }
 

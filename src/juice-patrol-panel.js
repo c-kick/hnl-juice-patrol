@@ -10,6 +10,8 @@ import { buildColumns } from "./columns.js";
 import { renderDetailView } from "./views/detail.js";
 import { renderShoppingList } from "./views/shopping.js";
 import { renderDashboard, initTimelineChart } from "./views/dashboard.js";
+import { initDetailChart, destroyDetailChart } from "./views/chart.js";
+import { fetchDeviceHistory } from "./history.js";
 import {
   showReplaceDialog, showReplaceRechargeableDialog,
   showConfirmDialog, showBatteryTypeDialog,
@@ -32,6 +34,8 @@ class JuicePatrolPanel extends LitElement {
       _ignoredEntities: { state: true },
       _filters: { state: true },
       _dashboardLoading: { state: true },
+      _chartData: { state: true },
+      _chartLoading: { state: true },
     };
   }
 
@@ -54,6 +58,9 @@ class JuicePatrolPanel extends LitElement {
     this._ignoredEntities = null;
     this._filters = { status: { value: ["active", "low"] } };
     this._dashboardLoading = false;
+    this._chartData = null;
+    this._chartLoading = false;
+    this._detailChart = null;
     this._sorting = { column: "level", direction: "asc" };
     this._flashCleanupTimer = null;
     this._refreshTimer = null;
@@ -206,6 +213,10 @@ class JuicePatrolPanel extends LitElement {
 
   updated(changed) {
     // Init fleet/type charts when dashboard is active
+    if (this._activeView === "detail" && !this._chartLoading &&
+        this._chartData && changed.has("_chartData")) {
+      requestAnimationFrame(() => initDetailChart(this));
+    }
     if (this._activeView === "dashboard" && this._fleetData &&
         (changed.has("_entities") || changed.has("_activeView"))) {
       // Always reinit when the view changed (DOM containers are fresh).
@@ -257,6 +268,14 @@ class JuicePatrolPanel extends LitElement {
       if (this._activeView !== "detail") {
         this._entities = this._entityList;
       }
+    }
+
+    // On a direct URL load the detail view is set by _syncViewFromUrl before
+    // hass/entities are available. Trigger the history fetch once entities arrive.
+    if (this._activeView === "detail" && this._detailEntity &&
+        this._chartData === null && !this._chartLoading &&
+        this._entityMap.get(this._detailEntity)) {
+      this._loadDetailHistory(this._detailEntity);
     }
 
     if (isFirstLoad) {
@@ -317,7 +336,7 @@ class JuicePatrolPanel extends LitElement {
         dev.lastReplaced = attrs.last_replaced ?? null;
         dev.isRechargeable = attrs.is_rechargeable ?? false;
         dev.rechargeableReason = attrs.rechargeable_reason ?? null;
-        dev.chargingState = attrs.charging_state ?? null;
+        dev.chargingState = attrs.charging_state ? attrs.charging_state.toLowerCase() : null;
         dev.manufacturer = attrs.manufacturer ?? null;
         dev.model = attrs.model ?? null;
         dev.platform = attrs.platform ?? null;
@@ -681,14 +700,32 @@ class JuicePatrolPanel extends LitElement {
   _openDetail(entityId) {
     // Save scroll position to current history entry before pushing detail
     this._saveScrollPosition();
+    destroyDetailChart(this);
+    this._chartData = null;
     this._detailEntity = entityId;
     this._activeView = "detail";
     const detailUrl = `${this._basePath}/detail/${encodeURIComponent(entityId)}`;
     history.pushState({ view: "detail", entityId }, "", detailUrl);
+    this._loadDetailHistory(entityId);
   }
 
   _closeDetail() {
+    destroyDetailChart(this);
+    this._chartData = null;
     history.back();
+  }
+
+  async _loadDetailHistory(entityId) {
+    const dev = this._getDevice(entityId);
+    if (!dev?.sourceEntity) return;
+    this._chartLoading = true;
+    try {
+      this._chartData = await fetchDeviceHistory(this._hass, dev.sourceEntity);
+    } catch (_) {
+      this._chartData = [];
+    } finally {
+      this._chartLoading = false;
+    }
   }
 
   /** Find the .scroller element inside the data table's shadow DOM. */
