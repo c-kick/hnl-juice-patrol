@@ -10,7 +10,7 @@ import { buildColumns } from "./columns.js";
 import { renderDetailView } from "./views/detail.js";
 import { renderShoppingList } from "./views/shopping.js";
 import { renderDashboard, initTimelineChart } from "./views/dashboard.js";
-import { initDetailChart, destroyDetailChart } from "./views/chart.js";
+import { initDetailChart, destroyDetailChart, renderChartDevPanel, CHART_DEV_DEFAULTS } from "./views/chart.js";
 import { fetchDeviceHistory } from "./history.js";
 import {
   showReplaceDialog, showReplaceRechargeableDialog,
@@ -36,6 +36,7 @@ class JuicePatrolPanel extends LitElement {
       _dashboardLoading: { state: true },
       _chartData: { state: true },
       _chartLoading: { state: true },
+      _chartDevSettings: { state: true },
     };
   }
 
@@ -60,6 +61,7 @@ class JuicePatrolPanel extends LitElement {
     this._dashboardLoading = false;
     this._chartData = null;
     this._chartLoading = false;
+    this._chartDevSettings = { ...CHART_DEV_DEFAULTS };
     this._detailChart = null;
     this._sorting = { column: "level", direction: "asc" };
     this._flashCleanupTimer = null;
@@ -713,6 +715,11 @@ class JuicePatrolPanel extends LitElement {
     destroyDetailChart(this);
     this._chartData = null;
     history.back();
+  }
+
+  _updateChartDev(key, value) {
+    this._chartDevSettings = { ...this._chartDevSettings, [key]: value };
+    initDetailChart(this);
   }
 
   async _loadDetailHistory(entityId) {

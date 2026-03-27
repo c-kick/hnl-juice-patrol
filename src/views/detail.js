@@ -4,6 +4,7 @@ import {
   getLevelColor, formatLevel, formatDate, getDeviceSubText,
 } from "../helpers.js";
 import { CSS_SUCCESS, CSS_WARNING, CSS_ERROR, CSS_SECONDARY_TEXT } from "../colors.js";
+import { renderChartDevPanel } from "./chart.js";
 
 const CHART_CANVAS_ID = "jp-detail-chart-canvas";
 
@@ -20,6 +21,7 @@ export function renderDetailView(panel) {
   return html`
     ${renderHeroCard(panel, dev)}
     ${renderHistoryChart(panel)}
+    ${renderChartDevPanel(panel)}
     ${renderReplacementHistory(panel, dev)}
   `;
 }
@@ -35,7 +37,7 @@ function renderHistoryChart(panel) {
         </div>
       ` : panel._chartData && panel._chartData.length > 0 ? html`
         <div style="padding:16px 16px 8px">
-          <div style="height:200px;position:relative">
+          <div style="height:30vh;position:relative">
             <canvas id="${CHART_CANVAS_ID}"></canvas>
           </div>
         </div>

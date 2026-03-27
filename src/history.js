@@ -40,7 +40,7 @@ export async function fetchDeviceHistory(hass, sourceEntityId) {
   if (Array.isArray(stats) && stats.length > 0) {
     return stats
       .filter((s) => s.mean != null)
-      .map((s) => ({ x: s.start, y: s.mean }));
+      .map((s) => ({ x: s.start, y: _clamp(s.mean) }));
   }
 
   // Fallback: raw state history for entities without long-term statistics
@@ -60,7 +60,9 @@ export async function fetchDeviceHistory(hass, sourceEntityId) {
     .filter((s) => s.s !== "unavailable" && s.s !== "unknown" && s.s != null)
     .map((s) => {
       const y = parseFloat(s.s);
-      return isNaN(y) ? null : { x: Math.round(s.lu * 1000), y };
+      return isNaN(y) ? null : { x: Math.round(s.lu * 1000), y: _clamp(y) };
     })
     .filter(Boolean);
 }
+
+const _clamp = (v) => Math.min(100, Math.max(0, v));
