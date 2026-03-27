@@ -1,20 +1,32 @@
 # Juice Patrol
-**Predictive Battery Monitoring for Home Assistant**
+**Battery Monitoring for Home Assistant**
 
 > **Warning:** This project is in early alpha. Expect breaking changes, incomplete features, and rough edges. Use at your own risk.
 
-Juice Patrol auto-discovers all battery-powered devices, tracks their discharge curves over time, predicts when batteries will die, and fires events for notifications — all without manual per-device configuration.
+Juice Patrol auto-discovers all battery-powered devices in Home Assistant, tracks their discharge history, and provides a dedicated panel for monitoring and managing batteries across your home — without any manual per-device configuration.
 
 ## Features
 
-- **Auto-discovery** — finds every entity/device with a battery
-- **Discharge tracking** — persistent storage of battery readings over time
-- **Prediction** — estimated time-to-empty per device using weighted regression
-- **Alerts** — configurable threshold and prediction-based events
-- **Per-device sensors** — battery level, discharge rate, predicted empty date, days remaining
-- **Summary sensors** — lowest battery, attention needed
-- **Battery replacement detection** — segments discharge curves on replacement
-- **Stale device detection** — flags devices that stop reporting
+- **Auto-discovery** — finds every entity with a battery sensor, no configuration needed
+- **Discharge history** — reads from HA recorder statistics; full history available immediately
+- **Discharge extrapolation** — projects time-to-empty in real time using chemistry-specific discharge curves (alkaline, lithium primary, Li-Ion, NiMH), computed directly in the browser with no backend overhead
+- **Alerts** — fires HA events when a device drops below threshold or stops reporting
+- **Per-device sensors** — battery level mirrored as a JP sensor with device metadata attached
+- **Summary sensor** — tracks the device with the lowest battery across your installation
+- **Battery type identification** — auto-detected from device attributes, Battery Notes integration, or set manually
+- **Rechargeable device support** — mark devices as rechargeable; handled separately from primary cells
+- **Battery replacement history** — manually record replacements; undo support
+- **Stale device detection** — flags devices that stop reporting for a configurable period
+- **Shopping list** — tracks which batteries need replacing
+- **Custom panel** — full-featured dashboard with device table, detail view with history chart, and shopping list
+
+## The Panel
+
+Juice Patrol adds a sidebar panel with three views:
+
+- **Dashboard** — sortable table of all monitored devices with battery level, type, and status badges
+- **Detail view** — per-device history chart with LTTB-decimated discharge curve and a chemistry-informed projection to 0%
+- **Shopping list** — devices that need new batteries
 
 ## Installation
 
@@ -40,19 +52,15 @@ On first setup, you set a global low battery threshold (default: 20%).
 Additional settings are available in the integration's options:
 - **Low battery threshold** — percentage below which a device is flagged
 - **Stale timeout** — hours without a reading before a device is flagged as stale
-- **Max readings** — maximum stored readings per device (FIFO eviction)
-- **Prediction horizon** — days ahead to alert on predicted low battery
 
 ## Events
 
-Juice Patrol fires events that you can use in automations:
+Juice Patrol fires events you can use in automations:
 
 | Event | Description |
 |---|---|
 | `juice_patrol_battery_low` | Device dropped below threshold |
-| `juice_patrol_battery_predicted_low` | Device predicted to hit threshold within horizon |
 | `juice_patrol_device_stale` | Device stopped reporting |
-| `juice_patrol_device_replaced` | Battery replacement detected |
 
 ## License
 
