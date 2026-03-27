@@ -1,4 +1,4 @@
-import { html } from "lit";
+import { html, nothing } from "lit";
 import { STYLE_SECONDARY, STYLE_SUB_TEXT, STYLE_BADGE_ROW } from "./constants.js";
 import {
   getBatteryIcon, getLevelColor, formatLevel, isActivelyCharging,

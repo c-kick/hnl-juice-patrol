@@ -1003,13 +1003,13 @@ const x=globalThis,w=e=>e,$=x.trustedTypes,k=$?$.createPolicy("lit-html",{create
       `},name:{title:"Device",main:!0,sortable:!0,filterable:!0,filterKey:"_searchText",direction:"asc",flex:3,showNarrow:!0,template:t=>{const i=function(e,t){const i=[],a=t._settingsValues?.low_threshold??20;if(e.isLow){const t=e.threshold??a;i.push({label_id:"low",name:"LOW",color:Te,description:`Battery is at ${De(e.level)}%, below the ${t}% threshold`})}e.isStale&&i.push({label_id:"stale",name:"STALE",color:Ce,description:"No battery reading received within the stale timeout period"});e.isRechargeable&&function(e){return e.isRechargeable&&"charging"===e.chargingState}(e)&&i.push({label_id:"charging",name:"Charging",icon:"mdi:battery-charging",color:Le,description:"Currently charging"});return i}(t,e),a=Pe(t);return O`
           <div style="overflow:hidden">
             <span>${t.name||t.sourceEntity}</span>
-            ${a?O`<div style=${"font-size:11px;color:var(--secondary-text-color);opacity:0.7;margin-top:1px"}>${a}</div>`:nothing}
+            ${a?O`<div style=${"font-size:11px;color:var(--secondary-text-color);opacity:0.7;margin-top:1px"}>${a}</div>`:B}
             ${i.length?O`<div style=${"display:flex;flex-wrap:wrap;gap:4px;margin-top:4px"}>${i.map(e=>function(e){return O`
     <span title=${e.description||""} style="display:inline-flex;align-items:center;gap:2px;font-size:11px;font-weight:500;padding:1px 8px;border-radius:10px;white-space:nowrap;background:color-mix(in srgb, ${e.color} 20%, transparent);color:${e.color}">
       ${e.icon?O`<ha-icon icon=${e.icon} style="--mdc-icon-size:14px"></ha-icon>`:B}
       ${e.name}
     </span>
-  `}(e))}</div>`:nothing}
+  `}(e))}</div>`:B}
           </div>
         `}},level:{title:"Level",sortable:!0,type:"numeric",valueColumn:"_levelSort",minWidth:"70px",maxWidth:"90px",showNarrow:!0,template:e=>{const i=ze(e.level,e.threshold,t);return O`<span style="color:${i};font-weight:500">${Re(e.level)}</span>`}},batteryType:{title:"Type",sortable:!0,minWidth:"60px",maxWidth:"90px",template:e=>O`<span
         style="font-size:12px;color:var(--secondary-text-color)"
