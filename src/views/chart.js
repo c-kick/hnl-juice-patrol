@@ -25,6 +25,21 @@ Chart.register(Legend, LineController, LineElement, PointElement, LinearScale, F
 const CANVAS_ID = "jp-detail-chart-canvas";
 const FILL_ALPHA = 0.15;
 
+// How steeply the remaining level drops over time for each chemistry.
+// y = currentLevel * (1 - t)^exponent, t ∈ [0,1], t=1 means dead.
+// n > 1 → flat start, steeper end (alkaline/lithium); n = 1 → linear (NiMH).
+const CHEMISTRY_EXPONENTS = {
+  alkaline: 1.5,
+  lithium_primary: 2.2,
+  li_ion: 1.3,
+  nimh: 1.0,
+};
+
+// Cap extrapolation at 10 years to avoid absurd projections.
+// 3 years was too tight — slow-discharge batteries (4× AA, coin cells in
+// low-traffic devices) legitimately project beyond 3 years.
+const MAX_EXTRAPOLATION_MS = 10 * 365.25 * 24 * 3600 * 1000;
+
 export const CHART_DEV_DEFAULTS = {
   decimationEnabled: true,
   algorithm: "lttb",
@@ -66,6 +81,10 @@ export function initDetailChart(panel) {
     ? _lttb(data, s.samples)
     : data;
 
+  // Projected series: chemistry-informed extrapolation to 0%.
+  const chemistry = _classifyChemistry(dev?.batteryType);
+  const projectedData = _buildExtrapolation(primaryData, chemistry);
+
   // Gradient factory — called on each render so chartArea is always current.
   const makeGradient = (ctx, chartArea, alpha) =>
     _buildThresholdGradient(ctx, chartArea, threshold, colorOk, colorWarn, colorLow, alpha);
@@ -105,6 +124,25 @@ export function initDetailChart(panel) {
           ? makeGradient(chart.ctx, chart.chartArea, FILL_ALPHA * s.primaryOpacity)
           : _toRgba(colorOk, FILL_ALPHA * s.primaryOpacity),
       },
+      // Projected series — chemistry-informed extrapolation to 0%, dotted
+      {
+        label: "Projected",
+        data: projectedData,
+        parsing: false,
+        borderWidth: s.borderWidth,
+        borderDash: [6, 4],
+        pointRadius: 0,
+        pointHoverRadius: 4,
+        fill: true,
+        tension: s.tension,
+        order: 1,
+        borderColor: ({ chart }) => chart.chartArea
+          ? makeGradient(chart.ctx, chart.chartArea, s.primaryOpacity)
+          : colorOk,
+        backgroundColor: ({ chart }) => chart.chartArea
+          ? makeGradient(chart.ctx, chart.chartArea, FILL_ALPHA * s.primaryOpacity)
+          : _toRgba(colorOk, FILL_ALPHA * s.primaryOpacity),
+      },
     ],
   };
 
@@ -117,7 +155,9 @@ export function initDetailChart(panel) {
       x: {
         type: "linear",
         min: data[0].x,
-        max: data[data.length - 1].x,
+        max: projectedData.length > 0
+          ? projectedData[projectedData.length - 1].x
+          : data[data.length - 1].x,
         grid: { color: gridColor },
         ticks: {
           color: textColor,
@@ -173,6 +213,14 @@ export function initDetailChart(panel) {
       : _toRgba(colorOk, FILL_ALPHA * s.primaryOpacity);
     ds[1].tension = s.tension;
     ds[1].borderWidth = s.borderWidth;
+    ds[2].data = projectedData;
+    ds[2].borderColor = ({ chart: c }) => c.chartArea
+      ? makeGradient(c.ctx, c.chartArea, s.primaryOpacity) : colorOk;
+    ds[2].backgroundColor = ({ chart: c }) => c.chartArea
+      ? makeGradient(c.ctx, c.chartArea, FILL_ALPHA * s.primaryOpacity)
+      : _toRgba(colorOk, FILL_ALPHA * s.primaryOpacity);
+    ds[2].tension = s.tension;
+    ds[2].borderWidth = s.borderWidth;
     panel._detailChart.options = options;
     panel._detailChart.update();
   } else {
@@ -282,6 +330,81 @@ export function renderChartDevPanel(panel) {
       </ha-expansion-panel>
     </ha-card>
   `;
+}
+
+/**
+ * Map battery type string (from Battery Notes / attributes) to a chemistry key.
+ * Strips quantity prefixes like "2× " or "3x " before matching.
+ */
+function _classifyChemistry(batteryType) {
+  if (!batteryType) return null;
+  const t = batteryType.toLowerCase().replace(/^\d+\s*[×x]\s*/, '').trim();
+  if (/^(cr|er|br|dl)\d|^lithium\b/.test(t)) return 'lithium_primary';
+  if (/18650|21700|26650|lifepo|li[-_]?ion|li[-_]?po/.test(t)) return 'li_ion';
+  if (/ni[-_]?mh|ni[-_]?cd|^hr\d/.test(t)) return 'nimh';
+  if (/^aaa?$|^[cd]$|^9v$|alkaline/.test(t)) return 'alkaline';
+  return null;
+}
+
+/**
+ * Estimate discharge rate (% per ms, positive = discharging).
+ *
+ * Uses the terminal slope (last two LTTB points) so the projection responds to
+ * decimation settings. Clamps to the full-span average when the terminal slope
+ * is steeper — this prevents LTTB anomaly amplification (e.g. a sensor
+ * recalibration event picked up as an inflection point producing a wildly
+ * pessimistic projection). When the terminal slope is flatter than average,
+ * it wins — the battery is genuinely slowing down.
+ * Falls back to full span when the terminal segment is flat or rising.
+ */
+function _estimateDischargeRate(points) {
+  if (points.length < 2) return 0;
+  const last = points[points.length - 1];
+  const prev = points[points.length - 2];
+
+  const fullDt = last.x - points[0].x;
+  const fullDy = points[0].y - last.y;
+  const fullRate = fullDt > 0 ? fullDy / fullDt : 0;
+
+  const localDt = last.x - prev.x;
+  const localDy = prev.y - last.y;
+  // Require > 0.1% drop to exclude recorder fp noise (hourly means like
+  // 56.000001852... produce a technically positive but meaningless local_dy).
+  const localRate = localDt > 0 && localDy > 0.1 ? localDy / localDt : 0;
+
+  // Prefer local rate; clamp to full-span when local is steeper (anomaly guard).
+  if (localRate > 0 && fullRate > 0) return Math.min(localRate, fullRate);
+  return fullRate > 0 ? fullRate : localRate;
+}
+
+/**
+ * Build the projected discharge curve from the last LTTB point to 0%.
+ *
+ * Uses y = lastY * (1 - t)^exponent to model chemistry-specific curve shape.
+ * Returns [] when the battery is already dead, rate is non-positive, or the
+ * projected lifetime exceeds MAX_EXTRAPOLATION_MS.
+ */
+function _buildExtrapolation(primaryData, chemistry) {
+  if (primaryData.length < 2) return [];
+  const last = primaryData[primaryData.length - 1];
+  if (last.y <= 0) return [];
+
+  const rate = _estimateDischargeRate(primaryData);
+  if (rate <= 0) return [];
+
+  const timeToEmpty = last.y / rate;
+  if (timeToEmpty > MAX_EXTRAPOLATION_MS) return [];
+
+  const exponent = CHEMISTRY_EXPONENTS[chemistry] ?? 1.0;
+  const pts = [];
+  for (let i = 0; i <= 30; i++) {
+    const t = i / 30;
+    pts.push({
+      x: last.x + t * timeToEmpty,
+      y: Math.max(0, last.y * Math.pow(1 - t, exponent)),
+    });
+  }
+  return pts;
 }
 
 function _destroyChart(panel) {
